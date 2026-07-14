@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport"/>
+<title>情侣日记 - 登录</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-error-container": "#93000a",
+                    "on-primary-fixed": "#400014",
+                    "surface-container": "#ffffff",
+                    "surface-container-low": "#fff0f1",
+                    "secondary-container": "#a6e2ff",
+                    "on-primary": "#ffffff",
+                    "surface-tint": "#ff8fa3",
+                    "secondary": "#24657e",
+                    "surface-container-highest": "#f0dee0",
+                    "primary-container": "#ff8fa3",
+                    "on-secondary-container": "#24667f",
+                    "surface-container-lowest": "#ffffff",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "surface-bright": "#fff8f7",
+                    "tertiary-fixed": "#ffdea9",
+                    "surface": "#fff8f7",
+                    "on-tertiary-fixed": "#271900",
+                    "surface-container-high": "#f6e4e5",
+                    "error-container": "#ffdad6",
+                    "on-secondary": "#ffffff",
+                    "surface-dim": "#e7d6d7",
+                    "inverse-surface": "#382e2f",
+                    "surface-variant": "#f0dee0",
+                    "on-background": "#22191a",
+                    "on-surface-variant": "#8c7b7c",
+                    "inverse-on-surface": "#feedee",
+                    "outline-variant": "#dac0c3",
+                    "inverse-primary": "#ffb2bd",
+                    "primary": "#ff8fa3",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "on-secondary-fixed": "#001f2a",
+                    "secondary-fixed": "#bde9ff",
+                    "on-surface": "#4a3a3b",
+                    "tertiary-container": "#e6a500",
+                    "outline": "#877274",
+                    "on-primary-container": "#ffffff",
+                    "primary-fixed": "#ffd9dd",
+                    "on-error": "#ffffff",
+                    "background": "#fff8f7",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "on-tertiary-container": "#5a3e00",
+                    "on-tertiary": "#ffffff",
+                    "error": "#ba1a1a",
+                    "tertiary": "#7d5800",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "action-rose": "#9c4b57"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px",
+                    "3xl": "24px"
+            },
+            "spacing": {
+                    "container-padding": "24px",
+                    "xs": "4px",
+                    "md": "20px",
+                    "xl": "48px",
+                    "gutter": "16px",
+                    "lg": "32px",
+                    "base": "8px",
+                    "sm": "12px"
+            },
+            "fontFamily": {
+                    "caption": ["Be Vietnam Pro"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "label-md": ["Be Vietnam Pro"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"],
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "body-lg": ["Be Vietnam Pro"],
+                    "title-md": ["Plus Jakarta Sans"]
+            },
+            "fontSize": {
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        @keyframes soft-breath {
+            0%, 100% { transform: scale(1); box-shadow: 0 0 0 rgba(255, 143, 163, 0); }
+            50% { transform: scale(1.05); box-shadow: 0 0 20px rgba(255, 143, 163, 0.2); }
+        }
+        @keyframes floating-heart {
+            0% { transform: translateY(0) rotate(0deg); opacity: 0; }
+            50% { opacity: 0.6; }
+            100% { transform: translateY(-100vh) rotate(360deg); opacity: 0; }
+        }
+        .animate-breath {
+            animation: soft-breath 3s ease-in-out infinite;
+        }
+        .role-selected {
+            border: 3px solid #ff8fa3 !important;
+            background-color: #fff0f1 !important;
+            transform: scale(1.05);
+        }
+        .role-selected .role-text {
+            color: #ff8fa3 !important;
+            font-weight: 700;
+        }
+        .heart-particle {
+            position: fixed;
+            pointer-events: none;
+            z-index: 1;
+            color: #ff8fa3;
+            opacity: 0;
+        }
+        .glass-panel {
+            background: rgba(255, 248, 247, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+        body {
+          min-height: max(884px, 100dvh);
+        }
+    </style>
+</head>
+<body class="bg-background min-h-screen flex flex-col items-center overflow-x-hidden text-on-surface">
+<!-- Floating Hearts Background -->
+<div class="fixed inset-0 pointer-events-none z-0" id="heart-container"></div>
+<!-- Top Glow Background -->
+<div class="fixed top-[-10%] left-[-10%] w-[120%] h-[40%] bg-gradient-to-b from-primary-fixed to-transparent opacity-20 pointer-events-none"></div>
+<main class="flex-grow w-full max-w-md px-container-padding flex flex-col justify-between py-12 relative z-10">
+<!-- Header Branding -->
+<div class="text-center mt-8">
+<div class="w-20 h-20 bg-primary-container rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-[0_8px_24px_rgba(255,143,163,0.15)] animate-breath">
+<span class="material-symbols-outlined text-on-primary-container text-4xl" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-primary tracking-tight">情侣日记</h1>
+<p class="font-body-md text-body-md text-on-surface-variant mt-2">记录你们的每一个心动时刻</p>
+</div>
+<!-- Role Selection Section -->
+<div class="mt-12">
+<h2 class="font-title-md text-title-md text-center text-on-surface mb-8">选择你的身份</h2>
+<div class="grid grid-cols-2 gap-gutter px-2">
+<!-- Role: He -->
+<button class="group flex flex-col items-center p-6 bg-surface-container rounded-3xl border-2 border-transparent transition-all duration-300 shadow-[0_8px_24px_rgba(255,143,163,0.05)] active:scale-95" id="role-he" onclick="selectRole('he')">
+<div class="w-24 h-24 rounded-full bg-secondary-fixed mb-4 flex items-center justify-center overflow-hidden border-4 border-white shadow-sm animate-breath" style="animation-duration: 4s;">
+<img alt="He Avatar" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBkBxzmZFLKVskzX69PqXQNszMP6OjT9hpoHud6-HUcU_dg7PKB-PR2lp7XvQ_5jxtv0gUJd2bNIPzlWitxMyotsYm004moiZvqx7_Du_ArongbmZevRJoaNVPCK-koE8MYQtuda4n8GN_r7IEW-iRNkTmEpTATHYibzWAw6QdTLjkVEJnTjolOJsqSBqOMGeOivkCJKcViktlhMlsCqgYpuKN0jh0TnKLmvPQHuBR-JWY3s7XIYZg2az-sfggpVzqW_nUVw1MaYA0"/>
+</div>
+<span class="font-title-md text-title-md text-on-surface-variant role-text transition-colors">「他」</span>
+</button>
+<!-- Role: She -->
+<button class="group flex flex-col items-center p-6 bg-surface-container rounded-3xl border-2 border-transparent transition-all duration-300 shadow-[0_8px_24px_rgba(255,143,163,0.05)] active:scale-95" id="role-she" onclick="selectRole('she')">
+<div class="w-24 h-24 rounded-full bg-primary-fixed mb-4 flex items-center justify-center overflow-hidden border-4 border-white shadow-sm animate-breath" style="animation-delay: 1.5s; animation-duration: 4s;">
+<img alt="She Avatar" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAwTWEni2lZworiz5dMWiQCkssa6GvkiVVO7QY1C5xDU1zzhql3d7LslisdQ7lmMruIXvYJJl2WgdPnsZ8SBU6MIQjVsHX4X0XJJiuqZUbqoF3TmGhnX7_9OJL3tj7jFWbSORzuY8xcYmBim_9_P_VCgNk8fx8Qn6O6Qy1PbDWMMCfT6kug8XQ8kscx_ij1utBvcwyKyABA1nS7QgLTFUlAKpQMs04KDBa2x5Ieyul3LzYU_BDGOuPwgASNwZEg72L5ysyH9lkmDQc"/>
+</div>
+<span class="font-title-md text-title-md text-on-surface-variant role-text transition-colors">「她」</span>
+</button>
+</div>
+<!-- Disclaimer -->
+<p class="font-caption text-caption text-center text-on-surface-variant mt-8 px-8 leading-relaxed opacity-80">
+<span class="material-symbols-outlined text-[14px] align-middle mr-1">info</span>
+                角色一旦设定后将无法更改，请谨慎选择您的身份标识。
+            </p>
+</div>
+<!-- Login Actions -->
+<div class="mt-16 space-y-4">
+<!-- WeChat Button (Primary CTA) -->
+<button class="w-full h-14 bg-[#9c4b57] text-white rounded-full font-label-md text-label-md flex items-center justify-center gap-3 shadow-[0_8px_24px_rgba(156,75,87,0.3)] active:scale-95 transition-all">
+<svg fill="none" height="24" viewbox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg">
+<path d="M8.5 13C7.67157 13 7 12.3284 7 11.5C7 10.6716 7.67157 10 8.5 10C9.32843 10 10 10.6716 10 11.5C10 12.3284 9.32843 13 8.5 13ZM15.5 13C14.6716 13 14 12.3284 14 11.5C14 10.6716 14.6716 10 15.5 10C16.3284 10 17 10.6716 17 11.5C17 12.3284 16.3284 13 15.5 13Z" fill="currentColor"></path>
+<path clip-rule="evenodd" d="M12 2C6.47715 2 2 6.02944 2 11C2 13.626 3.25082 15.9868 5.28911 17.5878C5.12788 18.2721 4.7077 19.3444 4.07223 20.334C4.00494 20.4388 4.02058 20.5758 4.10842 20.6622C4.19625 20.7486 4.33333 20.7621 4.43736 20.6946C6.18241 19.562 7.15573 19.0666 7.82855 18.847C9.11718 19.5786 10.5147 20 12 20C17.5228 20 22 15.9706 22 11C22 6.02944 17.5228 20 12 2C12 2ZM4 11C4 7.13401 7.58172 4 12 4C16.4183 4 20 7.13401 20 11C20 14.866 16.4183 18 12 18C10.7431 18 9.56764 17.708 8.53096 17.1855C8.42171 17.1304 8.29177 17.1337 8.1856 17.1944C7.43903 17.6206 6.34706 18.2374 4.97546 19.1105C5.41249 18.1724 5.67969 17.2612 5.81186 16.5986C5.83616 16.4768 5.78761 16.3533 5.69176 16.2755C4.63185 15.4151 4 14.1539 4 12.75C4 12.1287 4.12643 11.54 4.35417 11H4Z" fill="currentColor" fill-rule="evenodd"></path>
+</svg>
+                微信一键登录
+            </button>
+<div class="flex items-center justify-center gap-2 py-4">
+<input class="w-4 h-4 rounded text-primary border-outline-variant focus:ring-primary-container" id="terms" type="checkbox"/>
+<label class="font-caption text-caption text-on-surface-variant" for="terms">
+                    同意 <a class="text-primary underline" href="#">用户协议</a> 和 <a class="text-primary underline" href="#">隐私政策</a>
+</label>
+</div>
+</div>
+</main>
+<!-- Visual Accent Footer -->
+<div class="fixed bottom-0 right-0 p-8 opacity-10 pointer-events-none">
+<span class="material-symbols-outlined text-9xl text-primary">auto_stories</span>
+</div>
+<script>
+        function selectRole(role) {
+            const he = document.getElementById('role-he');
+            const she = document.getElementById('role-she');
+            
+            if (role === 'he') {
+                he.classList.add('role-selected');
+                she.classList.remove('role-selected');
+            } else {
+                she.classList.add('role-selected');
+                he.classList.remove('role-selected');
+            }
+
+            // Haptic feedback simulation
+            if (window.navigator.vibrate) {
+                window.navigator.vibrate(10);
+            }
+        }
+
+        // Heart Background Animation
+        function createHeart() {
+            const container = document.getElementById('heart-container');
+            const heart = document.createElement('span');
+            heart.classList.add('material-symbols-outlined', 'heart-particle');
+            heart.style.fontVariationSettings = "'FILL' 1";
+            heart.innerText = 'favorite';
+            
+            const size = Math.random() * 20 + 10 + 'px';
+            heart.style.fontSize = size;
+            heart.style.left = Math.random() * 100 + 'vw';
+            heart.style.bottom = '-50px';
+            
+            const duration = Math.random() * 10 + 5 + 's';
+            heart.style.animation = `floating-heart ${duration} linear forwards`;
+            
+            container.appendChild(heart);
+            
+            setTimeout(() => {
+                heart.remove();
+            }, parseFloat(duration) * 1000);
+        }
+
+        setInterval(createHeart, 800);
+    </script>
+</body></html>

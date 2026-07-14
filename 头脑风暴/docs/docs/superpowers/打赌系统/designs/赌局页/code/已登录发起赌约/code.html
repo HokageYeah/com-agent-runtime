@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>发起新赌约 - Our Journey</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&amp;family=Be+Vietnam+Pro:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            display: inline-block;
+            line-height: 1;
+            text-transform: none;
+            letter-spacing: normal;
+            word-wrap: normal;
+            white-space: nowrap;
+            direction: ltr;
+        }
+
+        /* Warm Soft Shadow from Design System */
+        .warm-shadow {
+            box-shadow: 0 12px 32px -4px rgba(155, 64, 83, 0.08), 0 4px 12px -2px rgba(155, 64, 83, 0.04);
+        }
+
+        .active-scale:active {
+            transform: scale(0.95);
+            transition: transform 0.15s ease-out;
+        }
+
+        .input-focus-warm:focus {
+            background-color: #ffffff;
+            box-shadow: 0 0 0 2px #ff8fa3;
+            outline: none;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #dac0c3;
+            border-radius: 10px;
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface": "#fff8f7",
+                        "on-surface": "#4a3a3b",
+                        "primary": "#9b4053",
+                        "action": "#9c4b57",
+                        "surface-container": "#fbeaeb",
+                        "surface-container-low": "#fff0f1",
+                        "surface-container-highest": "#f0dee0",
+                        "outline-variant": "#dac0c3",
+                        "primary-container": "#ff8fa3",
+                        "on-primary-container": "#782539",
+                        "secondary-container": "#a6e2ff",
+                        "on-secondary-container": "#24667f"
+                    },
+                    borderRadius: {
+                        "3xl": "24px",
+                        "full": "9999px"
+                    },
+                    spacing: {
+                        "container-padding": "24px"
+                    },
+                    fontFamily: {
+                        "sans": ["Plus Jakarta Sans", "Be Vietnam Pro", "sans-serif"],
+                        "title": ["Plus Jakarta Sans", "sans-serif"],
+                        "body": ["Be Vietnam Pro", "sans-serif"]
+                    }
+                },
+            },
+        }
+    </script>
+</head>
+<body class="bg-surface text-on-surface font-body antialiased min-h-screen flex flex-col items-center">
+<!-- Top Navigation Bar -->
+<header class="w-full max-w-lg sticky top-0 z-50 bg-surface/80 backdrop-blur-md px-container-padding h-16 flex items-center">
+<button class="active-scale text-on-surface/60 flex items-center justify-center w-10 h-10 hover:bg-surface-container-highest/30 rounded-full transition-colors shrink-0">
+<span class="material-symbols-outlined" data-icon="close">close</span>
+</button>
+<h1 class="flex-grow text-center font-title text-xl font-bold text-on-surface">发起新赌约</h1><div class="w-10 h-10 shrink-0"></div>
+</header>
+<!-- Content Canvas -->
+<main class="w-full max-w-lg px-container-padding py-6 flex flex-col gap-6 pb-32">
+<!-- Decoration Header -->
+<div class="flex flex-col items-center justify-center py-4">
+<div class="w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center mb-2">
+<span class="material-symbols-outlined text-primary text-4xl" style="font-variation-settings: 'FILL' 1;">workspace_premium</span>
+</div>
+<p class="text-on-surface/60 font-title text-sm italic">赌一个充满爱的小愿望</p>
+</div>
+<!-- Main Form Card -->
+<section class="bg-white rounded-3xl p-6 warm-shadow flex flex-col gap-8 border border-surface-container-highest">
+<!-- Wager Topic -->
+<div class="flex flex-col gap-3">
+<label class="flex items-center gap-2 text-on-surface font-title text-sm font-semibold px-1">
+<span class="material-symbols-outlined text-primary text-lg">edit_note</span>
+                    我们要赌什么？
+                </label>
+<textarea class="w-full bg-surface-container-low rounded-3xl p-4 text-sm font-body min-h-[100px] border-none input-focus-warm transition-all resize-none placeholder:text-on-surface/30" placeholder="例如：今晚谁洗碗、明天会不会下雨..."></textarea>
+</div>
+<!-- Reward Selection -->
+<div class="flex flex-col gap-3">
+<label class="flex items-center gap-2 text-on-surface font-title text-sm font-semibold px-1">
+<span class="material-symbols-outlined text-primary text-lg">redeem</span>
+                    赢了的奖励是...
+                </label>
+<div class="flex items-center bg-surface-container-low rounded-3xl px-4 transition-all focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-container">
+<input class="w-full bg-transparent border-none py-4 text-sm font-body focus:ring-0 placeholder:text-on-surface/30" placeholder="例如：一杯奶茶、一次全身按摩" type="text"/>
+<span class="material-symbols-outlined text-primary-container ml-2">card_giftcard</span>
+</div>
+<div class="flex flex-wrap gap-2 mt-1">
+<button class="active-scale bg-primary-container/10 text-on-primary-container text-xs font-semibold px-4 py-2 rounded-full hover:bg-primary-container/20 transition-colors">🍦 冰淇淋</button>
+<button class="active-scale bg-primary-container/10 text-on-primary-container text-xs font-semibold px-4 py-2 rounded-full hover:bg-primary-container/20 transition-colors">💆 按摩</button>
+<button class="active-scale bg-primary-container/10 text-on-primary-container text-xs font-semibold px-4 py-2 rounded-full hover:bg-primary-container/20 transition-colors">🎬 看电影</button>
+</div>
+</div>
+<!-- Deadline Picker -->
+<div class="flex flex-col gap-3">
+<label class="flex items-center gap-2 text-on-surface font-title text-sm font-semibold px-1">
+<span class="material-symbols-outlined text-primary text-lg">event</span>
+                    什么时候截止？
+                </label>
+<div class="grid grid-cols-2 gap-3">
+<div class="flex items-center bg-surface-container-low rounded-3xl px-4 py-4 cursor-pointer hover:bg-white border border-transparent hover:border-primary-container transition-all active-scale">
+<span class="material-symbols-outlined text-primary-container mr-3">calendar_today</span>
+<span class="text-sm font-semibold text-on-surface/70">2026-06-12</span>
+</div>
+<div class="flex items-center bg-surface-container-low rounded-3xl px-4 py-4 cursor-pointer hover:bg-white border border-transparent hover:border-primary-container transition-all active-scale">
+<span class="material-symbols-outlined text-primary-container mr-3">schedule</span>
+<span class="text-sm font-semibold text-on-surface/70">23:30前</span>
+</div>
+</div>
+</div>
+<!-- Decorative Divider -->
+<div class="flex justify-center py-2">
+<svg fill="none" height="12" viewbox="0 0 400 12" width="100%" xmlns="http://www.w3.org/2000/svg">
+<path d="M0 6C20 6 30 1 50 1C70 1 80 11 100 11C120 11 130 1 150 1C170 1 180 11 200 11C220 11 230 1 250 1C270 1 280 11 300 11C320 11 330 1 350 1C370 1 380 11 400 11" stroke="#f0dee0" stroke-dasharray="4 4" stroke-width="2"></path>
+</svg>
+</div>
+<!-- Role Selection (Interactive Core) -->
+<div class="flex flex-col gap-4">
+<label class="flex items-center gap-2 text-on-surface font-title text-sm font-semibold px-1">
+<span class="material-symbols-outlined text-primary text-lg">groups</span>
+                    谁向谁挑战？
+                </label>
+<div class="flex items-center justify-around bg-surface-container-low/50 rounded-3xl p-6 border border-surface-container-highest">
+<!-- Me -->
+<div class="flex flex-col items-center gap-3 group cursor-pointer active-scale" onclick="toggleRole('me')">
+<div class="relative">
+<div class="w-20 h-20 rounded-full border-4 border-primary ring-4 ring-primary-container/20 overflow-hidden transition-all duration-300" id="role-me">
+<img alt="Me" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLvCLpzxA3rhRusGyGCQeIFARfaBGN5eXbjgLAesgWyGYQ_O_HQBdsD9sZVSxLc553yuAynL3HYErm7cFrEUDkQxKbFGk1WQcKT2Mtb5BYr9XkOMe6GmCma0mJGqbqcAGcumStiznzGggHCgRDyA0yaAjzO4x0aevBXw67hKnUf0Ev2ril3JjhhL8CTA-TP5FTI2eRkFexDTYWxyFm9gdQB08aTaKtASsuEkjg8Vh_ArkiE1gQ8VYIczfo0"/>
+</div>
+<div class="absolute -bottom-1 -right-1 bg-primary text-white text-[10px] px-2 py-0.5 rounded-full font-bold">发起人</div>
+</div>
+<span class="text-sm font-bold text-primary" id="text-me">我</span>
+</div>
+<!-- Versus Icon -->
+<div class="flex flex-col items-center gap-2">
+<div class="w-12 h-12 rounded-full bg-white shadow-sm flex items-center justify-center border border-surface-container-highest">
+<span class="material-symbols-outlined text-primary-container text-2xl" style="font-variation-settings: 'FILL' 1;">swords</span>
+</div>
+<span class="text-[10px] font-bold text-on-surface/40 uppercase tracking-widest">挑战</span>
+</div>
+<!-- TA -->
+<div class="flex flex-col items-center gap-3 group cursor-pointer active-scale" onclick="toggleRole('ta')">
+<div class="relative">
+<div class="w-20 h-20 rounded-full border-4 border-transparent overflow-hidden transition-all duration-300" id="role-ta">
+<img alt="TA" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLtN9OYVG4ibBxPgFkhn4NS3-HR05W4madYnn7Gx0TCHAN319pNvu2rewn5kqaqD52Rtki90yav2gz3hGX9cORWqzZ8ybmqE3y409898RtKecMW5b4kLwUqYdddxFkbZTg_p8w8adiz9N7Yi37khP3W_5MXhN_Nk10RRrrkjM0S_UYhH0afrxGPj9UvS_SYEqe8VVakwizk9R_4PC3t472GvaULw75M6l3Xlbphcem9lobynp6GXRc1zSg"/>
+</div>
+</div>
+<span class="text-sm font-bold text-on-surface/40" id="text-ta">TA</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Information Box -->
+<div class="flex items-start gap-4 px-5 py-4 bg-primary-container/10 rounded-3xl border border-primary-container/20">
+<span class="material-symbols-outlined text-primary-container text-xl mt-0.5">info</span>
+<p class="text-xs font-body text-on-primary-container leading-relaxed">
+                赌约发布后，TA 会收到通知。只有双方都同意后，赌局才正式开启哦。
+            </p>
+</div>
+</main>
+<script>
+        function toggleRole(role) {
+            const meCircle = document.getElementById('role-me');
+            const taCircle = document.getElementById('role-ta');
+            const meText = document.getElementById('text-me');
+            const taText = document.getElementById('text-ta');
+
+            if (role === 'me') {
+                meCircle.classList.add('border-primary', 'ring-4', 'ring-primary-container/20');
+                meCircle.classList.remove('border-transparent');
+                meText.classList.add('text-primary');
+                meText.classList.remove('text-on-surface/40');
+
+                taCircle.classList.add('border-transparent');
+                taCircle.classList.remove('border-primary', 'ring-4', 'ring-primary-container/20');
+                taText.classList.add('text-on-surface/40');
+                taText.classList.remove('text-primary');
+            } else {
+                taCircle.classList.add('border-primary', 'ring-4', 'ring-primary-container/20');
+                taCircle.classList.remove('border-transparent');
+                taText.classList.add('text-primary');
+                taText.classList.remove('text-on-surface/40');
+
+                meCircle.classList.add('border-transparent');
+                meCircle.classList.remove('border-primary', 'ring-4', 'ring-primary-container/20');
+                meText.classList.add('text-on-surface/40');
+                meText.classList.remove('text-primary');
+            }
+        }
+
+        // Quick select chips logic
+        document.querySelectorAll('button.active-scale').forEach(btn => {
+            btn.addEventListener('click', function() {
+                if (this.parentElement.previousElementSibling?.querySelector('input')) {
+                    const input = this.parentElement.previousElementSibling.querySelector('input');
+                    const text = this.innerText.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '');
+                    input.value = text;
+                    input.focus();
+                }
+            });
+        });
+    </script>
+<div class="fixed bottom-0 left-0 right-0 p-4 bg-surface/80 backdrop-blur-md border-t border-surface-container-highest z-50 flex justify-center">
+<div class="w-full max-w-lg">
+<button class="w-full active-scale bg-action text-white font-title text-lg py-4 rounded-full hover:opacity-90 transition-all shadow-md font-bold">
+            发布
+        </button>
+</div>
+</div></body></html>

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>回忆录详情页 - 情侣日记</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Design System Tokens & Configuration -->
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-background": "#22191a",
+                    "tertiary": "#7d5800",
+                    "secondary": "#24657e",
+                    "on-primary": "#ffffff",
+                    "surface-bright": "#fff8f7",
+                    "background": "#fff8f7",
+                    "tertiary-fixed": "#ffdea9",
+                    "on-tertiary-container": "#5a3e00",
+                    "surface-container-low": "#fff0f1",
+                    "outline-variant": "#dac0c3",
+                    "on-error-container": "#93000a",
+                    "inverse-primary": "#ffb2bd",
+                    "inverse-on-surface": "#feedee",
+                    "secondary-container": "#a6e2ff",
+                    "on-error": "#ffffff",
+                    "surface": "#fff8f7",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "on-secondary-fixed": "#001f2a",
+                    "on-tertiary": "#ffffff",
+                    "secondary-fixed": "#bde9ff",
+                    "on-primary-fixed": "#400014",
+                    "surface-container-highest": "#f0dee0",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "on-tertiary-fixed": "#271900",
+                    "on-secondary": "#ffffff",
+                    "on-primary-container": "#782539",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "outline": "#877274",
+                    "primary": "#9b4053",
+                    "on-surface-variant": "#544244",
+                    "error": "#ba1a1a",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "error-container": "#ffdad6",
+                    "surface-variant": "#f0dee0",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "surface-container-lowest": "#ffffff",
+                    "primary-fixed": "#ffd9dd",
+                    "on-secondary-container": "#24667f",
+                    "surface-dim": "#e7d6d7",
+                    "surface-container-high": "#f6e4e5",
+                    "inverse-surface": "#382e2f",
+                    "on-surface": "#22191a",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "primary-container": "#ff8fa3",
+                    "surface-container": "#fbeaeb",
+                    "surface-tint": "#9b4053",
+                    "tertiary-container": "#e6a500"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "base": "8px",
+                    "sm": "12px",
+                    "lg": "32px",
+                    "container-padding": "24px",
+                    "xl": "48px",
+                    "xs": "4px",
+                    "gutter": "16px",
+                    "md": "20px"
+            },
+            "fontFamily": {
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "body-lg": ["Be Vietnam Pro"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "caption": ["Be Vietnam Pro"],
+                    "label-md": ["Be Vietnam Pro"],
+                    "title-md": ["Plus Jakarta Sans"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"]
+            },
+            "fontSize": {
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            background-color: #fff8f7;
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Be Vietnam Pro', sans-serif;
+            color: #22191a;
+        }
+
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+
+        .flashback-card {
+            transition: transform 0.6s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.6s ease, filter 0.6s ease;
+            opacity: 0.3;
+            transform: scale(0.9);
+            filter: blur(2px);
+        }
+
+        .flashback-card.active {
+            opacity: 1;
+            transform: scale(1);
+            filter: blur(0);
+        }
+
+        .scroll-container {
+            scroll-snap-type: x mandatory;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+            display: flex;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scroll-behavior: smooth;
+        }
+        .scroll-container::-webkit-scrollbar {
+            display: none;
+        }
+        .snap-center {
+            scroll-snap-align: center;
+        }
+
+        .heart-particle {
+            position: absolute;
+            pointer-events: none;
+            animation: float-up 6s linear infinite;
+            z-index: 5;
+        }
+
+        @keyframes float-up {
+            0% {
+                transform: translateY(105vh) translateX(0) rotate(0deg);
+                opacity: 0;
+            }
+            10% { opacity: 0.6; }
+            90% { opacity: 0.4; }
+            100% {
+                transform: translateY(-10vh) translateX(20px) rotate(45deg);
+                opacity: 0;
+            }
+        }
+
+        .gradient-mesh {
+            background: radial-gradient(at 0% 0%, rgba(255, 143, 163, 0.2) 0, transparent 50%),
+                        radial-gradient(at 100% 0%, rgba(166, 226, 255, 0.2) 0, transparent 50%),
+                        radial-gradient(at 50% 100%, rgba(255, 218, 223, 0.3) 0, transparent 50%);
+        }
+
+        .progress-bar-segment {
+            height: 3px;
+            background: rgba(84, 66, 68, 0.15);
+            flex: 1;
+            border-radius: 99px;
+            overflow: hidden;
+            margin: 0 3px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: #9b4053;
+            width: 0%;
+            transition: width 0.1s linear;
+        }
+
+        .summary-card {
+            box-shadow: 0 0 40px rgba(155, 64, 83, 0.3);
+            animation: slow-entrance 1.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+
+        @keyframes slow-entrance {
+            0% { transform: translateY(40px) scale(0.95); opacity: 0; }
+            100% { transform: translateY(0) scale(1); opacity: 1; }
+        }
+
+        .card-entrance-pop {
+            animation: pop-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        }
+
+        @keyframes pop-in {
+            0% { transform: scale(0.8); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body class="bg-surface dark:bg-surface-dim selection:bg-primary-container">
+<!-- Immersive Background -->
+<div class="fixed inset-0 z-0 overflow-hidden pointer-events-none gradient-mesh">
+<!-- Floating Particles Container -->
+<div id="particles-container"></div>
+</div>
+<!-- Top Overlay (Controls & Progress) -->
+<div class="fixed top-0 inset-x-0 z-50 pt-8 px-6 flex flex-col gap-4">
+<!-- Progress Bar -->
+<div class="flex items-center w-full" id="progress-container">
+<div class="progress-bar-segment"><div class="progress-bar-fill" id="fill-0"></div></div>
+<div class="progress-bar-segment"><div class="progress-bar-fill" id="fill-1"></div></div>
+<div class="progress-bar-segment"><div class="progress-bar-fill" id="fill-2"></div></div>
+<div class="progress-bar-segment"><div class="progress-bar-fill" id="fill-3"></div></div>
+</div>
+<!-- Toolbar -->
+<div class="flex justify-between items-center">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">favorite</span>
+<span class="font-title-md text-title-md text-primary">春日回忆录</span>
+</div>
+<button class="w-10 h-10 flex items-center justify-center rounded-full bg-white/20 backdrop-blur-md border border-white/30 text-on-surface-variant hover:bg-white/40 transition-all active:scale-90" onclick="window.history.back()">
+<span class="material-symbols-outlined">close</span>
+</button>
+</div>
+</div>
+<!-- Main Viewport / Carousel -->
+<main class="relative h-screen w-full flex items-center justify-center z-10">
+<!-- Navigation Buttons (Desktop/Tablet) -->
+<div class="hidden md:flex absolute inset-x-0 px-xl justify-between items-center z-20 pointer-events-none">
+<button class="pointer-events-auto p-4 rounded-full bg-white/10 hover:bg-white/30 backdrop-blur-sm text-primary transition-all" id="prev-btn">
+<span class="material-symbols-outlined text-3xl">chevron_left</span>
+</button>
+<button class="pointer-events-auto p-4 rounded-full bg-white/10 hover:bg-white/30 backdrop-blur-sm text-primary transition-all" id="next-btn">
+<span class="material-symbols-outlined text-3xl">chevron_right</span>
+</button>
+</div>
+<!-- Cards Container -->
+<div class="scroll-container w-full h-full" id="carousel-container">
+<!-- Card 1: The Start -->
+<section class="snap-center min-w-full h-full flex items-center justify-center py-xl px-6 md:px-0">
+<div class="flashback-card active w-full max-w-[400px] aspect-[9/16] bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col relative border border-white/20">
+<div class="relative flex-1 overflow-hidden">
+<img class="w-full h-full object-cover grayscale-[20%] opacity-90" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAkRCkPkhmXebg4uOBoLjo0AvwyLxoy0VAmcN3JWARcE02uWDcnGNhAQvWdKmthZgNpaMJUO-1NYX6xwacz_oDX8EM2nPapxKQjM53arrd6e_TlY0swIs-wtekPn187zaqZk4DfHctnXPrVojn_P1VtKw3oL3jT2_2S3PC9O1gKclvWh6yrOXuSYcSbuYcndlicqmspuOZ7Q22GjdC8g6ivOToPuAfNUUe78cGCxJmxdkA0YUiyZKZBdim4N5XA0BCZSbwgtYfbfUs"/>
+<div class="absolute inset-0 bg-gradient-to-t from-white via-white/20 to-transparent"></div>
+</div>
+<div class="p-lg pt-0 text-center flex flex-col gap-md">
+<div class="h-1 w-12 bg-primary/20 rounded-full mx-auto mb-2"></div>
+<h2 class="font-headline-lg-mobile text-headline-lg-mobile text-primary">我们从 2025年3月14日 开始记录</h2>
+<p class="font-body-md text-body-md text-on-surface-variant leading-relaxed">
+                            那一天的风很甜，像我们第一次在巷口相遇时的味道。
+                        </p>
+</div>
+</div>
+</section>
+<!-- Card 2: The Journey -->
+<section class="snap-center min-w-full h-full flex items-center justify-center py-xl px-6 md:px-0">
+<div class="flashback-card w-full max-w-[400px] aspect-[9/16] bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col border border-white/20 p-lg">
+<div class="flex-1 flex flex-col justify-center items-center gap-xl">
+<!-- Stats Visualization -->
+<div class="relative w-48 h-48 flex items-center justify-center">
+<div class="absolute inset-0 bg-primary-container/20 rounded-full animate-pulse"></div>
+<div class="text-center">
+<span class="block font-display-lg text-display-lg text-primary">286</span>
+<span class="font-label-md text-label-md text-on-surface-variant">天里的点滴</span>
+</div>
+</div>
+<div class="w-full space-y-6">
+<div class="flex justify-between items-center p-md bg-surface-container rounded-2xl">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary">edit_note</span>
+<span class="font-title-md text-on-surface">写下日记</span>
+</div>
+<span class="font-headline-lg-mobile text-primary">124 篇</span>
+</div>
+<div class="p-md bg-secondary-container/20 rounded-2xl space-y-3">
+<span class="font-label-md text-secondary">最常出现的关键词</span>
+<div class="flex flex-wrap gap-2">
+<span class="px-3 py-1 bg-white rounded-full font-caption text-secondary border border-secondary/10">火锅 🥘</span>
+<span class="px-3 py-1 bg-white rounded-full font-caption text-secondary border border-secondary/10">晚安 🌙</span>
+<span class="px-3 py-1 bg-white rounded-full font-caption text-secondary border border-secondary/10">散步 👟</span>
+<span class="px-3 py-1 bg-white rounded-full font-caption text-secondary border border-secondary/10">电影 🍿</span>
+</div>
+</div>
+</div>
+</div>
+<div class="pt-lg text-center">
+<p class="font-body-md text-on-surface-variant">这一段回忆，是我们共同编写的诗。</p>
+</div>
+</div>
+</section>
+<!-- Card 3: Photo Highlight -->
+<section class="snap-center min-w-full h-full flex items-center justify-center py-xl px-6 md:px-0">
+<div class="flashback-card w-full max-w-[400px] aspect-[9/16] bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col border border-white/20">
+<div class="p-lg flex justify-between items-center">
+<div>
+<p class="font-label-md text-on-surface-variant">精选瞬间</p>
+<h3 class="font-title-md text-primary">海边的黄昏</h3>
+</div>
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+<div class="flex-1 px-lg pb-xl">
+<div class="w-full h-full rounded-2xl overflow-hidden border-4 border-white shadow-lg rotate-2">
+<img class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAt1UKtb-MWQJ9QOT2UAy2ezMvX4i_xhVi1RQ5bjNIymuT2amdT584YciMV-XnTP33F6FLTKkNPJaNk8IbrhvoKdZA1ar1FwOyoa9CjCxbtfSW58egXfSssvlsNJ1fPLcobp4EkzrKaYyiKyTSxTOwlIIN5tNcN-QnEmAgrHaBXgEF0Jr_8ljg9HB7WdAAuGSQADQjAxPJoD2hODpQKozgpJlZlwGhFMt_BjMhULkJXg7hwqoQMbgK7moY054fuxNVKmne3vUvHFzg"/>
+</div>
+</div>
+</div>
+</section>
+<!-- Card 4: Footer / Summary -->
+<section class="snap-center min-w-full h-full flex items-center justify-center py-xl px-6 md:px-0">
+<div class="flashback-card w-full max-w-[400px] aspect-[9/16] bg-primary rounded-[32px] shadow-2xl flex flex-col items-center justify-center p-xl text-center text-white relative overflow-hidden summary-card">
+<!-- Decor -->
+<div class="absolute -top-10 -right-10 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
+<div class="absolute -bottom-10 -left-10 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
+<span class="material-symbols-outlined text-6xl mb-xl animate-bounce" style="font-variation-settings: 'FILL' 1;">auto_awesome</span>
+<h2 class="font-headline-lg text-headline-lg mb-md">谢谢你们<br/>认真记录过<br/>这一段时光</h2>
+<p class="font-body-md opacity-80 mb-xl">未来的日子里，<br/>愿我们依然有话可说，有迹可循。</p>
+<button class="px-xl py-md bg-white text-primary rounded-full font-title-md shadow-xl transition-all active:scale-95 hover:bg-white/90">
+                        保存此回忆
+                    </button>
+<button class="mt-md font-label-md opacity-70 underline decoration-white/30">
+                        分享给 TA
+                    </button>
+</div>
+</section>
+</div>
+</main>
+<!-- Bottom Instruction -->
+<div class="fixed bottom-8 inset-x-0 z-50 text-center pointer-events-none opacity-40">
+<div class="flex flex-col items-center gap-2">
+<span class="material-symbols-outlined animate-bounce">keyboard_double_arrow_right</span>
+<p class="font-caption">左右滑动切换精彩瞬间</p>
+</div>
+</div>
+<script>
+        // --- 1. Ambient Background: Floating Hearts ---
+        function createParticles() {
+            const container = document.getElementById('particles-container');
+            const particleCount = 20;
+
+            for (let i = 0; i < particleCount; i++) {
+                const particle = document.createElement('div');
+                particle.className = 'heart-particle';
+                particle.innerHTML = `<span class="material-symbols-outlined text-primary/10" style="font-size: ${Math.random() * 15 + 10}px; font-variation-settings: 'FILL' 1;">favorite</span>`;
+
+                // Randomize position and timing
+                particle.style.left = Math.random() * 100 + 'vw';
+                particle.style.animationDelay = Math.random() * 6 + 's';
+                particle.style.animationDuration = Math.random() * 4 + 5 + 's';
+
+                container.appendChild(particle);
+            }
+        }
+
+        // --- 2. Carousel Logic & Transitions ---
+        const container = document.getElementById('carousel-container');
+        const cards = document.querySelectorAll('.flashback-card');
+        const fills = document.querySelectorAll('.progress-bar-fill');
+        const prevBtn = document.getElementById('prev-btn');
+        const nextBtn = document.getElementById('next-btn');
+
+        let currentIndex = 0;
+
+        function updateCarousel() {
+            const width = container.clientWidth;
+
+            cards.forEach((card, idx) => {
+                // Update active state for scale/fade transition
+                if (idx === currentIndex) {
+                    card.classList.add('active');
+                    // Add pop-in effect only when moving forward
+                    card.classList.add('card-entrance-pop');
+                } else {
+                    card.classList.remove('active');
+                    card.classList.remove('card-entrance-pop');
+                }
+
+                // Update Progress Bar Segments
+                const fill = document.getElementById(`fill-${idx}`);
+                if (idx < currentIndex) {
+                    fill.style.width = '100%';
+                } else if (idx === currentIndex) {
+                    fill.style.width = '100%'; // Full in this view context
+                    fill.style.transition = 'width 0.4s ease-out';
+                } else {
+                    fill.style.width = '0%';
+                }
+            });
+        }
+
+        // Scroll Event Listener for Manual Swiping
+        let isScrolling;
+        container.addEventListener('scroll', () => {
+            window.clearTimeout(isScrolling);
+            isScrolling = setTimeout(() => {
+                const index = Math.round(container.scrollLeft / container.clientWidth);
+                if (index !== currentIndex) {
+                    currentIndex = index;
+                    updateCarousel();
+                }
+            }, 50);
+        });
+
+        // Desktop Nav Buttons
+        if (prevBtn && nextBtn) {
+            prevBtn.addEventListener('click', () => {
+                if (currentIndex > 0) {
+                    currentIndex--;
+                    container.scrollTo({ left: currentIndex * container.clientWidth, behavior: 'smooth' });
+                }
+            });
+            nextBtn.addEventListener('click', () => {
+                if (currentIndex < cards.length - 1) {
+                    currentIndex++;
+                    container.scrollTo({ left: currentIndex * container.clientWidth, behavior: 'smooth' });
+                }
+            });
+        }
+
+        // --- 3. Initial Setup ---
+        window.addEventListener('DOMContentLoaded', () => {
+            createParticles();
+            updateCarousel(); // Initial state
+
+            // Hint animation
+            setTimeout(() => {
+                container.scrollTo({ left: 30, behavior: 'smooth' });
+                setTimeout(() => {
+                    container.scrollTo({ left: 0, behavior: 'smooth' });
+                }, 500);
+            }, 1000);
+        });
+    </script>
+</body></html>

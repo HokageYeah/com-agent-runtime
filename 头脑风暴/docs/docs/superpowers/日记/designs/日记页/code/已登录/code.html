@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/>
+<title>情侣日记 - 日记时间轴</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600&amp;family=Plus+Jakarta+Sans:wght@600;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<style>
+        .material-symbols-outlined {
+            font-family: 'Material Symbols Outlined';
+            font-weight: normal;
+            font-style: normal;
+            font-size: 24px;
+            line-height: 1;
+            letter-spacing: normal;
+            text-transform: none;
+            display: inline-block;
+            white-space: nowrap;
+            word-wrap: normal;
+            direction: ltr;
+            -webkit-font-feature-settings: 'liga';
+            -webkit-font-smoothing: antialiased;
+        }
+
+        body {
+            background-color: #fff8f7;
+            -webkit-tap-highlight-color: transparent;
+            overflow-x: hidden;
+        }
+
+        .timeline-dotted-line {
+            background-image: linear-gradient(to bottom, #9b4053 33%, transparent 0%);
+            background-position: center top;
+            background-size: 2px 12px;
+            background-repeat: repeat-y;
+        }
+
+        /* Animations */
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-up {
+            animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+        }
+        .delay-100 { animation-delay: 100ms; }
+        .delay-200 { animation-delay: 200ms; }
+        .delay-300 { animation-delay: 300ms; }
+
+        @keyframes bounceIn {
+            0% { opacity: 0; transform: scale(0.3); }
+            50% { opacity: 1; transform: scale(1.05); }
+            70% { transform: scale(0.9); }
+            100% { transform: scale(1); }
+        }
+        .animate-bounce-in {
+            animation: bounceIn 0.8s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+
+        /* Shader-like background subtle gradient */
+        .shader-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at 20% 30%, #fff0f1 0%, transparent 40%),
+                        radial-gradient(circle at 80% 70%, #fbeaeb 0%, transparent 40%);
+            z-index: -1;
+            opacity: 0.6;
+        }
+
+        .ripple-container {
+            position: relative;
+            overflow: hidden;
+        }
+        .ripple {
+            position: absolute;
+            border-radius: 50%;
+            transform: scale(0);
+            animation: ripple-anim 600ms linear;
+            background-color: rgba(255, 255, 255, 0.6);
+            pointer-events: none;
+        }
+        @keyframes ripple-anim {
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
+        }
+    </style>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "primary": "#9b4053",
+                        "on-primary": "#ffffff",
+                        "primary-container": "#ff8fa3",
+                        "on-primary-container": "#782539",
+                        "secondary": "#24657e",
+                        "tertiary": "#7d5800",
+                        "surface": "#fff8f7",
+                        "on-surface": "#22191a",
+                        "surface-variant": "#f0dee0",
+                        "on-surface-variant": "#544244",
+                        "outline": "#877274",
+                        "background": "#fff8f7",
+                        "on-background": "#22191a",
+                        "rose-bean": "#d97c8a",
+                        "sakura-pink": "#ffb6c1"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "2xl": "1rem",
+                        "3xl": "1.5rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "xs": "4px",
+                        "sm": "12px",
+                        "md": "20px",
+                        "base": "8px",
+                        "lg": "32px",
+                        "xl": "48px",
+                        "container-padding": "24px",
+                        "gutter": "16px",
+                        "safe": "env(safe-area-inset-bottom, 20px)"
+                    },
+                    "fontFamily": {
+                        "body-md": ["Be Vietnam Pro"],
+                        "title-md": ["Plus Jakarta Sans"],
+                        "headline-lg": ["Plus Jakarta Sans"],
+                        "label-md": ["Be Vietnam Pro"]
+                    },
+                    "fontSize": {
+                        "body-md": ["16px", {"lineHeight": "24px"}],
+                        "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                        "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                        "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                        "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}]
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-background text-on-background font-body-md antialiased pb-24 md:pb-0">
+<div class="shader-bg"></div>
+<!-- TopAppBar -->
+<header class="fixed top-0 left-0 right-0 z-50 bg-surface/80 backdrop-blur-md h-16 md:h-20 border-b border-outline-variant/30">
+<div class="max-w-4xl mx-auto h-full flex justify-between items-center px-container-padding">
+<button aria-label="Calendar" class="text-primary hover:bg-primary/5 p-2 rounded-full transition-colors active:scale-95">
+<span class="material-symbols-outlined">calendar_month</span>
+</button>
+<h1 class="font-headline-lg-mobile md:font-headline-lg text-primary">情侣日记</h1>
+<button aria-label="Favorite" class="text-primary hover:bg-primary/5 p-2 rounded-full transition-colors active:scale-95">
+<span class="material-symbols-outlined">favorite</span>
+</button>
+</div>
+</header>
+<main class="pt-24 md:pt-32 px-container-padding pb-32 max-w-5xl mx-auto min-h-screen">
+<!-- Date Group 1 -->
+<section class="mb-12">
+<!-- Date Header -->
+<div class="mb-10 flex flex-col items-center">
+<h2 class="font-title-md text-on-surface bg-surface-container-low px-6 py-2 rounded-full border border-outline-variant/30 shadow-sm">
+                    2026年6月10日 今天
+                </h2>
+<div class="h-6 w-0.5 timeline-dotted-line mt-2"></div>
+</div>
+<!-- Central Timeline Container -->
+<div class="relative">
+<!-- Central Vertical Axis -->
+<div class="absolute left-1/2 -ml-[1px] top-0 bottom-0 w-0.5 timeline-dotted-line z-0"></div>
+<!-- Entries List (Reverse Chronological) -->
+<!-- Entry 1: User (Right) -->
+<div class="relative flex justify-center items-start mb-12 animate-fade-up delay-100">
+<!-- Right Side Card -->
+<div class="w-1/2 pl-8 md:pl-12">
+<div class="bg-white p-5 rounded-2xl border border-outline-variant/40 shadow-[0_4px_16px_rgba(217,124,138,0.06)] relative group hover:shadow-md transition-shadow">
+<!-- Time & Author Tag -->
+<div class="flex justify-between items-center mb-3">
+<span class="text-rose-bean font-semibold text-sm px-2.5 py-0.5 bg-rose-bean/10 rounded-md">他</span>
+<span class="text-on-surface-variant font-label-md text-xs">14:30</span>
+</div>
+<p class="text-on-surface mb-4">今天发现了一家很有氛围的咖啡馆，环境非常静谧，很适合带你来。</p>
+<!-- Images (Grid up to 9) -->
+<div class="grid grid-cols-3 gap-2">
+<div class="aspect-square rounded-lg overflow-hidden bg-surface-container">
+<img alt="Coffee" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCY2Xraz9tl80RH_HNPMj8UOLMwGTsFCGEoSgUJ1Ariqz13noppcm17SX2niEIgdCq5HYsUrIWVqwDlrxo2IO9P1tVVd6j14ChPAgJg1n7qjdMoPlzSN3Y_vqtASzLMQVSyL89P_ovy6PpyFZd0Xvlj92OB5LpZECgzx8YutxbWXzBIe5AfHetFyt_VCxEYmL_QoE_Jefznxa24BitNm4oga-L5xXKxG8ReCxy8frCSZioiAhvcrZAYNiWg7_AgGSDeAfcVYLTRGgQ"/>
+</div>
+</div>
+</div>
+</div>
+<!-- Axis Marker -->
+<div class="absolute left-1/2 -ml-2.5 top-6 z-10 w-5 h-5 bg-white border-2 border-rose-bean rounded-full flex items-center justify-center shadow-sm">
+<div class="w-2 h-2 bg-rose-bean rounded-full"></div>
+</div>
+<!-- Left Side Spacer -->
+<div class="w-1/2"></div>
+</div>
+<!-- Entry 2: Partner (Left) -->
+<div class="relative flex justify-center items-start mb-12 animate-fade-up delay-200">
+<!-- Right Side Spacer -->
+<div class="w-1/2"></div>
+<!-- Axis Marker -->
+<div class="absolute left-1/2 -ml-2.5 top-6 z-10 w-5 h-5 bg-white border-2 border-primary rounded-full flex items-center justify-center shadow-sm">
+<div class="w-2 h-2 bg-primary rounded-full"></div>
+</div>
+<!-- Left Side Card -->
+<div class="w-1/2 pr-8 md:pr-12 text-right">
+<div class="bg-white p-5 rounded-2xl border border-outline-variant/40 shadow-[0_4px_16px_rgba(217,124,138,0.06)] relative group text-left hover:shadow-md transition-shadow">
+<!-- Time & Author Tag -->
+<div class="flex justify-between items-center mb-3">
+<span class="text-primary font-semibold text-sm px-2.5 py-0.5 bg-primary/10 rounded-md">她</span>
+<span class="text-on-surface-variant font-label-md text-xs">12:15</span>
+</div>
+<p class="text-on-surface mb-4">午餐吃的麻辣烫，味道好极了！好想也让你尝尝这家的锅底。🍜</p>
+<div class="grid grid-cols-3 gap-2">
+<div class="aspect-square rounded-lg overflow-hidden bg-surface-container">
+<img alt="Food" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBs-C2LT_sc1r7uMxRB8OYLPUWfsUInj46jDiMnha3vJ0_Dad3j63tMIYgAYa6Wr_zv6mJFcWeFrvyqVsVCExnFSj8Bh8W8ggdzFvIeqOylpyFsRM-k144Wqmi5ybM8ZOM2uimFCfnMRxhJ5UsHyImYO503J1OsYveKvieTAwRv7UOkUjasaOIYu8cR8-q6Q4ZpcY4wSCRcOpd0lA4drwCAQwqaw22JkUDcGLEDid1L99BHUPFoDwco_bxVctaZfjfo7tQcdbtE21w"/>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Entry 3: Partner (Left) -->
+<div class="relative flex justify-center items-start mb-8 animate-fade-up delay-300">
+<div class="w-1/2"></div>
+<div class="absolute left-1/2 -ml-2 top-4 z-10 w-4 h-4 bg-white border border-outline rounded-full"></div>
+<div class="w-1/2 pr-8 md:pr-12">
+<div class="bg-white/60 backdrop-blur-sm p-4 rounded-xl border border-outline-variant/30 text-left">
+<div class="flex justify-between items-center mb-2">
+<span class="text-primary/70 font-semibold text-xs px-2 py-0.5 bg-primary/5 rounded">她</span>
+<span class="text-on-surface-variant text-[10px]">09:00</span>
+</div>
+<p class="text-on-surface-variant text-sm">早安！又是元气满满的一天 ☀️</p>
+</div>
+</div>
+</div>
+</div>
+</section>
+<!-- Date Group 2 (Yesterday example) -->
+<section class="opacity-80">
+<div class="mb-10 flex flex-col items-center">
+<h2 class="font-label-md text-on-surface-variant bg-surface-container/50 px-4 py-1.5 rounded-full border border-outline-variant/20">
+                    2026年6月9日
+                </h2>
+<div class="h-6 w-0.5 timeline-dotted-line mt-2"></div>
+</div>
+<div class="relative">
+<div class="absolute left-1/2 -ml-[1px] top-0 bottom-0 w-0.5 timeline-dotted-line z-0"></div>
+<div class="relative flex justify-center items-start mb-8">
+<div class="w-1/2 pl-8 md:pl-12">
+<div class="bg-white/40 p-4 rounded-xl border border-outline-variant/20 text-left">
+<div class="flex justify-between items-center mb-2">
+<span class="text-rose-bean/70 font-semibold text-xs px-2 py-0.5 bg-rose-bean/5 rounded">他</span>
+<span class="text-on-surface-variant text-[10px]">23:30</span>
+</div>
+<p class="text-on-surface-variant text-sm">晚安，宝贝。做个好梦。</p>
+</div>
+</div>
+<div class="absolute left-1/2 -ml-2 top-4 z-10 w-4 h-4 bg-white border border-outline rounded-full"></div>
+<div class="w-1/2"></div>
+</div>
+</div>
+</section>
+</main>
+<!-- Floating Action Button -->
+<button aria-label="Add new entry" class="fixed bottom-24 md:bottom-8 right-container-padding z-40 bg-gradient-to-br from-rose-bean to-sakura-pink text-white w-14 h-14 rounded-full shadow-lg shadow-rose-bean/30 flex items-center justify-center transition-transform hover:-translate-y-1 active:scale-90 animate-bounce-in ripple-container overflow-hidden">
+<span class="material-symbols-outlined text-[28px] relative z-10">add</span>
+</button>
+<!-- BottomNavBar -->
+<nav class="md:hidden fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-gutter py-3 pb-safe bg-surface/95 backdrop-blur-md shadow-[0_-4px_16px_rgba(0,0,0,0.05)] rounded-t-2xl border-t border-outline-variant/20">
+<a class="flex flex-col items-center justify-center bg-gradient-to-r from-rose-bean to-sakura-pink text-white rounded-full px-6 py-1.5 shadow-sm transition-all font-label-md text-label-md relative" href="#">
+<span class="material-symbols-outlined text-[20px] mb-0.5" style="font-variation-settings: 'FILL' 1;">auto_stories</span>
+<span class="text-[11px] font-medium leading-none">日记</span>
+<span class="absolute -top-1 -right-1 material-symbols-outlined text-white text-[12px]" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:text-primary transition-colors" href="#">
+<span class="material-symbols-outlined text-[22px] mb-0.5">casino</span>
+<span class="text-[11px] leading-none">赌局</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:text-primary transition-colors" href="#">
+<span class="material-symbols-outlined text-[22px] mb-0.5">person</span>
+<span class="text-[11px] leading-none">我的</span>
+</a>
+</nav>
+<script>
+        // Ripple Effect for FAB
+        function createRipple(event) {
+            const button = event.currentTarget;
+            const circle = document.createElement("span");
+            const diameter = Math.max(button.clientWidth, button.clientHeight);
+            const radius = diameter / 2;
+
+            circle.style.width = circle.style.height = `${diameter}px`;
+
+            let clientX = event.clientX;
+            let clientY = event.clientY;
+
+            if (event.touches && event.touches.length > 0) {
+                clientX = event.touches[0].clientX;
+                clientY = event.touches[0].clientY;
+            }
+
+            if (clientX && clientY) {
+                const rect = button.getBoundingClientRect();
+                circle.style.left = `${clientX - rect.left - radius}px`;
+                circle.style.top = `${clientY - rect.top - radius}px`;
+            } else {
+                circle.style.left = `0px`;
+                circle.style.top = `0px`;
+            }
+
+            circle.classList.add("ripple");
+
+            const existingRipple = button.querySelector(".ripple");
+            if (existingRipple) {
+                existingRipple.remove();
+            }
+
+            button.appendChild(circle);
+        }
+
+        const fab = document.querySelector('button[aria-label="Add new entry"]');
+        if(fab) {
+            fab.addEventListener('mousedown', createRipple);
+            fab.addEventListener('touchstart', createRipple, {passive: true});
+        }
+    </script>
+</body></html>

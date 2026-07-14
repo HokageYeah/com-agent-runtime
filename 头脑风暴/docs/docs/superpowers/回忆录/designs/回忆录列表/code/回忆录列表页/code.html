@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "error-container": "#ffdad6",
+                    "surface": "#fff8f7",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "primary-container": "#ff8fa3",
+                    "surface-container-highest": "#f0dee0",
+                    "primary-fixed": "#ffd9dd",
+                    "on-secondary-container": "#24667f",
+                    "surface-container-high": "#f6e4e5",
+                    "tertiary-container": "#e6a500",
+                    "on-secondary": "#ffffff",
+                    "on-surface-variant": "#544244",
+                    "tertiary": "#7d5800",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "on-background": "#22191a",
+                    "surface-container-low": "#fff0f1",
+                    "tertiary-fixed": "#ffdea9",
+                    "on-tertiary": "#ffffff",
+                    "on-primary-fixed": "#400014",
+                    "on-tertiary-container": "#5a3e00",
+                    "outline": "#877274",
+                    "surface-container": "#fbeaeb",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "on-secondary-fixed": "#001f2a",
+                    "on-surface": "#22191a",
+                    "on-primary-container": "#782539",
+                    "on-error": "#ffffff",
+                    "surface-bright": "#fff8f7",
+                    "inverse-on-surface": "#feedee",
+                    "surface-container-lowest": "#ffffff",
+                    "outline-variant": "#dac0c3",
+                    "surface-tint": "#9b4053",
+                    "on-error-container": "#93000a",
+                    "primary": "#9b4053",
+                    "inverse-primary": "#ffb2bd",
+                    "on-tertiary-fixed": "#271900",
+                    "error": "#ba1a1a",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "surface-dim": "#e7d6d7",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "on-primary": "#ffffff",
+                    "secondary": "#24657e",
+                    "inverse-surface": "#382e2f",
+                    "secondary-fixed": "#bde9ff",
+                    "background": "#fff8f7",
+                    "secondary-container": "#a6e2ff",
+                    "surface-variant": "#f0dee0"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "xl": "48px",
+                    "lg": "32px",
+                    "sm": "12px",
+                    "gutter": "16px",
+                    "md": "20px",
+                    "xs": "4px",
+                    "container-padding": "24px",
+                    "base": "8px"
+            },
+            "fontFamily": {
+                    "caption": ["Be Vietnam Pro"],
+                    "body-lg": ["Be Vietnam Pro"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "title-md": ["Plus Jakarta Sans"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"],
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "label-md": ["Be Vietnam Pro"]
+            },
+            "fontSize": {
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body { background-color: #fff8f7; }
+        .memory-card {
+            box-shadow: 0 8px 24px -4px rgba(255, 143, 163, 0.12);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .memory-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 32px -4px rgba(255, 143, 163, 0.2);
+        }
+        .stagger-in {
+            animation: staggerUp 0.6s ease-out forwards;
+            opacity: 0;
+        }
+        @keyframes staggerUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .glass-nav {
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #dac0c3; border-radius: 10px; }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="font-body-md text-on-surface antialiased">
+<!-- Top AppBar -->
+<header class="fixed top-0 w-full z-50 bg-surface/80 glass-nav shadow-sm h-16 flex justify-between items-center px-container-padding">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-2xl">arrow_back</span>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-primary tracking-tight">回忆录</h1>
+</div>
+<div class="flex items-center gap-4">
+<button class="p-2 rounded-full hover:bg-primary-container/20 transition-all active:scale-95">
+<span class="material-symbols-outlined text-primary">favorite</span>
+</button>
+</div>
+</header>
+<main class="pt-20 px-container-padding max-w-2xl mx-auto">
+<!-- Search & Filters -->
+<section class="mb-lg stagger-in" style="animation-delay: 0.1s;">
+<div class="relative mb-md">
+<input class="w-full bg-surface-container-low border-none rounded-full py-3 px-12 text-on-surface-variant focus:ring-2 focus:ring-primary/20 placeholder:text-outline-variant transition-all" placeholder="搜索珍贵的回忆..." type="text"/>
+<span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-outline">search</span>
+</div>
+</section>
+<!-- Memory List -->
+<div class="space-y-md">
+<!-- Pinned Memory Card -->
+<div class="memory-card relative bg-white rounded-[24px] p-container-padding stagger-in border border-primary-container/20" style="animation-delay: 0.2s;">
+<div class="absolute -top-2 -left-2 bg-primary text-white text-[10px] px-3 py-1 rounded-full font-bold shadow-sm flex items-center gap-1">
+<span class="material-symbols-outlined text-[12px]" style="font-variation-settings: 'FILL' 1;">push_pin</span>
+                    置顶回忆
+                </div>
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-md">
+<div class="relative">
+<img alt="Avatar" class="w-16 h-16 rounded-full object-cover ring-4 ring-primary-container/10" data-alt="A close-up portrait of a young woman with a warm, gentle smile, looking directly at the camera. She has soft features and is set against a soft-focus background of a cozy, sunlit room. The lighting is warm and golden, reflecting a romantic and intimate mood consistent with a couples diary theme. The overall aesthetic is clean, high-key, and heartwarming." src="https://lh3.googleusercontent.com/aida-public/AB6AXuArBBsa-dSjX_D5cMRkMjiq2_CijhIg05M4O32E3oNSIGJchkwKQafWbpaiCMYtt0EOaWlJ9SVAqhvxDi05KUd-ql-PL5pvNePROwVnqqBF13yAdRxFSBlXWYXUQiUjre5mFWMK9ti0-7sOxHJD-UFEFo4yhQTBX-33dzQYkkAuGy0Uw-toaYsbcVl2HKP1KMZwXHkW09tO8w2gkQzazXdl2I5giit63PS-UaFGYYGpej-142Bjlw_ieveAnxtFQFnvh8GdUP2U9JI"/>
+<div class="absolute -bottom-1 -right-1 bg-white p-1 rounded-full shadow-sm">
+<span class="material-symbols-outlined text-primary text-[16px]" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+</div>
+<div>
+<h3 class="font-title-md text-title-md text-on-surface">林小月</h3>
+<p class="font-caption text-caption text-outline">相遇至今：521天</p>
+</div>
+</div>
+<button class="text-outline-variant hover:text-primary transition-colors p-1">
+<span class="material-symbols-outlined">more_vert</span>
+</button>
+</div>
+<div class="mt-md grid grid-cols-2 gap-md">
+<div class="bg-primary-container/5 rounded-xl p-3 text-center border border-primary-container/10">
+<p class="font-caption text-caption text-primary">日记总数</p>
+<p class="font-title-md text-title-md text-primary-container">128</p>
+</div>
+<div class="bg-secondary-container/5 rounded-xl p-3 text-center border border-secondary-container/10">
+<p class="font-caption text-caption text-secondary">打赌达成</p>
+<p class="font-title-md text-title-md text-secondary">24</p>
+</div>
+</div>
+<div class="mt-md flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-sm">auto_stories</span>
+<p class="text-on-surface-variant font-body-md italic line-clamp-1">“那天在雨中奔跑，是我们最疯狂的时刻...”</p>
+</div>
+</div>
+<!-- Regular Memory Card 1 -->
+<div class="memory-card bg-white rounded-[24px] p-container-padding stagger-in border border-[#F2E8DF]" style="animation-delay: 0.3s;">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-md">
+<img alt="Avatar" class="w-14 h-14 rounded-full object-cover grayscale-[20%]" data-alt="A handsome young man with a kind expression, wearing a soft knit sweater in a neutral tone. He is outdoors during the golden hour, with soft, directional sunlight highlighting his features. The background is a blurred park scene, evoking a nostalgic and peaceful feeling. The visual style is warm, tactile, and professional, fitting the intimate sanctuary brand identity." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDuUdbv6SgDTzl1qfyzxlyAo2Ct8Z1PSQY-Y4ac760JWgwvZD64EXDJqOd4LxBUiEMOiixFBnPIS8pRLwX2_2Mn0A5-NeigkyWk-7aFGACHjrxyghL2--9nZ0e7KypHSglami_jMYrmieZh6famGW5JHI8pjc6Hn_Qo_Phg_Zjul8v8uDvChAi8OfthuRGTnvdbDM9Bhk8BgC3Gpl5qcprlCpd8vNl-ERUIWEct5eGQrV-owAFj19F_RalTxKsBbC_7BJzji2Gb0qk"/>
+<div>
+<h3 class="font-title-md text-title-md text-on-surface">陈亦然</h3>
+<p class="font-caption text-caption text-outline">相遇至今：892天</p>
+</div>
+</div>
+<div class="flex gap-1">
+<button class="p-2 text-outline-variant hover:text-primary transition-all active:scale-90">
+<span class="material-symbols-outlined text-[20px]">push_pin</span>
+</button>
+<button class="p-2 text-outline-variant hover:text-error transition-all active:scale-90">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<div class="mt-md flex gap-lg">
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-primary text-[18px]">book</span>
+<span class="font-label-md text-label-md text-on-surface-variant">256 篇日记</span>
+</div>
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-tertiary text-[18px]">military_tech</span>
+<span class="font-label-md text-label-md text-on-surface-variant">42 个契约</span>
+</div>
+</div>
+</div>
+<!-- Regular Memory Card 2 -->
+<div class="memory-card bg-white rounded-[24px] p-container-padding stagger-in border border-[#F2E8DF]" style="animation-delay: 0.4s;">
+<div class="flex items-start justify-between">
+<div class="flex items-center gap-md">
+<img alt="Avatar" class="w-14 h-14 rounded-full object-cover" data-alt="A candid, high-quality portrait of a smiling woman with glasses, standing in a library or a book-filled study. The lighting is soft and diffused, coming from a nearby window. The mood is intellectually romantic and cozy. The composition is clean with a focus on her authentic expression, using a warm color palette dominated by creams and soft browns." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBjefXg5L1sUrYT_85hSUuc7_y3DUEHQry0UBUEM6d77Ogea4gIkKrWudMKRH6vQVYGtnTgIpeXam26qTdvcp0ZNNcxBDkC4e1YIMGAqJkBDC5WoZTrp2IMy8VORpNF-Sh05YfRwvHmoVnGx9znezLJKToGPQ6og9nqcR9O7HATaU2eKHBKpETvFh7yGmnw4DJ2DcYR6n3GFCOIYSY9gUMO6e8Sc2_CdL6fhLtWfbjL6CpDiUwuveiaodH4v2Wkg-BSd4iWXf_esOI"/>
+<div>
+<h3 class="font-title-md text-title-md text-on-surface">苏苏</h3>
+<p class="font-caption text-caption text-outline">相遇至今：120天</p>
+</div>
+</div>
+<div class="flex gap-1">
+<button class="p-2 text-outline-variant hover:text-primary transition-all active:scale-90">
+<span class="material-symbols-outlined text-[20px]">push_pin</span>
+</button>
+<button class="p-2 text-outline-variant hover:text-error transition-all active:scale-90">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<div class="mt-md flex gap-lg">
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-primary text-[18px]">book</span>
+<span class="font-label-md text-label-md text-on-surface-variant">45 篇日记</span>
+</div>
+<div class="flex items-center gap-1">
+<span class="material-symbols-outlined text-tertiary text-[18px]">military_tech</span>
+<span class="font-label-md text-label-md text-on-surface-variant">8 个契约</span>
+</div>
+</div>
+</div>
+</div>
+<!-- Empty State Illustration Placeholder / Bottom Spacer -->
+<div class="mt-xl text-center py-lg opacity-40">
+<span class="material-symbols-outlined text-primary text-4xl block mb-2">auto_stories</span>
+<p class="font-caption text-caption">到底啦，所有的爱都在这里了</p>
+</div>
+</main>
+<!-- FAB -->
+<!-- Bottom Navigation Bar -->
+<script>
+        // Micro-interaction for memory cards
+        document.querySelectorAll('.memory-card').forEach(card => {
+            card.addEventListener('touchstart', function() {
+                this.style.transform = 'scale(0.98)';
+            });
+            card.addEventListener('touchend', function() {
+                this.style.transform = 'scale(1)';
+            });
+        });
+
+        // Simple filter button active state toggle
+        const filterBtns = document.querySelectorAll('button.whitespace-nowrap');
+        filterBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                filterBtns.forEach(b => {
+                    b.classList.remove('bg-primary', 'text-white', 'shadow-md');
+                    b.classList.add('bg-white', 'text-on-surface-variant', 'border', 'border-outline-variant/30');
+                });
+                btn.classList.add('bg-primary', 'text-white', 'shadow-md');
+                btn.classList.remove('bg-white', 'text-on-surface-variant', 'border', 'border-outline-variant/30');
+            });
+        });
+    </script>
+</body></html>

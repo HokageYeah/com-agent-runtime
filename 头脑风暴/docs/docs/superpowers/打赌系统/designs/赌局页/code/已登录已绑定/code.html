@@ -1,0 +1,353 @@
+<!DOCTYPE html><html lang="zh-CN" style=""><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<title>情侣日记 - 赌局首页</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-tertiary": "#ffffff",
+                        "surface-variant": "#f0dee0",
+                        "on-surface-variant": "#544244",
+                        "inverse-on-surface": "#feedee",
+                        "surface-container-lowest": "#ffffff",
+                        "primary": "#9b4053",
+                        "on-surface": "#22191a",
+                        "tertiary-fixed": "#ffdea9",
+                        "on-error": "#ffffff",
+                        "outline-variant": "#dac0c3",
+                        "on-secondary-fixed-variant": "#004d64",
+                        "inverse-surface": "#382e2f",
+                        "error-container": "#ffdad6",
+                        "tertiary-container": "#e6a500",
+                        "on-tertiary-container": "#5a3e00",
+                        "primary-fixed": "#ffd9dd",
+                        "on-primary": "#ffffff",
+                        "on-secondary-fixed": "#001f2a",
+                        "on-secondary-container": "#24667f",
+                        "on-background": "#22191a",
+                        "surface-tint": "#9b4053",
+                        "on-tertiary-fixed-variant": "#5e4100",
+                        "surface": "#fff8f7",
+                        "secondary-fixed-dim": "#93cfeb",
+                        "secondary-container": "#a6e2ff",
+                        "primary-container": "#ff8fa3",
+                        "on-error-container": "#93000a",
+                        "on-primary-fixed-variant": "#7d283c",
+                        "tertiary-fixed-dim": "#ffba27",
+                        "surface-bright": "#fff8f7",
+                        "outline": "#877274",
+                        "on-primary-fixed": "#400014",
+                        "on-secondary": "#ffffff",
+                        "error": "#ba1a1a",
+                        "surface-dim": "#e7d6d7",
+                        "on-primary-container": "#782539",
+                        "surface-container-high": "#f6e4e5",
+                        "secondary-fixed": "#bde9ff",
+                        "primary-fixed-dim": "#ffb2bd",
+                        "inverse-primary": "#ffb2bd",
+                        "surface-container-highest": "#f0dee0",
+                        "tertiary": "#7d5800",
+                        "secondary": "#24657e",
+                        "on-tertiary-fixed": "#271900",
+                        "background": "#fff8f7",
+                        "surface-container": "#fbeaeb",
+                        "surface-container-low": "#fff0f1"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "2xl": "1.5rem",
+                        "3xl": "2rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "xl": "48px",
+                        "lg": "32px",
+                        "base": "8px",
+                        "sm": "12px",
+                        "md": "20px",
+                        "container-padding": "24px",
+                        "gutter": "16px",
+                        "xs": "4px"
+                    },
+                    "fontFamily": {
+                        "title-md": ["Plus Jakarta Sans"],
+                        "display-lg": ["Plus Jakarta Sans"],
+                        "headline-lg": ["Plus Jakarta Sans"],
+                        "caption": ["Be Vietnam Pro"],
+                        "body-md": ["Be Vietnam Pro"],
+                        "body-lg": ["Be Vietnam Pro"],
+                        "headline-lg-mobile": ["Plus Jakarta Sans"],
+                        "label-md": ["Be Vietnam Pro"]
+                    },
+                    "fontSize": {
+                        "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                        "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                        "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                        "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                        "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                        "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                        "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                        "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+
+        .pulse-breeze {
+            animation: pulse-breeze 4s ease-in-out infinite;
+        }
+
+        @keyframes pulse-breeze {
+            0%, 100% { transform: translateY(0) scale(1); box-shadow: 0 4px 16px rgba(155, 64, 83, 0.1); }
+            50% { transform: translateY(-4px) scale(1.02); box-shadow: 0 12px 32px rgba(155, 64, 83, 0.2); }
+        }
+
+        .timeline-line {
+            background-image: linear-gradient(to bottom, #dac0c3 50%, transparent 50%);
+            background-size: 2px 8px;
+            background-repeat: repeat-y;
+        }
+
+        body {
+            background-color: #fff8f7;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .soft-pink-shadow {
+            box-shadow: 0 8px 24px -4px rgba(155, 64, 83, 0.15);
+        }
+
+        .record-gradient-she {
+            background: linear-gradient(135deg, #ffffff 0%, #fff0f1 100%);
+        }
+
+        .record-gradient-me {
+            background: linear-gradient(135deg, #ffffff 0%, #f0f9ff 100%);
+        }
+    </style>
+</head>
+<body class="font-body-md text-on-surface min-h-screen pb-32">
+<!-- Main Content Canvas -->
+<main class="px-container-padding max-w-2xl mx-auto pt-16">
+<!-- Page Header (Simplified without TopAppBar) -->
+
+<!-- Timeline Group 1 -->
+<div class="mb-12">
+<div class="flex justify-center mb-8">
+<span class="bg-surface-variant text-on-surface-variant px-4 py-1 rounded-full text-caption font-semibold">2026年6月10日</span>
+</div>
+<div class="relative">
+<div class="absolute left-1/2 top-0 bottom-0 w-px timeline-line -translate-x-1/2"></div>
+<!-- Left Card -->
+<div class="grid grid-cols-2 gap-4 relative mb-12">
+<div class="pr-2">
+<div class="bg-white rounded-2xl p-4 soft-pink-shadow border border-surface-variant/30 transition-transform active:scale-95">
+<div class="flex items-center justify-between mb-3">
+<span class="bg-secondary-container text-on-secondary-container text-[10px] px-2 py-0.5 rounded-full font-bold">TA 发起</span>
+<span class="text-tertiary font-bold text-[10px] flex items-center gap-1">
+<span class="relative flex h-1.5 w-1.5">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-tertiary opacity-75"></span>
+<span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-tertiary"></span>
+</span>
+                                进行中
+                            </span>
+</div>
+<p class="font-title-md text-sm text-on-surface mb-3">赌我今天能不能早睡 (23:30前)</p>
+<div class="flex items-center gap-2 bg-surface-container-low p-2 rounded-lg mb-3">
+<span class="material-symbols-outlined text-primary text-lg">coffee</span>
+<div class="flex flex-col">
+<span class="text-[10px] text-outline leading-none">奖励</span>
+<span class="text-xs font-bold text-primary">超大冰美式</span>
+</div>
+</div>
+<div class="text-[10px] text-outline flex items-center gap-1">
+<span class="material-symbols-outlined text-xs">schedule</span>
+                            截止: 23:30 结束
+                        </div>
+</div>
+</div>
+<div class="absolute left-1/2 -translate-x-1/2 top-4 w-4 h-4 bg-primary rounded-full border-4 border-surface shadow-sm z-10"></div>
+<div></div>
+</div>
+<!-- Right Card (Redeeming State) -->
+<div class="grid grid-cols-2 gap-4 relative mb-12">
+<div></div>
+<div class="absolute left-1/2 -translate-x-1/2 top-4 w-4 h-4 bg-primary-container rounded-full border-4 border-surface shadow-sm z-10"></div>
+<div class="pl-2">
+<div class="pulse-breeze bg-white rounded-2xl p-4 border-2 border-primary-container transition-transform active:scale-95">
+<div class="flex items-center justify-between mb-3">
+<span class="bg-primary-container text-on-primary-container text-[10px] px-2 py-0.5 rounded-full font-bold">我发起</span>
+<div class="flex items-center gap-1">
+<span class="text-primary font-bold text-[10px]">待兑现</span>
+<span class="material-symbols-outlined text-xs text-primary" style="font-variation-settings: &quot;FILL&quot; 1;">stars</span>
+</div>
+</div>
+<p class="font-title-md text-sm text-on-surface mb-3">看谁先洗完澡 🛀</p>
+<div class="flex items-center gap-2 bg-primary-fixed/20 p-2 rounded-lg mb-3">
+<span class="material-symbols-outlined text-primary text-lg">flatware</span>
+<div class="flex flex-col">
+<span class="text-[10px] text-primary/70 leading-none">奖励</span>
+<span class="text-xs font-bold text-primary">洗碗券 x3</span>
+</div>
+</div>
+<div class="text-[10px] text-primary font-bold flex items-center gap-1">
+<span class="material-symbols-outlined text-xs">emoji_events</span>
+                            结果: 我赢了！✌️
+                        </div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Timeline Group 2 -->
+<div class="mb-12">
+<div class="flex justify-center mb-8">
+<span class="bg-surface-variant text-on-surface-variant px-4 py-1 rounded-full text-caption font-semibold">2026年6月08日</span>
+</div>
+<div class="relative">
+<div class="absolute left-1/2 top-0 bottom-0 w-px timeline-line -translate-x-1/2"></div>
+<div class="grid grid-cols-2 gap-4 relative mb-12">
+<div class="pr-2">
+<div class="bg-white rounded-2xl p-4 soft-pink-shadow border border-surface-variant/30 opacity-90">
+<div class="flex items-center justify-between mb-3">
+<span class="bg-secondary-container text-on-secondary-container text-[10px] px-2 py-0.5 rounded-full font-bold">TA 发起</span>
+<span class="text-on-surface-variant font-bold text-[10px]">待结算</span>
+</div>
+<p class="font-title-md text-sm text-on-surface mb-3">这周能不能瘦1斤</p>
+<div class="flex items-center gap-2 bg-surface-container-low p-2 rounded-lg mb-3">
+<span class="material-symbols-outlined text-primary text-lg">ramen_dining</span>
+<div class="flex flex-col">
+<span class="text-[10px] text-outline leading-none">奖励</span>
+<span class="text-xs font-bold text-primary">一顿火锅</span>
+</div>
+</div>
+<div class="text-[10px] text-outline flex items-center gap-1">
+<span class="material-symbols-outlined text-xs">hourglass_empty</span>
+                            等待确认结果...
+                        </div>
+</div>
+</div>
+<div class="absolute left-1/2 -translate-x-1/2 top-4 w-4 h-4 bg-outline rounded-full border-4 border-surface shadow-sm z-10"></div>
+<div></div>
+</div>
+<div class="grid grid-cols-2 gap-4 relative mb-12">
+<div></div>
+<div class="absolute left-1/2 -translate-x-1/2 top-4 w-4 h-4 bg-surface-dim rounded-full border-4 border-surface shadow-sm z-10"></div>
+<div class="pl-2">
+<div class="bg-surface-container-low rounded-2xl p-4 border border-outline-variant/30 grayscale-[0.3]">
+<div class="flex items-center justify-between mb-3">
+<span class="bg-outline-variant text-on-surface-variant text-[10px] px-2 py-0.5 rounded-full font-bold">我发起</span>
+<span class="text-outline font-bold text-[10px]">已完成</span>
+</div>
+<p class="font-title-md text-sm text-on-surface mb-3">猜丁壳决定取快递</p>
+<div class="flex items-center gap-2 bg-surface-variant/30 p-2 rounded-lg mb-1">
+<span class="material-symbols-outlined text-on-surface-variant text-lg">package_2</span>
+<div class="flex flex-col">
+<span class="text-[10px] text-on-surface-variant/50 leading-none">奖励</span>
+<span class="text-xs text-on-surface-variant line-through decoration-primary/30">免去取件</span>
+</div>
+</div>
+<div class="text-[10px] text-outline-variant font-medium mt-2">已于 06-08 兑现</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- Statistics Section Optimized -->
+<section class="mt-16 bg-white rounded-3xl p-8 soft-pink-shadow border border-primary-fixed-dim/20 relative overflow-hidden">
+<div class="absolute top-0 right-0 p-4 opacity-10">
+<span class="material-symbols-outlined text-6xl text-primary">emoji_events</span>
+</div>
+<h2 class="font-title-md text-primary text-center mb-8 flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-lg">analytics</span>
+            我们的战绩
+        </h2>
+<div class="grid grid-cols-2 gap-6 mb-8 relative z-10">
+<div class="record-gradient-she p-5 rounded-2xl text-center border border-primary-fixed-dim/30">
+<div class="flex justify-center mb-2">
+<div class="w-10 h-10 bg-primary-fixed-dim rounded-full flex items-center justify-center">
+<img alt="She" class="w-full h-full rounded-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLvCLpzxA3rhRusGyGCQeIFARfaBGN5eXbjgLAesgWyGYQ_O_HQBdsD9sZVSxLc553yuAynL3HYErm7cFrEUDkQxKbFGk1WQcKT2Mtb5BYr9XkOMe6GmCma0mJGqbqcAGcumStiznzGggHCgRDyA0yaAjzO4x0aevBXw67hKnUf0Ev2ril3JjhhL8CTA-TP5FTI2eRkFexDTYWxyFm9gdQB08aTaKtASsuEkjg8Vh_ArkiE1gQ8VYIczfo0">
+</div>
+</div>
+<div class="text-[10px] text-outline font-bold uppercase tracking-wider mb-1">She Wins</div>
+<div class="text-5xl text-primary font-bold font-display-lg">24</div>
+</div>
+<div class="record-gradient-me p-5 rounded-2xl text-center border border-secondary-fixed-dim/30">
+<div class="flex justify-center mb-2">
+<div class="w-10 h-10 bg-secondary-fixed-dim rounded-full flex items-center justify-center">
+<img alt="Me" class="w-full h-full rounded-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLtN9OYVG4ibBxPgFkhn4NS3-HR05W4madYnn7Gx0TCHAN319pNvu2rewn5kqaqD52Rtki90yav2gz3hGX9cORWqzZ8ybmqE3y409898RtKecMW5b4kLwUqYdddxFkbZTg_p8w8adiz9N7Yi37khP3W_5MXhN_Nk10RRrrkjM0S_UYhH0afrxGPj9UvS_SYEqe8VVakwizk9R_4PC3t472GvaULw75M6l3Xlbphcem9lobynp6GXRc1zSg">
+</div>
+</div>
+<div class="text-[10px] text-outline font-bold uppercase tracking-wider mb-1">Me Wins</div>
+<div class="text-5xl text-secondary font-bold font-display-lg">23</div>
+</div>
+</div>
+<div class="space-y-4">
+<div class="flex items-center justify-between bg-surface-container-low px-5 py-3 rounded-2xl">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-xl">verified</span>
+<span class="text-label-md text-on-surface-variant">履约率</span>
+</div>
+<span class="text-label-md text-primary font-bold">100%</span>
+</div>
+<div class="flex items-center justify-between bg-surface-container-low px-5 py-3 rounded-2xl">
+  <div class="flex items-center gap-3">
+    <span class="material-symbols-outlined text-primary-container text-[24px] leading-none flex items-center justify-center">card_giftcard</span>
+    <span class="text-label-md text-on-surface-variant">最常出现的奖励</span>
+  </div>
+  <div class="flex items-center gap-2 items-baseline">
+    <span class="text-label-md text-primary font-bold">奶茶</span>
+    <span class="text-caption text-outline bg-surface-variant/30 px-2 py-0.5 rounded-full">x8</span>
+  </div>
+</div>
+</div>
+</section>
+</main>
+<!-- Floating Action Button -->
+<button class="fixed bottom-24 right-6 w-16 h-16 bg-primary text-on-primary flex items-center justify-center shadow-lg active:scale-90 transition-all duration-200 ease-out z-40 rounded-full">
+<span class="material-symbols-outlined text-3xl">add_box</span>
+</button>
+<!-- BottomNavBar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-gutter py-3 pb-safe bg-surface/90 backdrop-blur-xl border-t border-surface-variant/30 rounded-t-[2rem]">
+<a class="flex flex-col items-center justify-center text-on-surface-variant dark:text-outline px-6 py-1 hover:bg-surface-variant/30 rounded-2xl" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+<span class="font-label-md text-[10px]">日记</span>
+</a>
+<a class="flex flex-col items-center justify-center bg-primary text-on-primary rounded-2xl px-6 py-1" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: &quot;FILL&quot; 1;">casino</span>
+<span class="font-label-md text-[10px]">赌局</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant dark:text-outline px-6 py-1 hover:bg-surface-variant/30 rounded-2xl" href="#">
+<span class="material-symbols-outlined">person</span>
+<span class="font-label-md text-[10px]">我的</span>
+</a>
+</nav>
+<script>
+    // Micro-interactions for betting cards
+    document.querySelectorAll('.active\\:scale-95').forEach(card => {
+        card.addEventListener('touchstart', () => {
+            card.style.transform = 'scale(0.96)';
+        });
+        card.addEventListener('touchend', () => {
+            card.style.transform = 'scale(1)';
+        });
+    });
+</script>
+
+
+
+
+</body></html>

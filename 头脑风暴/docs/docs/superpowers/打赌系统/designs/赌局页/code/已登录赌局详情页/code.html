@@ -1,0 +1,381 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0, viewport-fit=cover" name="viewport">
+<title>赌局详情 | Our Journey</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "secondary-fixed-dim": "#93cfeb",
+                        "inverse-surface": "#382e2f",
+                        "surface-bright": "#fff8f7",
+                        "on-secondary-fixed-variant": "#004d64",
+                        "tertiary-fixed-dim": "#ffba27",
+                        "error-container": "#ffdad6",
+                        "on-tertiary-container": "#5a3e00",
+                        "on-tertiary": "#ffffff",
+                        "tertiary": "#7d5800",
+                        "on-secondary": "#ffffff",
+                        "surface-tint": "#9b4053",
+                        "on-primary-fixed": "#400014",
+                        "on-tertiary-fixed": "#271900",
+                        "on-primary-fixed-variant": "#7d283c",
+                        "on-error-container": "#93000a",
+                        "on-primary-container": "#782539",
+                        "secondary": "#24657e",
+                        "error": "#ba1a1a",
+                        "outline-variant": "#dac0c3",
+                        "surface-dim": "#e7d6d7",
+                        "on-background": "#22191a",
+                        "surface-container-low": "#fff0f1",
+                        "primary-fixed-dim": "#ffb2bd",
+                        "primary": "#9b4053",
+                        "surface-variant": "#f0dee0",
+                        "surface-container-lowest": "#ffffff",
+                        "surface-container-highest": "#f0dee0",
+                        "tertiary-fixed": "#ffdea9",
+                        "tertiary-container": "#e6a500",
+                        "primary-fixed": "#ffd9dd",
+                        "on-surface-variant": "#544244",
+                        "primary-container": "#ff8fa3",
+                        "on-error": "#ffffff",
+                        "outline": "#877274",
+                        "on-secondary-container": "#24667f",
+                        "surface-container": "#fbeaeb",
+                        "inverse-on-surface": "#feedee",
+                        "surface-container-high": "#f6e4e5",
+                        "secondary-container": "#a6e2ff",
+                        "on-tertiary-fixed-variant": "#5e4100",
+                        "on-primary": "#ffffff",
+                        "background": "#fff8f7",
+                        "on-secondary-fixed": "#001f2a",
+                        "secondary-fixed": "#bde9ff",
+                        "inverse-primary": "#ffb2bd",
+                        "on-surface": "#22191a",
+                        "surface": "#fff8f7"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    spacing: {
+                        "xl": "48px",
+                        "lg": "32px",
+                        "sm": "12px",
+                        "gutter": "16px",
+                        "container-padding": "24px",
+                        "base": "8px",
+                        "xs": "4px",
+                        "md": "20px"
+                    },
+                    fontFamily: {
+                        "title-md": ["Plus Jakarta Sans"],
+                        "body-lg": ["Be Vietnam Pro"],
+                        "headline-lg-mobile": ["Plus Jakarta Sans"],
+                        "display-lg": ["Plus Jakarta Sans"],
+                        "body-md": ["Be Vietnam Pro"],
+                        "headline-lg": ["Plus Jakarta Sans"],
+                        "label-md": ["Be Vietnam Pro"],
+                        "caption": ["Be Vietnam Pro"]
+                    },
+                    fontSize: {
+                        "title-md": ["20px", { "lineHeight": "28px", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "36px", "fontWeight": "700" }],
+                        "display-lg": ["48px", { "lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-lg": ["32px", { "lineHeight": "40px", "fontWeight": "700" }],
+                        "label-md": ["14px", { "lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600" }],
+                        "caption": ["12px", { "lineHeight": "16px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body {
+            background-color: #fff8f7;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .soft-card-shadow {
+            box-shadow: 0 10px 30px rgba(155, 64, 83, 0.08);
+        }
+
+        .active-glow {
+            box-shadow: 0 0 15px rgba(147, 207, 235, 0.4);
+            animation: pulse-glow 2s infinite;
+        }
+
+        @keyframes pulse-glow {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.05); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .bounce-click:active {
+            transform: scale(0.92);
+            transition: transform 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .choice-selected {
+            border: 3px solid #ff8fa3;
+            background-color: #fff0f1;
+            transform: translateY(-4px);
+        }
+
+        .dashed-line {
+            background-image: linear-gradient(90deg, #dac0c3 50%, transparent 50%);
+            background-size: 12px 1px;
+            background-repeat: repeat-x;
+        }
+
+        .heart-particle {
+            position: absolute;
+            pointer-events: none;
+            animation: float-up 0.8s ease-out forwards;
+        }
+
+        @keyframes float-up {
+            0% { transform: translateY(0) scale(1); opacity: 1; }
+            100% { transform: translateY(-50px) scale(1.5); opacity: 0; }
+        }
+
+        .hide-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+    </style>
+</head>
+<body class="font-body-md text-on-surface">
+<!-- Top Navigation Bar -->
+<header class="fixed top-0 left-0 w-full z-50 bg-surface/80 backdrop-blur-md flex justify-between items-center px-container-padding h-16">
+<button class="material-symbols-outlined text-on-surface-variant hover:opacity-80 transition-opacity bounce-click" data-icon="arrow_back">arrow_back</button>
+<h1 class="text-title-md font-title-md font-bold text-primary">赌局详情</h1>
+<button class="material-symbols-outlined text-primary hover:opacity-80 transition-opacity bounce-click" data-icon="favorite">favorite</button>
+</header>
+<main class="pt-20 pb-32 px-container-padding max-w-md mx-auto">
+<!-- Hero Section -->
+<section class="relative mb-lg">
+<div class="bg-surface-container-lowest rounded-[32px] p-lg soft-card-shadow border border-[#f2e8df] relative overflow-hidden">
+<!-- Status Badge -->
+<div class="absolute top-4 right-4 bg-secondary-container text-on-secondary-container px-3 py-1 rounded-full text-label-md font-label-md active-glow flex items-center gap-1">
+<span class="w-2 h-2 bg-secondary rounded-full animate-pulse"></span>
+                    进行中
+                </div>
+<h2 class="text-headline-lg-mobile font-headline-lg-mobile text-on-background mt-4 mb-2">今天绝对会下雨</h2>
+<div class="mt-4 flex flex-col items-center gap-2">
+    <div class="flex items-center gap-1 text-on-surface-variant opacity-70 mb-1">
+        <span class="material-symbols-outlined text-[18px]">schedule</span>
+        <span class="text-label-md font-label-md">距离揭晓还剩</span>
+    </div>
+    <div id="countdown-timer" class="flex items-center gap-2 font-title-md">
+        <div class="flex flex-col items-center">
+            <span class="bg-primary-container/20 text-primary px-2 py-1 rounded-lg min-w-[40px] text-center" id="days">00</span>
+            <span class="text-[10px] uppercase opacity-60 mt-1">天</span>
+        </div>
+        <span class="text-primary animate-pulse font-bold">:</span>
+        <div class="flex flex-col items-center">
+            <span class="bg-primary-container/20 text-primary px-2 py-1 rounded-lg min-w-[40px] text-center" id="hours">00</span>
+            <span class="text-[10px] uppercase opacity-60 mt-1">时</span>
+        </div>
+        <span class="text-primary animate-pulse font-bold">:</span>
+        <div class="flex flex-col items-center">
+            <span class="bg-primary-container/20 text-primary px-2 py-1 rounded-lg min-w-[40px] text-center" id="minutes">00</span>
+            <span class="text-[10px] uppercase opacity-60 mt-1">分</span>
+        </div>
+        <span class="text-primary animate-pulse font-bold">:</span>
+        <div class="flex flex-col items-center">
+            <span class="bg-primary-container/20 text-primary px-2 py-1 rounded-lg min-w-[40px] text-center" id="seconds">00</span>
+            <span class="text-[10px] uppercase opacity-60 mt-1">秒</span>
+        </div>
+    </div>
+</div>
+</div>
+</section>
+<!-- Wager Info Card -->
+<section class="mb-lg space-y-md">
+<div class="bg-surface-container-lowest rounded-[32px] p-md soft-card-shadow border border-[#f2e8df]">
+<div class="flex items-center gap-4">
+<div class="w-20 h-20 rounded-2xl bg-surface-container flex items-center justify-center p-2">
+<img alt="奖励：一杯奶茶" class="w-full h-full object-contain" src="https://lh3.googleusercontent.com/aida/AP1WRLvQvimwQCbAZ4Y31A_nJ5oEuRxnvhuN1gi6BrniNomIYv8xApORX1pNzrLaY-fCs3GqadOpH3S9gF2--UkKbDNAwyd3jYoVwZeq7N-J7PFiKG8vNoXifH2yrgxwRAzBAQxaVVQ2OIbwqNtdrHCkdYYpnGEnksfnoOoDG1PHuUWGDMv8ulFP1Xc0jyA9zwvRn2xiPTKeUuxMn1i2yopRUcNav_qDmbHWliGdS1U9KLlEvhGPinIFzwsHO9o">
+</div>
+<div>
+<p class="text-on-surface-variant text-label-md font-label-md mb-1">赌注奖励</p>
+<p class="text-title-md font-title-md text-primary">一杯奶茶</p>
+</div>
+</div>
+<div class="mt-lg relative flex justify-between items-center px-4">
+<!-- Participant: She -->
+<div class="flex flex-col items-center gap-2 z-10">
+<div class="w-16 h-16 rounded-full border-4 border-white shadow-md overflow-hidden bg-surface">
+<img alt="She" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLvCLpzxA3rhRusGyGCQeIFARfaBGN5eXbjgLAesgWyGYQ_O_HQBdsD9sZVSxLc553yuAynL3HYErm7cFrEUDkQxKbFGk1WQcKT2Mtb5BYr9XkOMe6GmCma0mJGqbqcAGcumStiznzGggHCgRDyA0yaAjzO4x0aevBXw67hKnUf0Ev2ril3JjhhL8CTA-TP5FTI2eRkFexDTYWxyFm9gdQB08aTaKtASsuEkjg8Vh_ArkiE1gQ8VYIczfo0">
+</div>
+<span class="text-label-md font-label-md text-on-surface">女孩纸</span>
+</div>
+<!-- Connection Line -->
+<div class="absolute left-0 right-0 top-8 px-20">
+<div class="dashed-line h-px w-full"></div>
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white px-2">
+<span class="material-symbols-outlined text-primary" data-icon="favorite" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+</div>
+<!-- Participant: He -->
+<div class="flex flex-col items-center gap-2 z-10">
+<div class="w-16 h-16 rounded-full border-4 border-white shadow-md overflow-hidden bg-surface">
+<img alt="He" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLtN9OYVG4ibBxPgFkhn4NS3-HR05W4madYnn7Gx0TCHAN319pNvu2rewn5kqaqD52Rtki90yav2gz3hGX9cORWqzZ8ybmqE3y409898RtKecMW5b4kLwUqYdddxFkbZTg_p8w8adiz9N7Yi37khP3W_5MXhN_Nk10RRrrkjM0S_UYhH0afrxGPj9UvS_SYEqe8VVakwizk9R_4PC3t472GvaULw75M6l3Xlbphcem9lobynp6GXRc1zSg">
+</div>
+<span class="text-label-md font-label-md text-on-surface">男孩纸</span>
+</div>
+</div>
+</div>
+</section>
+<!-- Settlement Action Area -->
+<section class="mb-xl">
+<div class="mb-md">
+<h3 class="text-title-md font-title-md text-on-background">手动结算胜负</h3>
+<p class="text-on-surface-variant text-body-md opacity-80">谁才是今天的锦鲤呢？</p>
+</div>
+<div class="grid grid-cols-3 gap-sm h-40">
+<!-- I Won (She) -->
+<button class="choice-card bounce-click flex flex-col items-center justify-center gap-2 bg-surface-container-lowest rounded-[24px] soft-card-shadow border border-[#f2e8df] transition-all duration-300" onclick="selectChoice(this, 'girl')">
+<img class="w-12 h-12 rounded-full border-2 border-primary/20" src="https://lh3.googleusercontent.com/aida/AP1WRLvCLpzxA3rhRusGyGCQeIFARfaBGN5eXbjgLAesgWyGYQ_O_HQBdsD9sZVSxLc553yuAynL3HYErm7cFrEUDkQxKbFGk1WQcKT2Mtb5BYr9XkOMe6GmCma0mJGqbqcAGcumStiznzGggHCgRDyA0yaAjzO4x0aevBXw67hKnUf0Ev2ril3JjhhL8CTA-TP5FTI2eRkFexDTYWxyFm9gdQB08aTaKtASsuEkjg8Vh_ArkiE1gQ8VYIczfo0">
+<span class="text-label-md font-label-md text-on-surface">我赢了</span>
+</button>
+<!-- Draw -->
+<button class="choice-card bounce-click flex flex-col items-center justify-center gap-2 bg-surface-container-lowest rounded-[24px] soft-card-shadow border border-[#f2e8df] transition-all duration-300" onclick="selectChoice(this, 'draw')">
+<div class="w-12 h-12 rounded-full bg-surface-dim flex items-center justify-center">
+<span class="material-symbols-outlined text-on-surface-variant" data-icon="balance">balance</span>
+</div>
+<span class="text-label-md font-label-md text-on-surface">平局</span>
+</button>
+<!-- TA Won (He) -->
+<button class="choice-card bounce-click flex flex-col items-center justify-center gap-2 bg-surface-container-lowest rounded-[24px] soft-card-shadow border border-[#f2e8df] transition-all duration-300" onclick="selectChoice(this, 'boy')">
+<img class="w-12 h-12 rounded-full border-2 border-secondary/20" src="https://lh3.googleusercontent.com/aida/AP1WRLtN9OYVG4ibBxPgFkhn4NS3-HR05W4madYnn7Gx0TCHAN319pNvu2rewn5kqaqD52Rtki90yav2gz3hGX9cORWqzZ8ybmqE3y409898RtKecMW5b4kLwUqYdddxFkbZTg_p8w8adiz9N7Yi37khP3W_5MXhN_Nk10RRrrkjM0S_UYhH0afrxGPj9UvS_SYEqe8VVakwizk9R_4PC3t472GvaULw75M6l3Xlbphcem9lobynp6GXRc1zSg">
+<span class="text-label-md font-label-md text-on-surface">TA赢了</span>
+</button>
+</div>
+</section>
+</main>
+<!-- Bottom Action Area -->
+<div class="fixed bottom-0 left-0 w-full bg-surface p-container-padding pb-safe z-50">
+<button class="w-full bg-primary text-on-primary py-4 rounded-full font-title-md text-title-md bounce-click shadow-lg shadow-primary/20 active:scale-95 transition-transform" id="submitBtn">
+            提交结果
+        </button>
+</div>
+<!-- Bottom Nav Bar Placeholder (Required by System) -->
+<nav class="fixed bottom-0 left-0 w-full z-40 hidden md:flex justify-around items-center px-4 py-3 pb-safe bg-surface shadow-[0_-4px_16px_rgba(155,64,83,0.08)] rounded-t-[24px]">
+<div class="flex flex-col items-center justify-center text-on-surface-variant p-2">
+<span class="material-symbols-outlined" data-icon="auto_stories">auto_stories</span>
+<span class="text-label-md font-label-md">Diary</span>
+</div>
+<div class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1.5">
+<span class="material-symbols-outlined" data-icon="workspace_premium" style="font-variation-settings: 'FILL' 1;">workspace_premium</span>
+<span class="text-label-md font-label-md">Wagers</span>
+</div>
+<div class="flex flex-col items-center justify-center text-on-surface-variant p-2">
+<span class="material-symbols-outlined" data-icon="person">person</span>
+<span class="text-label-md font-label-md">Profile</span>
+</div>
+</nav>
+<script>
+        function selectChoice(el, type) {
+            // Remove selection from others
+            document.querySelectorAll('.choice-card').forEach(card => {
+                card.classList.remove('choice-selected');
+            });
+
+            // Add selection to clicked
+            el.classList.add('choice-selected');
+
+            // Trigger burst animation if it's a win
+            if (type === 'girl' || type === 'boy') {
+                createHeartBurst(el);
+            }
+        }
+
+        function createHeartBurst(parent) {
+            const rect = parent.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+
+            for (let i = 0; i < 8; i++) {
+                const heart = document.createElement('span');
+                heart.className = 'material-symbols-outlined heart-particle text-primary';
+                heart.innerHTML = 'favorite';
+                heart.style.fontVariationSettings = "'FILL' 1";
+                heart.style.left = `${centerX}px`;
+                heart.style.top = `${centerY}px`;
+
+                const angle = (i * 45) * (Math.PI / 180);
+                const velocity = 50 + Math.random() * 50;
+                const tx = Math.cos(angle) * velocity;
+                const ty = Math.sin(angle) * velocity;
+
+                heart.animate([
+                    { transform: 'translate(-50%, -50%) scale(0)', opacity: 1 },
+                    { transform: `translate(calc(-50% + ${tx}px), calc(-50% + ${ty}px)) scale(1.5)`, opacity: 0 }
+                ], {
+                    duration: 600 + Math.random() * 400,
+                    easing: 'cubic-bezier(0, .9, .57, 1)',
+                    fill: 'forwards'
+                });
+
+                document.body.appendChild(heart);
+                setTimeout(() => heart.remove(), 1000);
+            }
+        }
+
+        // micro-interaction for submit button
+        document.getElementById('submitBtn').addEventListener('click', function() {
+            const selected = document.querySelector('.choice-selected');
+            if (!selected) {
+                alert('请先选择一个胜负结果哦～');
+                return;
+            }
+
+            this.innerHTML = '<span class="material-symbols-outlined animate-spin" data-icon="sync">sync</span> 提交中...';
+            setTimeout(() => {
+                this.innerHTML = '提交成功！✨';
+                this.classList.replace('bg-primary', 'bg-tertiary-container');
+                this.classList.replace('text-on-primary', 'text-on-tertiary-container');
+            }, 1200);
+        });
+    </script>
+
+
+<script>
+    (function() {
+        const targetDate = new Date('2026-06-12T23:30:00').getTime();
+
+        function updateCountdown() {
+            const now = new Date().getTime();
+            const distance = targetDate - now;
+
+            if (distance < 0) {
+                document.getElementById('countdown-timer').innerHTML = '<span class="text-primary">已截止</span>';
+                return;
+            }
+
+            const days = Math.floor(distance / (1000 * 60 * 60 * 24));
+            const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+            const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+            document.getElementById('days').innerText = String(days).padStart(2, '0');
+            document.getElementById('hours').innerText = String(hours).padStart(2, '0');
+            document.getElementById('minutes').innerText = String(minutes).padStart(2, '0');
+            document.getElementById('seconds').innerText = String(seconds).padStart(2, '0');
+        }
+
+        setInterval(updateCountdown, 1000);
+        updateCountdown();
+    })();
+</script></body></html>

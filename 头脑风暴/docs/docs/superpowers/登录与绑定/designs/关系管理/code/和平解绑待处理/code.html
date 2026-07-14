@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html class="light" lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <title>和平解绑待处理</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&family=Be+Vietnam+Pro:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: '#fff8f7',
+            'surface-card': '#ffffff',
+            'surface-soft': '#fff0f1',
+            primary: '#9b4053',
+            'primary-container': '#ff8fa3',
+            secondary: '#24657e',
+            'secondary-container': '#a6e2ff',
+            tertiary: '#7d5800',
+            'tertiary-container': '#ffdea9',
+            outline: '#dac0c3',
+            text: '#22191a',
+            muted: '#544244'
+          },
+          fontFamily: {
+            display: ['Plus Jakarta Sans'],
+            body: ['Be Vietnam Pro']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+    body { min-height: max(884px, 100dvh); }
+    .paper-shadow { box-shadow: 0 16px 36px rgba(34, 25, 26, 0.08); }
+    .soft-shadow { box-shadow: 0 10px 28px rgba(155, 64, 83, 0.10); }
+    @keyframes riseIn { from { transform: translateY(18px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes breathe { 0%,100% { transform: scale(1); opacity: .82; } 50% { transform: scale(1.04); opacity: 1; } }
+    @keyframes sand { from { stroke-dashoffset: 90; } to { stroke-dashoffset: 0; } }
+    .animate-rise { animation: riseIn .58s cubic-bezier(.16,1,.3,1) both; }
+    .delay-1 { animation-delay: .08s; }
+    .delay-2 { animation-delay: .16s; }
+    .delay-3 { animation-delay: .24s; }
+    .breathe { animation: breathe 2.8s ease-in-out infinite; }
+    .sand-line { stroke-dasharray: 7 8; animation: sand 3.2s linear infinite; }
+    @keyframes modalIn { from { transform: scale(.92) translateY(20px); opacity: 0; } to { transform: scale(1) translateY(0); opacity: 1; } }
+    .modal-enter { animation: modalIn .28s cubic-bezier(.34,1.56,.64,1); }
+    .grain::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .18;
+      background-image: radial-gradient(rgba(155,64,83,.12) 1px, transparent 1px);
+      background-size: 18px 18px;
+      mask-image: linear-gradient(to bottom, black, transparent 80%);
+    }
+  </style>
+</head>
+<body class="grain bg-surface font-body text-text min-h-screen pb-32">
+  <header class="sticky top-0 z-40 h-16 px-6 flex items-center justify-between bg-surface/80 backdrop-blur-md">
+    <div class="flex items-center gap-3">
+      <button class="material-symbols-outlined text-primary">arrow_back</button>
+      <h1 class="font-display text-[28px] leading-9 font-bold text-primary">和平解绑</h1>
+    </div>
+    <span class="material-symbols-outlined text-primary">hourglass_top</span>
+  </header>
+
+  <main class="max-w-2xl mx-auto px-6 pt-4 space-y-6">
+    <section class="animate-rise rounded-[32px] bg-surface-card paper-shadow border border-[#f2e8df] p-6 overflow-hidden relative">
+      <div class="absolute -right-10 -top-10 w-36 h-36 rounded-full bg-primary-container/20 blur-2xl"></div>
+      <div class="relative flex items-center justify-between gap-4">
+        <div>
+          <p class="text-muted text-sm mb-2">申请已发送给 TA</p>
+          <h2 class="font-display text-[30px] leading-9 font-bold text-text">等待对方处理</h2>
+          <p class="mt-3 text-muted leading-6">这段关系仍然保持绑定。对方同意前，你们的日记、赌局和回忆不会被归档。</p>
+        </div>
+        <div class="w-20 h-20 rounded-full bg-secondary-container/40 flex items-center justify-center breathe">
+          <span class="material-symbols-outlined text-secondary text-[42px]">mark_email_unread</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-1 rounded-[28px] bg-surface-card paper-shadow border border-[#f2e8df] p-6">
+      <div class="flex items-center justify-between mb-6">
+        <div class="flex items-center gap-3">
+          <img class="w-14 h-14 rounded-full object-cover ring-4 ring-primary-container/30" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBL68HYLFSJkqnRqhSdprtD6vC73NpeS9K41n9S_uuLHWX9ZHJxwgIBprpU2wFloKe3R_CCb8Pkw6qjmG00KHVLx2Nt9Y1EoiBFbx7psXAopNIVpLv4CULQGZ975hdhjc42NxW8ZqFfuQXancHNyTNFACTyuzFjUxXmeYcQBPWbpFsNuKPbHAbpljwr-G-JTcxmpYbBVgL1ktYO3DqQNm6_lgk8Sa0MTfJ21UHvh6oWmg2P-vyLEOuPJ3l4dsWCYdcKlomiD8IGhwQ" alt="我的头像">
+          <div>
+            <p class="text-text font-semibold">我发起</p>
+            <p class="text-muted text-sm">2026-06-29 21:20</p>
+          </div>
+        </div>
+        <span class="px-4 py-2 rounded-full bg-tertiary-container/35 text-tertiary text-sm font-semibold">7 天有效</span>
+      </div>
+
+      <div class="relative py-3">
+        <svg class="absolute left-7 top-0 h-full w-8" viewBox="0 0 32 160" preserveAspectRatio="none">
+          <path class="sand-line" d="M16 0 C6 36 26 68 16 104 C10 126 14 144 16 160" stroke="#dac0c3" stroke-width="2" fill="none"/>
+        </svg>
+        <div class="relative ml-16 space-y-5">
+          <div class="rounded-3xl bg-surface-soft p-4 border border-outline/40">
+            <p class="font-semibold text-text">当前状态</p>
+            <p class="text-muted mt-1 text-sm leading-5">申请已送达，等待 TA 同意或拒绝。</p>
+          </div>
+          <div class="rounded-3xl bg-white p-4 border border-outline/40">
+            <p class="font-semibold text-text">自动过期</p>
+            <p class="text-muted mt-1 text-sm leading-5">如果 7 天内没有处理，申请会失效，关系保持绑定。</p>
+          </div>
+          <div class="rounded-3xl bg-white p-4 border border-outline/40 opacity-70">
+            <p class="font-semibold text-text">可能结果</p>
+            <p class="text-muted mt-1 text-sm leading-5">TA 同意后才会解除关系，并进入回忆录归档流程。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-2 rounded-[28px] bg-[#fffaf4] border border-[#f0dac0] p-5 soft-shadow">
+      <div class="flex gap-3">
+        <span class="material-symbols-outlined text-tertiary">tips_and_updates</span>
+        <div>
+          <h3 class="font-display font-bold text-text">这不是立刻分开</h3>
+          <p class="text-muted mt-1 text-sm leading-6">和平解绑需要对方确认。在处理前，双方仍处于已绑定关系，功能不会突然消失。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-3 grid grid-cols-2 gap-3">
+      <button onclick="openCancelModal()" class="rounded-full py-4 bg-white border border-outline/60 text-muted font-semibold active:scale-95 transition-transform">撤回申请</button>
+      <button class="rounded-full py-4 bg-primary text-white font-semibold soft-shadow">返回我的</button>
+    </section>
+  </main>
+
+  <div id="cancelModal" class="fixed inset-0 z-[100] hidden">
+    <div onclick="closeCancelModal()" class="absolute inset-0 bg-text/40 backdrop-blur-sm"></div>
+    <div class="absolute inset-0 flex items-center justify-center p-6">
+      <div class="modal-enter bg-white w-full max-w-md rounded-[32px] p-8 paper-shadow">
+        <div class="text-center mb-6">
+          <div class="w-16 h-16 mx-auto rounded-full bg-secondary-container/45 flex items-center justify-center mb-4">
+            <span class="material-symbols-outlined text-secondary text-[38px]">undo</span>
+          </div>
+          <h3 class="font-display text-[28px] font-bold text-text">撤回这次申请？</h3>
+          <p class="text-muted mt-3 leading-6">撤回后，对方将不再看到处理入口。你们的关系会继续保持绑定，之后仍可以重新发起和平解绑。</p>
+        </div>
+        <div class="rounded-3xl bg-surface-soft border border-outline/40 p-4 mb-6 text-left">
+          <p class="font-semibold text-text flex items-center gap-2"><span class="material-symbols-outlined text-primary">info</span>撤回不会解除关系</p>
+          <p class="text-muted text-sm mt-2 leading-5">这只是关闭当前待处理申请，不会删除日记、赌局或共同回忆。</p>
+        </div>
+        <button class="w-full rounded-full py-4 bg-secondary text-white font-semibold mb-3">确认撤回</button>
+        <button onclick="closeCancelModal()" class="w-full rounded-full py-4 text-muted font-semibold">继续等待</button>
+      </div>
+    </div>
+  </div>
+
+  <nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-3 bg-surface shadow-[0_-4px_16px_rgba(34,25,26,0.08)] rounded-t-3xl">
+    <a class="flex flex-col items-center text-muted px-5 py-1 rounded-full"><span class="material-symbols-outlined">auto_stories</span><span class="text-sm">日记</span></a>
+    <a class="flex flex-col items-center text-muted px-5 py-1 rounded-full"><span class="material-symbols-outlined">casino</span><span class="text-sm">赌局</span></a>
+    <a class="flex flex-col items-center bg-primary-container text-primary rounded-full px-5 py-1"><span class="material-symbols-outlined">person</span><span class="text-sm">我的</span></a>
+  </nav>
+
+  <script>
+    function openCancelModal() {
+      document.getElementById('cancelModal').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeCancelModal() {
+      document.getElementById('cancelModal').classList.add('hidden');
+      document.body.style.overflow = 'auto';
+    }
+  </script>
+</body>
+</html>

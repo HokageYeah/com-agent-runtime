@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html class="light" lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta content="width=device-width, initial-scale=1.0" name="viewport">
+  <title>拉黑冷却期</title>
+  <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&family=Be+Vietnam+Pro:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: '#fff8f7',
+            card: '#ffffff',
+            ash: '#f0dee0',
+            primary: '#9b4053',
+            rose: '#ff8fa3',
+            error: '#ba1a1a',
+            'error-soft': '#ffdad6',
+            cocoa: '#22191a',
+            muted: '#544244',
+            outline: '#dac0c3',
+            cream: '#fffaf4'
+          },
+          fontFamily: {
+            display: ['Plus Jakarta Sans'],
+            body: ['Be Vietnam Pro']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    .material-symbols-outlined { font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
+    body { min-height: max(884px, 100dvh); }
+    .paper-shadow { box-shadow: 0 18px 44px rgba(34, 25, 26, 0.10); }
+    .danger-shadow { box-shadow: 0 18px 38px rgba(186, 26, 26, 0.13); }
+    @keyframes riseIn { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes slowSweep { from { transform: translateX(-100%) skewX(-18deg); } to { transform: translateX(220%) skewX(-18deg); } }
+    @keyframes coolPulse { 0%,100% { opacity: .56; transform: scale(1); } 50% { opacity: 1; transform: scale(1.035); } }
+    .animate-rise { animation: riseIn .62s cubic-bezier(.16,1,.3,1) both; }
+    .delay-1 { animation-delay: .08s; }
+    .delay-2 { animation-delay: .16s; }
+    .sweep::after { content: ''; position: absolute; inset: 0; width: 34%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); animation: slowSweep 3.4s ease-in-out infinite; }
+    .cool-pulse { animation: coolPulse 2.8s ease-in-out infinite; }
+    .locked-pattern { background-image: repeating-linear-gradient(-45deg, rgba(218,192,195,.28) 0, rgba(218,192,195,.28) 8px, transparent 8px, transparent 16px); }
+  </style>
+</head>
+<body class="bg-surface font-body text-cocoa min-h-screen pb-32">
+  <header class="sticky top-0 z-40 h-16 px-6 flex items-center justify-between bg-surface/80 backdrop-blur-md">
+    <div class="flex items-center gap-3">
+      <button class="material-symbols-outlined text-primary">arrow_back</button>
+      <h1 class="font-display text-[28px] leading-9 font-bold text-primary">冷却期</h1>
+    </div>
+    <span class="material-symbols-outlined text-error">shield_lock</span>
+  </header>
+
+  <main class="max-w-2xl mx-auto px-6 pt-4 space-y-6">
+    <section class="animate-rise rounded-[36px] bg-card paper-shadow border border-[#f2e8df] p-6 relative overflow-hidden">
+      <div class="absolute -right-14 -top-14 w-44 h-44 rounded-full bg-error-soft/60 blur-3xl"></div>
+      <div class="relative text-center">
+        <div class="mx-auto w-28 h-28 rounded-full bg-error-soft flex items-center justify-center mb-5 danger-shadow cool-pulse">
+          <span class="material-symbols-outlined text-error text-[56px]">block</span>
+        </div>
+        <p class="text-muted text-sm mb-2">强制拉黑已生效</p>
+        <h2 class="font-display text-[34px] leading-10 font-bold">7 天冷却中</h2>
+        <p class="mt-3 text-muted leading-6">你们的关系已解除。冷却期结束前，双方都不能重新发起绑定。</p>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-1 rounded-[30px] bg-cocoa text-white p-6 paper-shadow relative overflow-hidden sweep">
+      <div class="relative z-10">
+        <p class="text-white/70 text-sm mb-2">冷却截止时间</p>
+        <div class="flex items-end gap-2 mb-4">
+          <span class="font-display text-[38px] leading-none font-bold">07-06</span>
+          <span class="pb-1 text-white/75">21:20 后恢复绑定资格</span>
+        </div>
+        <div class="grid grid-cols-3 gap-3 text-center">
+          <div class="rounded-3xl bg-white/10 p-3 backdrop-blur">
+            <p class="font-display text-2xl font-bold">06</p>
+            <p class="text-xs text-white/70">天</p>
+          </div>
+          <div class="rounded-3xl bg-white/10 p-3 backdrop-blur">
+            <p class="font-display text-2xl font-bold">23</p>
+            <p class="text-xs text-white/70">小时</p>
+          </div>
+          <div class="rounded-3xl bg-white/10 p-3 backdrop-blur">
+            <p class="font-display text-2xl font-bold">41</p>
+            <p class="text-xs text-white/70">分钟</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-2 rounded-[30px] bg-card border border-[#f2e8df] paper-shadow p-6">
+      <h3 class="font-display text-[22px] font-bold mb-4 flex items-center gap-2"><span class="material-symbols-outlined text-primary">rule</span>冷却期规则</h3>
+      <div class="space-y-3">
+        <div class="flex gap-3 rounded-3xl bg-cream p-4 border border-outline/40">
+          <span class="material-symbols-outlined text-error">link_off</span>
+          <div>
+            <p class="font-semibold">不能重新绑定</p>
+            <p class="text-sm text-muted mt-1">生成邀请码、预览邀请码和输入邀请码都应被禁用。</p>
+          </div>
+        </div>
+        <div class="flex gap-3 rounded-3xl bg-cream p-4 border border-outline/40">
+          <span class="material-symbols-outlined text-primary">inventory_2</span>
+          <div>
+            <p class="font-semibold">回忆进入归档流程</p>
+            <p class="text-sm text-muted mt-1">关系已解除，历史内容由回忆录模块承接归档。</p>
+          </div>
+        </div>
+        <div class="flex gap-3 rounded-3xl bg-cream p-4 border border-outline/40">
+          <span class="material-symbols-outlined text-muted">restart_alt</span>
+          <div>
+            <p class="font-semibold">不会自动恢复关系</p>
+            <p class="text-sm text-muted mt-1">冷却结束后只是恢复重新绑定资格，不会自动回到旧关系。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="animate-rise delay-2 rounded-[30px] locked-pattern bg-card border border-outline/70 p-5">
+      <button disabled class="w-full rounded-full py-4 bg-ash text-muted font-semibold opacity-70 cursor-not-allowed flex items-center justify-center gap-2 mb-3">
+        <span class="material-symbols-outlined">lock</span>
+        冷却期内不能邀请绑定
+      </button>
+      <button class="w-full rounded-full py-4 bg-primary text-white font-semibold paper-shadow flex items-center justify-center gap-2">
+        <span class="material-symbols-outlined">home</span>
+        返回我的页面
+      </button>
+    </section>
+  </main>
+
+  <nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-3 bg-surface shadow-[0_-4px_16px_rgba(34,25,26,0.08)] rounded-t-3xl">
+    <a class="flex flex-col items-center text-muted px-5 py-1 rounded-full opacity-55"><span class="material-symbols-outlined">auto_stories</span><span class="text-sm">日记</span></a>
+    <a class="flex flex-col items-center text-muted px-5 py-1 rounded-full opacity-55"><span class="material-symbols-outlined">casino</span><span class="text-sm">赌局</span></a>
+    <a class="flex flex-col items-center bg-error-soft text-error rounded-full px-5 py-1"><span class="material-symbols-outlined">person_off</span><span class="text-sm">我的</span></a>
+  </nav>
+</body>
+</html>

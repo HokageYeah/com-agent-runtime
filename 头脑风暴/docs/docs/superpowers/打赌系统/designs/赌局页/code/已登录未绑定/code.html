@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+
+<html class="light" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, viewport-fit=cover" name="viewport"/>
+<title>Wagers - 我们的旅程</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Tailwind Configuration -->
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                "background": "#fff8f7",
+                "secondary-fixed-dim": "#93cfeb",
+                "on-primary-fixed-variant": "#7d283c",
+                "on-secondary-fixed-variant": "#004d64",
+                "primary-fixed": "#ffd9dd",
+                "primary-container": "#ff8fa3",
+                "surface-container-high": "#f6e4e5",
+                "on-tertiary-fixed": "#271900",
+                "on-tertiary-fixed-variant": "#5e4100",
+                "on-surface": "#4a3a3b",
+                "on-error": "#ffffff",
+                "on-primary-container": "#782539",
+                "surface-container-lowest": "#ffffff",
+                "outline-variant": "#dac0c3",
+                "on-surface-variant": "#544244",
+                "surface-container-low": "#fff0f1",
+                "on-background": "#22191a",
+                "primary": "#ff8fa3",
+                "on-error-container": "#93000a",
+                "tertiary-fixed": "#ffdea9",
+                "tertiary-container": "#e6a500",
+                "surface": "#fff8f7",
+                "inverse-surface": "#382e2f",
+                "outline": "#877274",
+                "error-container": "#ffdad6",
+                "surface-dim": "#e7d6d7",
+                "secondary-fixed": "#bde9ff",
+                "on-tertiary-container": "#5a3e00",
+                "tertiary": "#7d5800",
+                "primary-fixed-dim": "#ffb2bd",
+                "inverse-primary": "#ffb2bd",
+                "secondary-container": "#a6e2ff",
+                "on-secondary-container": "#24667f",
+                "on-primary-fixed": "#400014",
+                "error": "#ba1a1a",
+                "inverse-on-surface": "#feedee",
+                "on-primary": "#ffffff",
+                "tertiary-fixed-dim": "#ffba27",
+                "on-secondary-fixed": "#001f2a",
+                "on-tertiary": "#ffffff",
+                "on-secondary": "#ffffff",
+                "surface-tint": "#9b4053",
+                "secondary": "#24657e",
+                "surface-variant": "#f0dee0",
+                "surface-bright": "#fff8f7",
+                "surface-container-highest": "#f0dee0",
+                "surface-container": "#fbeaeb",
+                "brand-button": "#9c4b57"
+            },
+            "borderRadius": {
+                "DEFAULT": "0.25rem",
+                "lg": "0.5rem",
+                "xl": "0.75rem",
+                "full": "9999px"
+            },
+            "spacing": {
+                "container-padding": "24px",
+                "base": "8px",
+                "sm": "12px",
+                "gutter": "16px",
+                "xl": "48px",
+                "md": "20px",
+                "xs": "4px",
+                "lg": "32px"
+            },
+            "fontFamily": {
+                "title-md": ["Plus Jakarta Sans"],
+                "headline-lg-mobile": ["Plus Jakarta Sans"],
+                "caption": ["Be Vietnam Pro"],
+                "body-lg": ["Be Vietnam Pro"],
+                "display-lg": ["Plus Jakarta Sans"],
+                "label-md": ["Be Vietnam Pro"],
+                "headline-lg": ["Plus Jakarta Sans"],
+                "body-md": ["Be Vietnam Pro"]
+            },
+            "fontSize": {
+                "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            background-color: #fff8f7;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .timeline-line {
+            border-left: 2px dashed #dac0c3;
+        }
+        .soft-card-shadow {
+            box-shadow: 0 4px 16px rgba(74, 58, 59, 0.08);
+        }
+        .locked-blur {
+            backdrop-filter: blur(8px);
+            background: rgba(255, 248, 247, 0.6);
+        }
+        @keyframes heartBeat {
+            0% { transform: scale(1); }
+            14% { transform: scale(1.1); }
+            28% { transform: scale(1); }
+            42% { transform: scale(1.1); }
+            70% { transform: scale(1); }
+        }
+        .animate-heart-beat {
+            animation: heartBeat 1.5s infinite ease-in-out;
+        }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen text-on-surface">
+<main class="flex-1 overflow-y-auto pb-32">
+<!-- Hero Section: Binding Area -->
+<section class="relative pt-16 pb-8 px-container-padding text-center overflow-hidden">
+<div class="relative z-10">
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-brand-button mb-lg">甜蜜赌约</h1>
+<!-- Partner Binding Area -->
+<div class="flex items-center justify-center gap-6 mb-lg">
+<!-- User Avatar -->
+<div class="relative">
+<div class="w-20 h-20 rounded-full border-4 border-white soft-card-shadow overflow-hidden bg-surface-container-high">
+<img alt="我的头像" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida/AP1WRLtN9OYVG4ibBxPgFkhn4NS3-HR05W4madYnn7Gx0TCHAN319pNvu2rewn5kqaqD52Rtki90yav2gz3hGX9cORWqzZ8ybmqE3y409898RtKecMW5b4kLwUqYdddxFkbZTg_p8w8adiz9N7Yi37khP3W_5MXhN_Nk10RRrrkjM0S_UYhH0afrxGPj9UvS_SYEqe8VVakwizk9R_4PC3t472GvaULw75M6l3Xlbphcem9lobynp6GXRc1zSg"/>
+</div>
+<div class="absolute -bottom-1 -right-1 bg-brand-button text-white w-6 h-6 rounded-full flex items-center justify-center shadow-md">
+<span class="material-symbols-outlined text-[14px]">check</span>
+</div>
+</div>
+<!-- Dashed Line & Heart -->
+<div class="flex-1 flex items-center justify-center relative min-w-[80px]">
+<div class="w-full border-t-2 border-dashed border-outline-variant"></div>
+<div class="absolute inset-0 flex items-center justify-center">
+<div class="bg-background px-2">
+<span class="material-symbols-outlined text-primary text-[32px] animate-heart-beat" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+</div>
+</div>
+<!-- Invite Placeholder -->
+<div class="group cursor-pointer">
+<div class="w-20 h-20 rounded-full border-2 border-dashed border-primary flex flex-col items-center justify-center bg-surface-container-low/50 transition-all active:scale-95">
+<span class="material-symbols-outlined text-primary text-[24px]">person_add</span>
+</div>
+</div>
+</div>
+<p class="font-body-md text-on-surface-variant mb-lg max-w-[280px] mx-auto">
+                两个人的旅程更精彩。邀请另一半开启你们的甜蜜记录。
+            </p>
+<!-- Main CTA -->
+<button class="bg-brand-button hover:opacity-90 text-white font-title-md text-title-md py-4 px-10 rounded-full soft-card-shadow transition-all active:scale-95 inline-flex items-center gap-2">
+<span>立即绑定</span>
+<span class="material-symbols-outlined">link</span>
+</button>
+</div>
+</section>
+<!-- Timeline Preview Section (Locked/Blurred) -->
+<section class="relative px-container-padding py-lg overflow-hidden">
+<!-- Central Axis Line -->
+<div class="absolute left-1/2 top-0 bottom-0 w-px timeline-line -translate-x-1/2 z-0"></div>
+<div class="relative z-10 space-y-12">
+<!-- Entry 1 (Left) -->
+<div class="flex justify-start w-full relative">
+<div class="w-[45%] relative rounded-[24px] bg-white p-md border border-surface-container-high soft-card-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-primary mb-xs">赌约：晚餐</div>
+<div class="text-body-md font-bold text-on-surface">谁去洗碗？</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-primary border-2 border-white"></div>
+</div>
+<!-- Entry 2 (Right) -->
+<div class="flex justify-end w-full relative">
+<div class="w-[45%] relative rounded-[24px] bg-white p-md border border-surface-container-high soft-card-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-secondary mb-xs">赌约：早起</div>
+<div class="text-body-md font-bold text-on-surface">谁买早餐？</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-secondary border-2 border-white"></div>
+</div>
+<!-- Entry 3 (Left) -->
+<div class="flex justify-start w-full relative">
+<div class="w-[45%] relative rounded-[24px] bg-white p-md border border-surface-container-high soft-card-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-tertiary mb-xs">秘密赌约</div>
+<div class="text-body-md font-bold text-on-surface">神秘奖励...</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-tertiary border-2 border-white"></div>
+</div>
+</div>
+</section>
+</main>
+<!-- Bottom Navigation Bar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-3 pb-safe bg-surface dark:bg-surface-dim shadow-[0_-4px_16px_rgba(155,64,83,0.08)] rounded-t-[24px]">
+<!-- Diary Tab -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+<span class="text-label-md font-label-md">日记</span>
+</a>
+<!-- Wagers Tab (ACTIVE) -->
+<a class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1.5 scale-90 duration-150 ease-out" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">workspace_premium</span>
+<span class="text-label-md font-label-md">赌约</span>
+</a>
+<!-- Profile Tab -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined">person</span>
+<span class="text-label-md font-label-md">我的</span>
+</a>
+</nav>
+<script>
+    // Micro-interaction for locked cards
+    document.querySelectorAll('.rounded-[24px]').forEach(card => {
+        card.addEventListener('click', () => {
+            card.classList.add('shake');
+            setTimeout(() => card.classList.remove('shake'), 500);
+        });
+    });
+
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-4px); }
+            75% { transform: translateX(4px); }
+        }
+        .shake { animation: shake 0.2s cubic-bezier(.36,.07,.19,.97) both; }
+    `;
+    document.head.appendChild(style);
+</script>
+</body></html>

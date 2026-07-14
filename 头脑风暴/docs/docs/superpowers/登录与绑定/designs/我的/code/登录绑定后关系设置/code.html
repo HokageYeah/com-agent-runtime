@@ -1,0 +1,316 @@
+<!DOCTYPE html><html class="light" lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0" name="viewport">
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-error-container": "#93000a",
+                        "on-primary-fixed": "#400014",
+                        "surface-container": "#fbeaeb",
+                        "surface-container-low": "#fff0f1",
+                        "secondary-container": "#a6e2ff",
+                        "on-primary": "#ffffff",
+                        "surface-tint": "#9b4053",
+                        "secondary": "#24657e",
+                        "surface-container-highest": "#f0dee0",
+                        "primary-container": "#ff8fa3",
+                        "on-secondary-container": "#24667f",
+                        "surface-container-lowest": "#ffffff",
+                        "tertiary-fixed-dim": "#ffba27",
+                        "surface-bright": "#fff8f7",
+                        "tertiary-fixed": "#ffdea9",
+                        "surface": "#fff8f7",
+                        "on-tertiary-fixed": "#271900",
+                        "surface-container-high": "#f6e4e5",
+                        "error-container": "#ffdad6",
+                        "on-secondary": "#ffffff",
+                        "surface-dim": "#e7d6d7",
+                        "inverse-surface": "#382e2f",
+                        "surface-variant": "#f0dee0",
+                        "on-background": "#22191a",
+                        "on-surface-variant": "#544244",
+                        "inverse-on-surface": "#feedee",
+                        "outline-variant": "#dac0c3",
+                        "inverse-primary": "#ffb2bd",
+                        "primary": "#9b4053",
+                        "primary-fixed-dim": "#ffb2bd",
+                        "on-secondary-fixed": "#001f2a",
+                        "secondary-fixed": "#bde9ff",
+                        "on-surface": "#22191a",
+                        "tertiary-container": "#e6a500",
+                        "outline": "#877274",
+                        "on-primary-container": "#782539",
+                        "primary-fixed": "#ffd9dd",
+                        "on-error": "#ffffff",
+                        "background": "#fff8f7",
+                        "secondary-fixed-dim": "#93cfeb",
+                        "on-tertiary-container": "#5a3e00",
+                        "on-tertiary": "#ffffff",
+                        "error": "#ba1a1a",
+                        "tertiary": "#7d5800",
+                        "on-primary-fixed-variant": "#7d283c",
+                        "on-tertiary-fixed-variant": "#5e4100",
+                        "on-secondary-fixed-variant": "#004d64"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "container-padding": "24px",
+                        "xs": "4px",
+                        "md": "20px",
+                        "xl": "48px",
+                        "gutter": "16px",
+                        "lg": "32px",
+                        "base": "8px",
+                        "sm": "12px"
+                    },
+                    "fontFamily": {
+                        "caption": ["Be Vietnam Pro"],
+                        "body-md": ["Be Vietnam Pro"],
+                        "display-lg": ["Plus Jakarta Sans"],
+                        "label-md": ["Be Vietnam Pro"],
+                        "headline-lg-mobile": ["Plus Jakarta Sans"],
+                        "headline-lg": ["Plus Jakarta Sans"],
+                        "body-lg": ["Be Vietnam Pro"],
+                        "title-md": ["Plus Jakarta Sans"]
+                    },
+                    "fontSize": {
+                        "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                        "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                        "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                        "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                        "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                        "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                        "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                        "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .warm-shadow {
+            box-shadow: 0 16px 32px -8px rgba(34, 25, 26, 0.08);
+        }
+
+        /* Animations */
+        @keyframes slideUpFade {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-card {
+            animation: slideUpFade 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+        }
+        .animate-card:nth-child(1) { animation-delay: 0.1s; }
+        .animate-card:nth-child(2) { animation-delay: 0.2s; }
+        .animate-card:nth-child(3) { animation-delay: 0.3s; }
+
+        @keyframes subtlePulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(36, 101, 126, 0.4); }
+            70% { transform: scale(1.02); box-shadow: 0 0 0 10px rgba(36, 101, 126, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(36, 101, 126, 0); }
+        }
+        .btn-pulse:active {
+            animation: subtlePulse 0.6s ease-out infinite;
+        }
+
+        @keyframes heavyShake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-4px); }
+            75% { transform: translateX(4px); }
+        }
+        .btn-shake:active {
+            animation: heavyShake 0.1s linear infinite;
+        }
+
+        .modal-enter { animation: modalIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+        @keyframes modalIn {
+            from { transform: scale(0.9) translateY(20px); opacity: 0; }
+            to { transform: scale(1) translateY(0); opacity: 1; }
+        }
+
+        body {
+            min-height: max(884px, 100dvh);
+        }
+    </style>
+</head>
+<body class="bg-background font-body-md text-on-surface min-h-screen pb-32">
+<!-- Top Navigation -->
+<header class="bg-surface/80 backdrop-blur-md sticky top-0 z-50 flex justify-between items-center px-container-padding h-16 w-full">
+<div class="flex items-center gap-2">
+<button class="material-symbols-outlined text-primary hover:opacity-80 transition-opacity" onclick="history.back()">arrow_back</button>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-primary">关系设置</h1>
+</div>
+<span class="material-symbols-outlined text-primary">favorite</span>
+</header>
+<main class="max-w-2xl mx-auto px-container-padding pt-base space-y-lg">
+<!-- Intro Note -->
+<div class="py-md text-on-surface-variant font-body-md italic opacity-80 animate-card">
+            我们理解，人生之路有时会分叉。这些设置旨在帮助您以关怀和清晰的方式，妥善管理你们共同走过的旅程。
+        </div>
+<!-- Section 1: Peaceful Unbind -->
+<section class="relative group animate-card">
+<div class="bg-white rounded-[24px] p-container-padding border border-[#F2E8DF] warm-shadow transition-all duration-300 group-hover:-translate-y-1">
+<div class="flex items-start gap-4 mb-md">
+<div class="bg-secondary-container/30 p-sm rounded-full">
+<span class="material-symbols-outlined text-secondary text-[32px]">auto_stories</span>
+</div>
+<div>
+<h2 class="font-title-md text-title-md text-secondary mb-xs">和平解绑</h2>
+<p class="text-on-surface-variant font-caption text-caption">经双方同意，将共同的回忆归档。</p>
+</div>
+</div>
+<div class="space-y-sm mb-lg">
+<div class="flex items-center gap-base text-on-surface-variant">
+<span class="material-symbols-outlined text-secondary scale-75">check_circle</span>
+<span class="text-body-md font-body-md">需要伴侣的数字确认</span>
+</div>
+<div class="flex items-center gap-base text-on-surface-variant">
+<span class="material-symbols-outlined text-secondary scale-75">check_circle</span>
+<span class="text-body-md font-body-md">所有数据移至个人存档</span>
+</div>
+<div class="flex items-center gap-base text-on-surface-variant">
+<span class="material-symbols-outlined text-secondary scale-75">check_circle</span>
+<span class="text-body-md font-body-md">订阅权益将继续保持有效</span>
+</div>
+</div>
+<button class="w-full bg-secondary text-white font-label-md text-label-md py-4 px-lg rounded-full hover:opacity-90 transition-all flex justify-center items-center gap-2 btn-pulse active:scale-95">
+                    发送解绑请求
+                    <span class="material-symbols-outlined">send</span>
+</button>
+</div>
+</section>
+<!-- Section 2: Force Block -->
+<section class="relative group animate-card">
+<div class="bg-white rounded-[24px] p-container-padding border border-[#F2E8DF] warm-shadow transition-all duration-300 group-hover:-translate-y-1">
+<div class="flex items-start gap-4 mb-md">
+<div class="bg-error-container/30 p-sm rounded-full">
+<span class="material-symbols-outlined text-error text-[32px]">block</span>
+</div>
+<div>
+<h2 class="font-title-md text-title-md text-error mb-xs">强制拉黑</h2>
+<p class="text-on-surface-variant font-caption text-caption">立即终止连接与访问权限。</p>
+</div>
+</div>
+<div class="bg-surface-container-low rounded-xl p-md mb-lg space-y-sm">
+<h3 class="font-label-md text-label-md text-on-surface flex items-center gap-1">
+<span class="material-symbols-outlined text-error scale-75">warning</span>
+                        关键信息
+                    </h3>
+<ul class="text-on-surface-variant text-caption font-caption list-disc ml-5 space-y-1">
+<li>双方连接将立即切断。</li>
+<li>数据下载前有 7 天的冷静期。</li>
+<li>此操作在 30 天内不可撤销。</li>
+</ul>
+</div>
+<button class="w-full border-2 border-error text-error font-label-md text-label-md py-4 px-lg rounded-full hover:bg-error/5 transition-all flex justify-center items-center gap-2 btn-shake active:bg-error/10" onclick="openBlockModal()">
+                    启动强制拉黑
+                </button>
+</div>
+</section>
+<!-- Illustration Spacer -->
+<div class="flex justify-center py-lg animate-card">
+<div class="w-32 h-32 opacity-20 relative">
+<img alt="瓷鸟插画" class="w-full h-full object-contain grayscale" src="https://lh3.googleusercontent.com/aida-public/AB6AXuCuJxII14BkAH7-7BVy2Xz3zYTNijQA-vjxe4b8sTafoLtrEt6azO4y_-3Nj9z-Icq4m2zYM0BWb0h_tnshqrh69Y04iQa7y8OglYEadZdgFXxvLTrQomFyTmqIxEPR3pbI2CI2CKK9dPoQBmfvJIupJ5Z-rFCIwOQXLX7NvLnCmkxBOld7Gt3Uu-TQMzShs6FSxj7x5kED_cTcTjefzJhd5PfaY69jyreg6Q7DR0_CH3EsYmbx52prrB26AugCoe5x5q4UsHRg5eM">
+</div>
+</div>
+</main>
+<!-- Block Confirmation Modal -->
+<div class="fixed inset-0 z-[100] hidden" id="blockModal">
+<div class="absolute inset-0 bg-on-background/40 backdrop-blur-sm" onclick="closeBlockModal()"></div>
+<div class="absolute inset-0 flex items-center justify-center p-container-padding">
+<div class="modal-enter bg-white w-full max-w-md rounded-[32px] p-xl warm-shadow relative">
+<div class="text-center mb-lg">
+<div class="w-16 h-16 bg-error-container/30 rounded-full flex items-center justify-center mx-auto mb-md">
+<span class="material-symbols-outlined text-error text-[40px]">security</span>
+</div>
+<h3 class="font-headline-lg-mobile text-headline-lg-mobile text-on-surface mb-sm">确认操作？</h3>
+<p class="text-on-surface-variant font-body-md">拉黑将立即结束你们的共享日记会话。这是一个慎重的决定。</p>
+</div>
+<div class="space-y-md mb-xl">
+<label class="block text-on-surface-variant font-label-md text-label-md mb-xs">请输入 "确认" 以继续</label>
+<input class="w-full bg-[#F2E8DF] border-none rounded-2xl py-4 px-md focus:bg-white focus:ring-2 focus:ring-primary transition-all text-on-surface font-body-md text-center tracking-widest" id="confirmInput" placeholder="确认" type="text">
+</div>
+<div class="flex flex-col gap-sm">
+<button class="w-full bg-error text-white font-label-md text-label-md py-4 px-lg rounded-full opacity-50 cursor-not-allowed transition-all" disabled="" id="finalBlockBtn">
+                        终止连接
+                    </button>
+<button class="w-full text-on-surface-variant font-label-md text-label-md py-4 px-lg rounded-full hover:bg-surface-variant/20 transition-all" onclick="closeBlockModal()">
+                        返回
+                    </button>
+</div>
+</div>
+</div>
+</div>
+<!-- Bottom Navigation Shell -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-gutter py-3 pb-safe bg-surface shadow-[0_-4px_16px_rgba(34,25,26,0.08)] rounded-t-xl">
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:bg-surface-variant/50 rounded-full transition-all" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+<span class="font-label-md text-label-md">日记</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:bg-surface-variant/50 rounded-full transition-all" href="#">
+<span class="material-symbols-outlined">casino</span>
+<span class="font-label-md text-label-md">赌局</span>
+</a>
+<a class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1 transition-all" href="#">
+<span class="material-symbols-outlined">person</span>
+<span class="font-label-md text-label-md">我的</span>
+</a>
+</nav>
+<script>
+        function openBlockModal() {
+            const modal = document.getElementById('blockModal');
+            modal.classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeBlockModal() {
+            const modal = document.getElementById('blockModal');
+            modal.classList.add('hidden');
+            document.body.style.overflow = 'auto';
+            document.getElementById('confirmInput').value = '';
+            validateInput();
+        }
+
+        const confirmInput = document.getElementById('confirmInput');
+        const finalBlockBtn = document.getElementById('finalBlockBtn');
+
+        confirmInput.addEventListener('input', validateInput);
+
+        function validateInput() {
+            if (confirmInput.value === '确认') {
+                finalBlockBtn.disabled = false;
+                finalBlockBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                finalBlockBtn.classList.add('hover:bg-opacity-90', 'active:scale-95');
+            } else {
+                finalBlockBtn.disabled = true;
+                finalBlockBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                finalBlockBtn.classList.remove('hover:bg-opacity-90', 'active:scale-95');
+            }
+        }
+
+        finalBlockBtn.addEventListener('click', () => {
+            if (!finalBlockBtn.disabled) {
+                finalBlockBtn.innerHTML = '<span class="material-symbols-outlined animate-spin">refresh</span> 处理中...';
+                setTimeout(() => {
+                    alert('强制拉黑已启动。您即将退出登录。');
+                    closeBlockModal();
+                }, 1500);
+            }
+        });
+    </script>
+</body></html>

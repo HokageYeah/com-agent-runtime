@@ -1,0 +1,250 @@
+<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta content="width=device-width, initial-scale=1.0, viewport-fit=cover" name="viewport">
+<title>我们的旅程 - 个人中心</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet">
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "tertiary-fixed": "#ffdea9",
+                    "outline-variant": "#dac0c3",
+                    "on-primary-container": "#782539",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "outline": "#877274",
+                    "surface-container": "#fbeaeb",
+                    "on-error": "#ffffff",
+                    "on-background": "#22191a",
+                    "surface-tint": "#9b4053",
+                    "on-secondary": "#ffffff",
+                    "on-tertiary-fixed": "#271900",
+                    "surface": "#fff8f7",
+                    "background": "#fff8f7",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "on-primary": "#ffffff",
+                    "inverse-on-surface": "#feedee",
+                    "error-container": "#ffdad6",
+                    "on-surface": "#22191a",
+                    "on-secondary-fixed": "#001f2a",
+                    "surface-container-highest": "#f0dee0",
+                    "primary-container": "#ff8fa3",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "surface-container-high": "#f6e4e5",
+                    "primary": "#9b4053",
+                    "inverse-surface": "#382e2f",
+                    "inverse-primary": "#ffb2bd",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "on-surface-variant": "#544244",
+                    "secondary": "#24657e",
+                    "on-primary-fixed": "#400014",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "surface-bright": "#fff8f7",
+                    "surface-container-lowest": "#ffffff",
+                    "on-tertiary-container": "#5a3e00",
+                    "secondary-fixed": "#bde9ff",
+                    "tertiary-container": "#e6a500",
+                    "tertiary": "#7d5800",
+                    "on-tertiary": "#ffffff",
+                    "surface-variant": "#f0dee0",
+                    "on-secondary-container": "#24667f",
+                    "primary-fixed": "#ffd9dd",
+                    "on-error-container": "#93000a",
+                    "surface-dim": "#e7d6d7",
+                    "error": "#ba1a1a",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "surface-container-low": "#fff0f1",
+                    "secondary-container": "#a6e2ff"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "container-padding": "24px",
+                    "gutter": "16px",
+                    "xs": "4px",
+                    "base": "8px",
+                    "md": "20px",
+                    "xl": "48px",
+                    "sm": "12px",
+                    "lg": "32px"
+            },
+            "fontFamily": {
+                    "label-md": ["Be Vietnam Pro"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "title-md": ["Plus Jakarta Sans"],
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "caption": ["Be Vietnam Pro"],
+                    "body-lg": ["Be Vietnam Pro"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"]
+            },
+            "fontSize": {
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        @keyframes heartPulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.8; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .pulse-heart {
+            animation: heartPulse 2s infinite ease-in-out;
+        }
+        .soft-shadow {
+            box-shadow: 0 12px 32px -4px rgba(155, 64, 83, 0.08);
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .bg-pattern {
+            background-image: radial-gradient(#ff8fa3 0.5px, transparent 0.5px);
+            background-size: 24px 24px;
+            opacity: 0.05;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-background text-on-surface font-body-md min-h-screen pb-32">
+<!-- Background Decor -->
+<div class="fixed inset-0 bg-pattern pointer-events-none"></div>
+<!-- TopAppBar -->
+
+<main class="relative px-container-padding space-y-8 pt-4">
+<!-- Hero Section: Connected Avatars -->
+<section class="flex flex-col items-center">
+<div class="relative flex items-center justify-center w-full max-w-xs h-32">
+<!-- Avatar 1 -->
+<div class="z-10 relative">
+<div class="w-24 h-24 rounded-full border-4 border-white soft-shadow overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="A soft-lit studio portrait of a young man with a gentle smile, captured in a warm, cinematic style with a creamy background. The aesthetic is clean and modern, following a warm-tone palette of soft cocoa and ivory." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDqW6uEBHghWOD5f4XM2eY5K7P2crfRhH1moKv-WbNgudU5FvyHwSrbKqhybbzMqk6DgQNF1xwju_rTZBd4AZWa8C8mJT_XRzvo8P-pqbNcqdRkJhIAQzykMRUHXpBzobYaBN0esRqocVrgyF_IICFc86m4Q1pQmH4zGRd7XM90gGmfPnf4GADxCbwZZql-TSwanY5mOKoIN29MKCtsrv1kBzbmVnw_4KrbZHBCmNWMdkK0HTT99UgaCJCoDEvt8Yof3wS_JmbBA1U">
+</div>
+</div>
+<!-- Connector Line & Heart -->
+<div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+<div class="w-1/2 h-[2px] border-t-2 border-dashed border-primary-container/60 animate-pulse"></div>
+<div class="absolute bg-white rounded-full p-2 shadow-[0_0_15px_rgba(255,143,163,0.4)] pulse-heart z-20">
+<span class="material-symbols-outlined text-primary text-[24px]" data-icon="favorite" style="font-variation-settings: &quot;FILL&quot; 1;">favorite</span>
+</div>
+</div>
+<!-- Avatar 2 -->
+<div class="z-10 relative">
+<div class="w-24 h-24 rounded-full border-4 border-white soft-shadow overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="A dreamy portrait of a young woman with soft features, looking slightly away with a warm expression. The lighting is golden hour, highlighting a romantic and cozy mood. The visual style is consistent with high-end lifestyle photography using a warm-toned color grade." src="https://lh3.googleusercontent.com/aida-public/AB6AXuBL68HYLFSJkqnRqhSdprtD6vC73NpeS9K41n9S_uuLHWX9ZHJxwgIBprpU2wFloKe3R_CCb8Pkw6qjmG00KHVLx2Nt9Y1EoiBFbx7psXAopNIVpLv4CULQGZ975hdhjc42NxW8ZqFfuQXancHNyTNFACTyuzFjUxXmeYcQBPWbpFsNuKPbHAbpljwr-G-JTcxmpYbBVgL1ktYO3DqQNm6_lgk8Sa0MTfJ21UHvh6oWmg2P-vyLEOuPJ3l4dsWCYdcKlomiD8IGhwQ">
+</div>
+</div>
+</div>
+<!-- Binding Badge -->
+<div class="mt-6">
+<div class="bg-primary-container/20 text-on-primary-container px-6 py-2 rounded-full font-label-md text-label-md flex items-center gap-2"><span class="material-symbols-outlined text-[18px]" data-icon="favorite" style="font-variation-settings: &quot;FILL&quot; 1;">favorite</span> 甜蜜相守 520 天</div>
+</div>
+</section>
+<!-- Feature Cards Grid -->
+<section class="grid grid-cols-1 gap-4">
+<!-- Couples Space -->
+<div class="bg-white rounded-[24px] p-6 soft-shadow flex items-center justify-between group active:scale-[0.98] transition-transform cursor-pointer border border-[#F2E8DF]">
+<div class="flex items-center gap-4">
+<div class="w-12 h-12 rounded-2xl bg-primary-container/10 flex items-center justify-center">
+<span class="material-symbols-outlined text-primary text-[28px]" data-icon="auto_awesome">auto_awesome</span>
+</div>
+<div>
+<h3 class="text-on-surface font-title-md text-[18px]">情侣空间</h3>
+<p class="text-on-surface-variant text-caption">记录你们的甜蜜日常</p>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant" data-icon="chevron_right">chevron_right</span>
+</div>
+<!-- Memory Archive -->
+<div class="bg-white rounded-[24px] p-6 soft-shadow flex items-center justify-between group active:scale-[0.98] transition-transform cursor-pointer border border-[#F2E8DF]">
+<div class="flex items-center gap-4">
+<div class="w-12 h-12 rounded-2xl bg-secondary-container/20 flex items-center justify-center">
+<span class="material-symbols-outlined text-secondary text-[28px]" data-icon="auto_stories">auto_stories</span>
+</div>
+<div>
+<h3 class="text-on-surface font-title-md text-[18px]">回忆档案</h3>
+<p class="text-on-surface-variant text-caption">已发布 4 篇日记</p>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant" data-icon="chevron_right">chevron_right</span>
+</div>
+<!-- Notifications -->
+<div class="bg-white rounded-[24px] p-6 soft-shadow flex items-center justify-between group active:scale-[0.98] transition-transform cursor-pointer border border-[#F2E8DF]">
+<div class="flex items-center gap-4">
+<div class="w-12 h-12 rounded-2xl bg-tertiary-fixed/30 flex items-center justify-center">
+<span class="material-symbols-outlined text-tertiary text-[28px]" data-icon="notifications">notifications</span>
+</div>
+<div>
+<h3 class="text-on-surface font-title-md text-[18px]">消息通知</h3>
+<p class="text-on-surface-variant text-caption">暂无新动态</p>
+</div>
+</div>
+<span class="material-symbols-outlined text-outline-variant" data-icon="chevron_right">chevron_right</span>
+</div>
+</section>
+<!-- Footer Actions -->
+<footer class="flex flex-col items-center gap-6 pt-8 pb-12">
+<button class="text-on-surface-variant font-label-md text-label-md hover:text-primary transition-colors flex items-center gap-1">
+<span class="material-symbols-outlined text-[18px]" data-icon="tune">tune</span>
+                应用设置
+            </button>
+<button class="text-outline text-caption hover:text-error transition-colors underline underline-offset-4 decoration-dashed decoration-outline-variant">
+                解除绑定 / 加入黑名单
+            </button>
+</footer>
+</main>
+<!-- BottomNavBar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-3 pb-safe bg-surface dark:bg-surface-dim shadow-[0_-4px_16px_rgba(155,64,83,0.08)] rounded-t-[24px]">
+<!-- Diary Tab -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="auto_stories">auto_stories</span>
+<span class="text-label-md font-label-md">Diary</span>
+</a>
+<!-- Wagers Tab -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="workspace_premium">workspace_premium</span>
+<span class="text-label-md font-label-md">Wagers</span>
+</a>
+<!-- Profile Tab (ACTIVE) -->
+<a class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1.5 active:scale-90 duration-150 ease-out" href="#">
+<span class="material-symbols-outlined" data-icon="person" style="font-variation-settings: &quot;FILL&quot; 1;">person</span>
+<span class="text-label-md font-label-md">Profile</span>
+</a>
+</nav>
+<script>
+        // Micro-interaction for cards
+        document.querySelectorAll('.cursor-pointer').forEach(card => {
+            card.addEventListener('click', () => {
+                card.style.transform = 'scale(0.95)';
+                setTimeout(() => {
+                    card.style.transform = '';
+                }, 150);
+            });
+        });
+    </script>
+
+
+
+
+</body></html>

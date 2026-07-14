@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, viewport-fit=cover" name="viewport"/>
+<title>Our Journey - Wagers</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<!-- Tailwind Configuration -->
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-primary-container": "#782539",
+                    "on-primary": "#ffffff",
+                    "secondary": "#24657e",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "on-tertiary-container": "#5a3e00",
+                    "outline-variant": "#dac0c3",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "error-container": "#ffdad6",
+                    "on-error": "#ffffff",
+                    "primary-fixed": "#ffd9dd",
+                    "on-tertiary": "#ffffff",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "secondary-container": "#a6e2ff",
+                    "inverse-primary": "#ffb2bd",
+                    "surface-tint": "#9b4053",
+                    "surface-container-high": "#f6e4e5",
+                    "tertiary": "#7d5800",
+                    "on-error-container": "#93000a",
+                    "outline": "#877274",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "surface-variant": "#f0dee0",
+                    "surface": "#fff8f7",
+                    "on-secondary": "#ffffff",
+                    "surface-container": "#fbeaeb",
+                    "on-secondary-fixed": "#001f2a",
+                    "primary-container": "#ff8fa3",
+                    "on-surface-variant": "#544244",
+                    "on-background": "#22191a",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "surface-dim": "#e7d6d7",
+                    "surface-container-low": "#fff0f1",
+                    "surface-bright": "#fff8f7",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "primary": "#9b4053",
+                    "on-secondary-container": "#24667f",
+                    "surface-container-lowest": "#ffffff",
+                    "surface-container-highest": "#f0dee0",
+                    "on-primary-fixed": "#400014",
+                    "tertiary-container": "#e6a500",
+                    "secondary-fixed": "#bde9ff",
+                    "tertiary-fixed": "#ffdea9",
+                    "on-surface": "#22191a",
+                    "background": "#fff8f7",
+                    "inverse-surface": "#382e2f",
+                    "on-tertiary-fixed": "#271900",
+                    "inverse-on-surface": "#feedee",
+                    "error": "#ba1a1a",
+                    "action-rose": "#9c4b57"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "3xl": "24px",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "container-padding": "24px",
+                    "lg": "32px",
+                    "xl": "48px",
+                    "sm": "12px",
+                    "md": "20px",
+                    "gutter": "16px",
+                    "xs": "4px",
+                    "base": "8px"
+            },
+            "fontFamily": {
+                    "body-lg": ["Be Vietnam Pro"],
+                    "label-md": ["Be Vietnam Pro"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "caption": ["Be Vietnam Pro"],
+                    "title-md": ["Plus Jakarta Sans"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"],
+                    "headline-lg": ["Plus Jakarta Sans"]
+            },
+            "fontSize": {
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}],
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .soft-pink-shadow {
+            box-shadow: 0 8px 32px -4px rgba(155, 64, 83, 0.12);
+        }
+        .locked-blur {
+            backdrop-filter: blur(8px);
+            background: rgba(255, 248, 247, 0.6);
+        }
+        .floating-heart {
+            animation: float 3s ease-in-out infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-10px); }
+        }
+        body {
+            background-color: #fff8f7;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .squiggles {
+            mask-image: radial-gradient(circle at 10px 10px, transparent 10px, black 11px);
+            mask-size: 20px 20px;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="font-body-md text-on-surface">
+<!-- TopAppBar (JSON Instruction: small_center_aligned) -->
+<header class="sticky top-0 z-50 bg-surface/80 backdrop-blur-md h-16 flex justify-between items-center w-full px-container-padding">
+<button class="text-primary hover:opacity-80 transition-opacity active:scale-95 duration-200">
+<span class="material-symbols-outlined">favorite</span>
+</button>
+<h1 class="text-title-md font-title-md font-bold text-primary">赌局</h1>
+<button class="text-primary hover:opacity-80 transition-opacity active:scale-95 duration-200">
+<span class="material-symbols-outlined">settings</span>
+</button>
+</header>
+<main class="pb-24">
+<!-- Hero Section -->
+<section class="px-container-padding pt-base pb-lg text-center flex flex-col items-center">
+<div class="relative w-full aspect-square max-w-[280px] mb-md flex items-center justify-center">
+<div class="absolute inset-0 bg-primary-container/20 rounded-full blur-3xl"></div>
+<img class="relative z-10 w-full h-full object-contain floating-heart" data-alt="A whimsical, hand-drawn digital illustration of two heart-shaped dice rolling on a soft cream background. The dice are warm rose pink and soft coral. Surrounding them are tiny floating hearts and sparkling golden stars. The style is soft, tactile, and romantic, using warm pastel tones to evoke a sense of sweet playfulness and cozy nostalgia." src="https://lh3.googleusercontent.com/aida-public/AB6AXuAj7NqT3w-8VlZ3MyiaoiNnYQTgRAwufnaZkEgrnp4L4y7H4700ru8vHvLCoXZ1A3Baej8N3wvIuCvPzPqbHxyT4ggBVX_oWaI9Q3j0XrgdFVQ-lCa3cTW2XSR4qpljaYjmh9SZ-IguvWgxdHUOspbbgZENwCyyjz0Wl9JGsZmQafch9806aebYr9N0HWlCWuXCv90Z6f9jvh-x1ix1jIq6Tx1RvpEFitafDeCaeAlv2YPjZhV_oqWg-6SOoswkjr_PCuINduhodd8"/>
+</div>
+<h2 class="font-headline-lg-mobile text-headline-lg-mobile text-on-background mb-xs">记录你们的甜蜜胜负</h2>
+<p class="font-body-md text-body-md text-on-surface-variant mb-lg max-w-[280px]">在这里，把日常琐事变成有趣的赌约</p>
+<button class="bg-action-rose text-on-primary font-label-md text-label-md px-10 py-4 rounded-full soft-pink-shadow active:scale-95 transition-transform">
+                登录 / 注册
+            </button>
+</section>
+<!-- Content Preview (Locked) -->
+<section class="relative px-container-padding py-lg overflow-hidden">
+<!-- Central Axis Line -->
+<div class="absolute left-1/2 top-0 bottom-0 w-px border-l-2 border-dashed border-[#e7d6d7] -translate-x-1/2 z-0"></div>
+<div class="relative z-10 space-y-xl">
+<!-- Timeline Node 1 (Left) -->
+<div class="flex justify-start w-full relative">
+<div class="w-[45%] relative rounded-3xl bg-surface-container-lowest p-md border border-[#F2E8DF] soft-pink-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-primary mb-xs">赌约：晚餐</div>
+<div class="text-body-md font-bold text-on-surface">谁去洗碗？</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-primary border-2 border-surface"></div>
+</div>
+<!-- Timeline Node 2 (Right) -->
+<div class="flex justify-end w-full relative">
+<div class="w-[45%] relative rounded-3xl bg-surface-container-lowest p-md border border-[#F2E8DF] soft-pink-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-secondary mb-xs">赌约：早起</div>
+<div class="text-body-md font-bold text-on-surface">谁买早餐？</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-secondary border-2 border-surface"></div>
+</div>
+<!-- Timeline Node 3 (Left) -->
+<div class="flex justify-start w-full relative">
+<div class="w-[45%] relative rounded-3xl bg-surface-container-lowest p-md border border-[#F2E8DF] soft-pink-shadow overflow-hidden">
+<div class="opacity-30 grayscale">
+<div class="text-label-md text-tertiary mb-xs">赌约：电影</div>
+<div class="text-body-md font-bold text-on-surface">谁选片子？</div>
+</div>
+<!-- Lock Overlay -->
+<div class="absolute inset-0 locked-blur flex items-center justify-center z-10">
+<span class="material-symbols-outlined text-primary/60">lock</span>
+</div>
+</div>
+<!-- Axis Dot -->
+<div class="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-tertiary border-2 border-surface"></div>
+</div>
+</div>
+</section>
+<!-- Decorative Mood Tags (Chips) -->
+</main>
+<!-- BottomNavBar (JSON Instruction: label_icon, active: Wagers) -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-3 pb-safe bg-surface dark:bg-surface-dim shadow-[0_-4px_16px_rgba(155,64,83,0.08)] rounded-t-[24px]">
+<!-- Diary -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+<span class="text-label-md font-label-md">Diary</span>
+</a>
+<!-- Wagers (Active) -->
+<a class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1.5 active:scale-90 duration-150 ease-out" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">workspace_premium</span>
+<span class="text-label-md font-label-md">Wagers</span>
+</a>
+<!-- Profile -->
+<a class="flex flex-col items-center justify-center text-on-surface-variant p-2 hover:bg-primary-fixed-dim/20 rounded-full transition-colors" href="#">
+<span class="material-symbols-outlined">person</span>
+<span class="text-label-md font-label-md">Profile</span>
+</a>
+</nav>
+<script>
+        // Micro-interaction for cards on scroll or tap
+        document.querySelectorAll('.rounded-3xl').forEach(card => {
+            card.addEventListener('touchstart', () => {
+                card.style.transform = 'scale(0.98)';
+                card.style.transition = 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)';
+            });
+            card.addEventListener('touchend', () => {
+                card.style.transform = 'scale(1)';
+            });
+        });
+    </script>
+</body></html>

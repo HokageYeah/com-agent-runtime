@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport"/>
+<title>情侣日记 - 我的</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&amp;family=Be+Vietnam+Pro:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "error": "#ba1a1a",
+                    "on-tertiary": "#ffffff",
+                    "on-surface-variant": "#544244",
+                    "outline": "#877274",
+                    "inverse-surface": "#382e2f",
+                    "tertiary-fixed-dim": "#ffba27",
+                    "surface-dim": "#e7d6d7",
+                    "secondary-fixed-dim": "#93cfeb",
+                    "surface-tint": "#9b4053",
+                    "secondary": "#24657e",
+                    "inverse-primary": "#ffb2bd",
+                    "secondary-fixed": "#bde9ff",
+                    "on-secondary-fixed-variant": "#004d64",
+                    "surface-bright": "#fff8f7",
+                    "surface-variant": "#f0dee0",
+                    "secondary-container": "#a6e2ff",
+                    "primary": "#9b4053",
+                    "primary-fixed": "#ffd9dd",
+                    "tertiary": "#7d5800",
+                    "outline-variant": "#dac0c3",
+                    "on-primary-container": "#782539",
+                    "surface-container": "#fbeaeb",
+                    "on-error-container": "#93000a",
+                    "on-primary-fixed": "#400014",
+                    "primary-container": "#ff8fa3",
+                    "on-tertiary-fixed-variant": "#5e4100",
+                    "surface-container-low": "#fff0f1",
+                    "surface-container-highest": "#f0dee0",
+                    "primary-fixed-dim": "#ffb2bd",
+                    "on-background": "#22191a",
+                    "surface": "#fff8f7",
+                    "on-primary-fixed-variant": "#7d283c",
+                    "inverse-on-surface": "#feedee",
+                    "tertiary-fixed": "#ffdea9",
+                    "background": "#fff8f7",
+                    "on-surface": "#22191a",
+                    "tertiary-container": "#e6a500",
+                    "error-container": "#ffdad6",
+                    "on-secondary-fixed": "#001f2a",
+                    "surface-container-lowest": "#ffffff",
+                    "on-secondary-container": "#24667f",
+                    "on-secondary": "#ffffff",
+                    "surface-container-high": "#f6e4e5",
+                    "on-tertiary-fixed": "#271900",
+                    "on-primary": "#ffffff",
+                    "on-error": "#ffffff",
+                    "on-tertiary-container": "#5a3e00"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "2xl": "1rem",
+                    "3xl": "1.5rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "lg": "32px",
+                    "xs": "4px",
+                    "base": "8px",
+                    "sm": "12px",
+                    "xl": "48px",
+                    "gutter": "16px",
+                    "container-padding": "24px",
+                    "md": "20px"
+            },
+            "fontFamily": {
+                    "title-md": ["Plus Jakarta Sans"],
+                    "display-lg": ["Plus Jakarta Sans"],
+                    "body-md": ["Be Vietnam Pro"],
+                    "label-md": ["Be Vietnam Pro"],
+                    "caption": ["Be Vietnam Pro"],
+                    "headline-lg": ["Plus Jakarta Sans"],
+                    "headline-lg-mobile": ["Plus Jakarta Sans"],
+                    "body-lg": ["Be Vietnam Pro"]
+            },
+            "fontSize": {
+                    "title-md": ["20px", {"lineHeight": "28px", "fontWeight": "600"}],
+                    "display-lg": ["48px", {"lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                    "body-md": ["16px", {"lineHeight": "24px", "fontWeight": "400"}],
+                    "label-md": ["14px", {"lineHeight": "20px", "letterSpacing": "0.01em", "fontWeight": "600"}],
+                    "caption": ["12px", {"lineHeight": "16px", "fontWeight": "400"}],
+                    "headline-lg": ["32px", {"lineHeight": "40px", "fontWeight": "700"}],
+                    "headline-lg-mobile": ["28px", {"lineHeight": "36px", "fontWeight": "700"}],
+                    "body-lg": ["18px", {"lineHeight": "28px", "fontWeight": "400"}]
+            }
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .soft-shadow {
+            box-shadow: 0 12px 32px -4px rgba(155, 64, 83, 0.08);
+        }
+        body {
+            -webkit-tap-highlight-color: transparent;
+        }
+        .glass-header {
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-background text-on-surface font-body-md selection:bg-primary-fixed selection:text-on-primary-fixed min-h-screen flex flex-col">
+<!-- TopAppBar -->
+<header class="fixed top-0 z-50 w-full h-16 flex justify-between items-center px-container-padding bg-surface/80 glass-header">
+<div class="flex items-center">
+<span class="material-symbols-outlined text-primary" data-icon="calendar_today">calendar_today</span>
+</div>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-primary">我的</h1>
+<div class="flex items-center">
+<span class="material-symbols-outlined text-primary" data-icon="favorite">favorite</span>
+</div>
+</header>
+<main class="flex-grow pt-24 pb-32 px-container-padding">
+<!-- Hero Section: Unlogged State -->
+<section class="bg-surface-container-lowest rounded-3xl p-lg soft-shadow flex flex-col items-center text-center mb-lg border border-outline-variant/30">
+<div class="relative w-32 h-32 mb-md">
+<div class="absolute inset-0 bg-primary-container/20 rounded-full animate-pulse"></div>
+<div class="absolute inset-2 bg-surface flex items-center justify-center rounded-full border-2 border-dashed border-primary/30">
+<span class="material-symbols-outlined text-primary text-5xl" data-icon="favorite" style="font-variation-settings: 'FILL' 1;">favorite</span>
+</div>
+</div>
+<h2 class="font-title-md text-title-md text-on-surface mb-xs">开启浪漫之旅</h2>
+<p class="font-body-md text-on-surface-variant mb-lg opacity-80">在这里，记录属于你们的每一个心动时刻</p>
+<button class="w-full bg-[#9c4b57] text-white py-4 px-lg rounded-full font-label-md text-label-md shadow-md active:scale-95 transition-transform">
+                登录 / 注册
+            </button>
+</section>
+<!-- Content Area: Feature List -->
+<div class="space-y-md">
+<!-- Item 1: Couples Space -->
+<div class="bg-white rounded-3xl p-md flex items-center soft-shadow border border-surface-variant/50 relative overflow-hidden group">
+<div class="w-12 h-12 bg-secondary-container/30 rounded-2xl flex items-center justify-center mr-md">
+<span class="material-symbols-outlined text-secondary" data-icon="hub">hub</span>
+</div>
+<div class="flex-grow">
+<h3 class="font-title-md text-title-md text-on-surface/50">情侣空间</h3>
+<p class="text-caption font-caption text-outline">需绑定另一半后开启</p>
+</div>
+<span class="material-symbols-outlined text-outline/40" data-icon="lock">lock</span>
+</div>
+<!-- Item 2: Memories -->
+<div class="bg-white rounded-3xl p-md flex items-center soft-shadow border border-surface-variant/50 relative overflow-hidden">
+<div class="w-12 h-12 bg-primary-container/20 rounded-2xl flex items-center justify-center mr-md">
+<span class="material-symbols-outlined text-primary" data-icon="auto_stories">auto_stories</span>
+</div>
+<div class="flex-grow">
+<h3 class="font-title-md text-title-md text-on-surface/50">独家回忆</h3>
+<p class="text-caption font-caption text-outline">登录后可查看时光相册</p>
+</div>
+<span class="material-symbols-outlined text-outline/40" data-icon="lock">lock</span>
+</div>
+<!-- Item 3: Notifications -->
+<div class="bg-white rounded-3xl p-md flex items-center soft-shadow border border-surface-variant/50 relative overflow-hidden">
+<div class="w-12 h-12 bg-tertiary-container/20 rounded-2xl flex items-center justify-center mr-md">
+<span class="material-symbols-outlined text-tertiary" data-icon="notifications">notifications</span>
+</div>
+<div class="flex-grow">
+<h3 class="font-title-md text-title-md text-on-surface/50">消息提醒</h3>
+<p class="text-caption font-caption text-outline">接收TA的点滴互动</p>
+</div>
+<span class="material-symbols-outlined text-outline/40" data-icon="lock">lock</span>
+</div>
+</div>
+<!-- Visual Decorative Area -->
+<div class="mt-xl flex justify-center">
+<div class="w-24 h-1 rounded-full bg-primary/10"></div>
+</div>
+<!-- Visual Illustration placeholder for atmosphere -->
+<div class="mt-lg rounded-3xl overflow-hidden aspect-video relative soft-shadow">
+<img alt="Warm illustration" class="w-full h-full object-cover grayscale-[0.2] opacity-60" data-alt="A warm and romantic close-up photograph of two hands reaching towards each other on a soft cream background, bathed in golden hour sunlight. The scene is intimate and nostalgic, with a color palette of soft pinks, warm ambers, and gentle whites, perfectly matching a cozy digital sanctuary aesthetic. The atmosphere is serene and encouraging, inviting the user to start their shared journey." src="https://lh3.googleusercontent.com/aida-public/AB6AXuDDjsj60KoQaP7PdcLKRZgizCY34M3NT2FFTPJwrRNXmTxual4H0IqYjxec8waxpFUiMzoHcVyVFeWAf69YnSQQjjmokEcoZmorHe_tulBxkzQQ-4Rq98W6s74KlXrXWv_d0XgGsktfHMjSAqUUJWwJgX9mfnBNqea4aOfcyqqzw0RR7NK88fw2dZ0MxrX-IycLSLns19St1Y1r4_7G4p6Z7IUVXVRyFxCRVao-SCkqthvAcKNRf-qmdg1J1bThKjAz4px6w-HjhE4"/>
+<div class="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent"></div>
+<div class="absolute bottom-4 left-0 w-full text-center px-md">
+<p class="font-body-md text-on-surface-variant italic opacity-80">"记录爱，让每一个平凡日子都发光"</p>
+</div>
+</div>
+</main>
+<!-- BottomNavBar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-gutter py-3 pb-8 bg-surface shadow-[0_-4px_16px_rgba(34,25,26,0.08)] rounded-t-xl">
+<!-- Tab: Diary -->
+<div class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:bg-surface-variant/50 rounded-full transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="auto_stories">auto_stories</span>
+<span class="font-label-md text-label-md">日记</span>
+</div>
+<!-- Tab: Casino/Games -->
+<div class="flex flex-col items-center justify-center text-on-surface-variant px-5 py-1 hover:bg-surface-variant/50 rounded-full transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="casino">casino</span>
+<span class="font-label-md text-label-md">赌局</span>
+</div>
+<!-- Tab: Mine (Active) -->
+<div class="flex flex-col items-center justify-center bg-primary-container text-on-primary-container rounded-full px-5 py-1 scale-100 transition-all duration-200">
+<span class="material-symbols-outlined" data-icon="person" style="font-variation-settings: 'FILL' 1;">person</span>
+<span class="font-label-md text-label-md">我的</span>
+</div>
+</nav>
+<script>
+        // Simple micro-interactions for buttons
+        document.querySelectorAll('button, nav div').forEach(el => {
+            el.addEventListener('touchstart', () => {
+                el.style.transform = 'scale(0.95)';
+            });
+            el.addEventListener('touchend', () => {
+                el.style.transform = 'scale(1)';
+            });
+        });
+    </script>
+</body></html>
