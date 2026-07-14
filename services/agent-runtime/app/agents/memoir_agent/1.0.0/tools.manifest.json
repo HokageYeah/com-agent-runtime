@@ -1,0 +1,22 @@
+[
+  {
+    "name": "memory.get_snapshot",
+    "version": "1.0.0",
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/memory.get_snapshot",
+    "input_from": "input",
+    "output_to": "snapshot",
+    "side_effect": false
+  },
+  {
+    "name": "memory.publish_playback_document",
+    "version": "1.0.0",
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/memory.publish_playback_document",
+    "input_from": "playback_document",
+    "output_to": "publish_result",
+    "side_effect": true
+  }
+]

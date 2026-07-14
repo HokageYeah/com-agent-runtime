@@ -303,24 +303,24 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 本总控计划第 3 节 + 后端计划 Task 0。
 
-- [ ] 确认 Runtime API、AgentRun 状态、HTTP Business Tool、callback、public trace 等契约。
-- [ ] 冻结 API/Event/Tool/Artifact `contract_version/schema_version` 和兼容性规则。
-- [ ] 冻结详细 RuntimeEvent 枚举及其到安全业务 callback 的确定性映射；Runtime 原生事件订阅仍放二期。
-- [ ] 冻结 held create/start、dispatch_state、合法状态转换和独立时间预算。
-- [ ] 冻结 package digest 与 active/deprecated/revoked 生命周期。
-- [ ] 冻结未认领/人工等待 run 的同步取消、claimed run 的协作取消，以及 cancel/retry/approval 互斥规则。
-- [ ] 冻结 worker lease/heartbeat/fencing、execution attempt 和稳定逻辑副作用键。
-- [ ] 冻结 `ModelCallContext` 的可信来源、permit 后二次校验、物理 model attempt 预写/结算和 outcome unknown 保守成本语义。
-- [ ] 冻结 privacy purge、authorization version、trusted/untrusted envelope 和语义校验。
-- [ ] 冻结 RuntimeAuditEvent 字段、持久 audit sink、保留/访问策略和禁止记录的私密字段。
-- [ ] 确认 HMAC-SHA256 签名原文、时间戳容忍窗口、`create/start/retry/cancel/human_approval/purge` 幂等作用域、TTL、过期原子换代和冲突响应；Runtime request hash 覆盖 method、包含资源 ID 的 normalized path 和 body hash，`AgentRun.create_idempotency_key` 只作审计索引，不承担永久唯一约束。
-- [ ] 确认 callback HMAC-SHA256 签名请求头、业务侧验签规则和 header/body 一致性校验。
-- [ ] 确认 callback `event_seq/status_version` 乱序保护。
-- [ ] 确认 `event_seq` 采用 run 生命周期全局单调递增，retry/resume 后不重置。
-- [ ] 确认手动重试计数与 Runtime 自动节点重试计数隔离。
-- [ ] 确认第一版只支持 Workflow Agent。
-- [ ] 确认 `memoir_agent@1.0.0` 是首个 AgentPackage。
-- [ ] 确认 Runtime 服务目录为 `services/agent-runtime/`，权威运行数据库与迁移方案已选定。
+- [✅] 确认 Runtime API、AgentRun 状态、HTTP Business Tool、callback、public trace 等契约。
+- [✅] 冻结 API/Event/Tool/Artifact `contract_version/schema_version` 和兼容性规则。
+- [✅] 冻结详细 RuntimeEvent 枚举及其到安全业务 callback 的确定性映射；Runtime 原生事件订阅仍放二期。
+- [✅] 冻结 held create/start、dispatch_state、合法状态转换和独立时间预算。
+- [✅] 冻结 package digest 与 active/deprecated/revoked 生命周期。
+- [✅] 冻结未认领/人工等待 run 的同步取消、claimed run 的协作取消，以及 cancel/retry/approval 互斥规则。
+- [✅] 冻结 worker lease/heartbeat/fencing、execution attempt 和稳定逻辑副作用键。
+- [✅] 冻结 `ModelCallContext` 的可信来源、permit 后二次校验、物理 model attempt 预写/结算和 outcome unknown 保守成本语义。
+- [✅] 冻结 privacy purge、authorization version、trusted/untrusted envelope 和语义校验。
+- [✅] 冻结 RuntimeAuditEvent 字段、持久 audit sink、保留/访问策略和禁止记录的私密字段。
+- [✅] 确认 HMAC-SHA256 签名原文、时间戳容忍窗口、`create/start/retry/cancel/human_approval/purge` 幂等作用域、TTL、过期原子换代和冲突响应；Runtime request hash 覆盖 method、包含资源 ID 的 normalized path 和 body hash，`AgentRun.create_idempotency_key` 只作审计索引，不承担永久唯一约束。
+- [✅] 确认 callback HMAC-SHA256 签名请求头、业务侧验签规则和 header/body 一致性校验。
+- [✅] 确认 callback `event_seq/status_version` 乱序保护。
+- [✅] 确认 `event_seq` 采用 run 生命周期全局单调递增，retry/resume 后不重置。
+- [✅] 确认手动重试计数与 Runtime 自动节点重试计数隔离。
+- [✅] 确认第一版只支持 Workflow Agent。
+- [✅] 确认 `memoir_agent@1.0.0` 是首个 AgentPackage。
+- [✅] 确认 Runtime 服务目录为 `services/agent-runtime/`，权威运行数据库与迁移方案已选定。
 
 **Checkpoint:** Runtime、情侣日记后端、前端都以本契约为准。
 
@@ -328,13 +328,13 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 1。
 
-- [ ] 新建 `services/agent-runtime/`。
-- [ ] 建立 Contract 包、FastAPI app、配置、日志、`/health/live`、`/health/ready` 和鉴权 capabilities。
-- [ ] 建立追加写 AuditService；生产缺少持久、访问受限的 audit sink，或部署声明启用的 outbox event type 缺少 handler 时 readiness 返回 503。
-- [ ] 配置可信业务系统、签名容忍时间、Arq Redis 队列名和 Worker 启动命令。
-- [ ] 配置模型流量控制 namespace 和 permit TTL；共享控制不可用时固定 fail closed，不提供进程内无限调用开关。
-- [ ] 建立测试框架和 lint/type check 命令。
-- [ ] 跑 `ruff check .` 和健康检查测试。
+- [✅] 新建 `services/agent-runtime/`。
+- [✅] 建立 Contract 包、FastAPI app、配置、日志、`/health/live`、`/health/ready` 和鉴权 capabilities。
+- [✅] 建立追加写 AuditService；生产缺少持久、访问受限的 audit sink，或部署声明启用的 outbox event type 缺少 handler 时 readiness 返回 503。
+- [✅] 配置可信业务系统、签名容忍时间、Arq Redis 队列名和 Worker 启动命令。
+- [✅] 配置模型流量控制 namespace 和 permit TTL；共享控制不可用时固定 fail closed，不提供进程内无限调用开关。
+- [✅] 建立测试框架和 lint/type check 命令。
+- [✅] 跑 `ruff check .` 和健康检查测试。
 
 **Checkpoint:** AgentRuntime 服务可以单独启动。
 
@@ -342,14 +342,14 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 2。
 
-- [ ] 创建 Runtime 核心表。
-- [ ] 增加 RuntimeOutboxEvent、lease/fencing、dispatch、attempt、privacy、authorization 和独立时钟字段。
-- [ ] AgentToolCall 保存稳定 logical operation key、业务幂等键和最终签名 body 的 request digest；同一逻辑操作允许保留多次物理 attempt 审计记录。
-- [ ] AgentModelUsage 每行保存一个候选物理 model attempt 的 execution/model attempt、running/aborted/terminal/unknown 状态、permit、capability snapshot、`pricing_config_version/cost_unit`、`reserved_estimated_cost/estimated_cost` 与 token usage；未知 token 保持空值，不能伪装成 0，aborted_before_send 不表示已经请求 provider。
-- [ ] 增加 `AdmissionBucket(scope_type, scope_key, held_count, queued_count, running_count, version)`，建立 scope 唯一约束与非负 check；`AgentRun.dispatch_state` 作为对账重建来源。
-- [ ] Checkpoint 使用加密/TTL/classification，Artifact 使用摘要/digest/业务引用 envelope。
-- [ ] 创建 Alembic 初始迁移。
-- [ ] 覆盖 metadata 和唯一约束测试。
+- [✅] 创建 Runtime 核心表。
+- [✅] 增加 RuntimeOutboxEvent、lease/fencing、dispatch、attempt、privacy、authorization 和独立时钟字段。
+- [✅] AgentToolCall 保存稳定 logical operation key、业务幂等键和最终签名 body 的 request digest；同一逻辑操作允许保留多次物理 attempt 审计记录。
+- [✅] AgentModelUsage 每行保存一个候选物理 model attempt 的 execution/model attempt、running/aborted/terminal/unknown 状态、permit、capability snapshot、`pricing_config_version/cost_unit`、`reserved_estimated_cost/estimated_cost` 与 token usage；未知 token 保持空值，不能伪装成 0，aborted_before_send 不表示已经请求 provider。
+- [✅] 增加 `AdmissionBucket(scope_type, scope_key, held_count, queued_count, running_count, version)`，建立 scope 唯一约束与非负 check；`AgentRun.dispatch_state` 作为对账重建来源。
+- [✅] Checkpoint 使用加密/TTL/classification，Artifact 使用摘要/digest/业务引用 envelope。
+- [✅] 创建 Alembic 初始迁移。
+- [✅] 覆盖 metadata 和唯一约束测试。
 
 **Checkpoint:** Runtime 可以持久化 run、plan、step、tool、evaluation、checkpoint、artifact、model usage。
 
@@ -357,15 +357,15 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 3、Task 12 的包定义部分。
 
-- [ ] 定义 AgentPackage schema。
-- [ ] 创建 `memoir_agent@1.0.0` 文件包。
-- [ ] 固定 `agent.yaml`、`input.schema.json`、`output.schema.json`、受信任 `workflow.graph.py`、`prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/`。
-- [ ] 加载器校验版本、schema、workflow、prompt 引用、工具清单、guardrails、callback、ui trace 和至少 5 条最小 eval 用例。
-- [ ] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许进入人工等待，fallback 必须指向确定性的恢复节点。
-- [ ] Tool manifest 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri`，并冻结 AI SDK 等价 tool schema fixture；第一版仅验证兼容，不连接 MCP。
-- [ ] Tool manifest 冻结 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明状态路径和覆盖 trusted 控制字段的映射在注册期拒绝。
-- [ ] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。
-- [ ] Package active/deprecated/revoked 变化记录操作者、原因、时间并写 RuntimeAuditEvent。
+- [✅] 定义 AgentPackage schema。
+- [✅] 创建 `memoir_agent@1.0.0` 文件包。
+- [✅] 固定 `agent.yaml`、`input.schema.json`、`output.schema.json`、受信任 `workflow.graph.py`、`prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/`。
+- [✅] 加载器校验版本、schema、workflow、prompt 引用、工具清单、guardrails、callback、ui trace 和至少 5 条最小 eval 用例。
+- [✅] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许进入人工等待，fallback 必须指向确定性的恢复节点。
+- [✅] Tool manifest 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri`，并冻结 AI SDK 等价 tool schema fixture；第一版仅验证兼容，不连接 MCP。
+- [✅] Tool manifest 冻结 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明状态路径和覆盖 trusted 控制字段的映射在注册期拒绝。
+- [✅] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。
+- [✅] Package active/deprecated/revoked 变化记录操作者、原因、时间并写 RuntimeAuditEvent。
 
 **Checkpoint:** Runtime 可以加载指定版本 AgentPackage，不能自动使用最新版。
 

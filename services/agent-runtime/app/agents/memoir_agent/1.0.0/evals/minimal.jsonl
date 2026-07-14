@@ -1,0 +1,5 @@
+{"case_id":"empty_materials","expected":"fallback"}
+{"case_id":"diary_only","expected":"valid_document"}
+{"case_id":"bet_only","expected":"valid_document"}
+{"case_id":"blocked_language","expected":"safety_blocked"}
+{"case_id":"unknown_source_ref","expected":"semantic_validation_failed"}

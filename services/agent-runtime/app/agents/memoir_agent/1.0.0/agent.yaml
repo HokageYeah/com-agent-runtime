@@ -1,0 +1,14 @@
+agent_id: memoir_agent
+version: 1.0.0
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+prompts:
+  - highlight-extract.v1.md
+  - chapter-plan.v1.md
+  - scene-generate.v1.md
+  - safety-review.v1.md
+  - action-generate.v1.md

@@ -637,13 +637,13 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: `contract_version=1.0.0` 的 API/Event/Tool/Artifact JSON Schema；后续任务只依赖该契约包。
 
-- [ ] 写 create/start/query/retry/cancel/human-approval/purge、RuntimeEvent、ToolRequest/Result/Error、ArtifactEnvelope 的 Pydantic 模型。
-- [ ] Tool Contract 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri` 和 AI SDK 等价 tool schema fixture；第一版只做序列化/兼容性测试，不建立 MCP 连接或 ToolLoopAgent。
-- [ ] 固定 RuntimeEvent 枚举 `run_started/step_started/model_call_started/model_call_finished/tool_call_started/tool_call_finished/step_failed/fallback_used/human_review_requested/partial_succeeded/run_succeeded/run_failed/run_cancelled`，并定义到安全 callback `run_started/step_changed/waiting_human/partial_succeeded/run_succeeded/run_failed/run_cancelled` 的确定性映射；`waiting_human` 仅在 AgentPackage 显式启用时发送。
-- [ ] 固定错误码或治理分类 `IDEMPOTENCY_CONFLICT/RUNTIME_OVERLOADED/MODEL_TIMEOUT/MODEL_PARSE_FAILED/TOOL_TIMEOUT/TOOL_PERMISSION_DENIED/BUSINESS_DATA_INVALID/SAFETY_BLOCKED/COST_LIMIT_EXCEEDED/CALLBACK_SIGNATURE_INVALID/CALLBACK_OUT_OF_ORDER/RECONCILIATION_NEEDED/INDIRECT_PROMPT_INJECTION/GENERATION_SUPERSEDED/DISPATCH_FAILED/PACKAGE_REVOKED/PRIVATE_DATA_PURGED/AUTHORIZATION_REVOKED/SEMANTIC_VALIDATION_FAILED`。
-- [ ] 导出排序稳定的 JSON Schema，并保存兼容性 fixture。
-- [ ] 测试新增 optional 字段保持 minor 兼容，删除 required 字段或改变枚举必须提升 major。
-- [ ] 运行 `pytest tests/test_contract_compatibility.py -q`。
+- [✅] 写 create/start/query/retry/cancel/human-approval/purge、RuntimeEvent、ToolRequest/Result/Error、ArtifactEnvelope 的 Pydantic 模型。
+- [✅] Tool Contract 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri` 和 AI SDK 等价 tool schema fixture；第一版只做序列化/兼容性测试，不建立 MCP 连接或 ToolLoopAgent。
+- [✅] 固定 RuntimeEvent 枚举 `run_started/step_started/model_call_started/model_call_finished/tool_call_started/tool_call_finished/step_failed/fallback_used/human_review_requested/partial_succeeded/run_succeeded/run_failed/run_cancelled`，并定义到安全 callback `run_started/step_changed/waiting_human/partial_succeeded/run_succeeded/run_failed/run_cancelled` 的确定性映射；`waiting_human` 仅在 AgentPackage 显式启用时发送。
+- [✅] 固定错误码或治理分类 `IDEMPOTENCY_CONFLICT/RUNTIME_OVERLOADED/MODEL_TIMEOUT/MODEL_PARSE_FAILED/TOOL_TIMEOUT/TOOL_PERMISSION_DENIED/BUSINESS_DATA_INVALID/SAFETY_BLOCKED/COST_LIMIT_EXCEEDED/CALLBACK_SIGNATURE_INVALID/CALLBACK_OUT_OF_ORDER/RECONCILIATION_NEEDED/INDIRECT_PROMPT_INJECTION/GENERATION_SUPERSEDED/DISPATCH_FAILED/PACKAGE_REVOKED/PRIVATE_DATA_PURGED/AUTHORIZATION_REVOKED/SEMANTIC_VALIDATION_FAILED`。
+- [✅] 导出排序稳定的 JSON Schema，并保存兼容性 fixture。
+- [✅] 测试新增 optional 字段保持 minor 兼容，删除 required 字段或改变枚举必须提升 major。
+- [✅] 运行 `pytest tests/test_contract_compatibility.py -q`。
 
 **Checkpoint:** Runtime、业务 Adapter 和 AgentPackage 有一套无业务依赖的冻结契约。
 
@@ -668,14 +668,14 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: FastAPI app、`GET /health/live`、`GET /health/ready`、`GET /api/v1/runtime-capabilities`。
 
-- [ ] 建立 `pyproject.toml`，依赖包含 FastAPI、uvicorn、pydantic-settings、SQLAlchemy、Alembic、httpx、pytest、ruff、mypy。
-- [ ] 定义 `Settings`，包含 `DATABASE_URL`、`REDIS_URL`、`RUNTIME_ID`、`AGENT_PACKAGE_ROOT`、`CALLBACK_ALLOWED_HOSTS`、`TRUSTED_CLIENTS_JSON`、`SIGNATURE_TOLERANCE_SECONDS`、`RUN_QUEUE_NAME`、`MODEL_TRAFFIC_NAMESPACE`、`MODEL_PERMIT_TTL_SECONDS`、`MAX_STEPS`、`MAX_MODEL_CALLS`、`MAX_TOOL_CALLS`、`MAX_RUN_SECONDS`、`MAX_AUTO_RETRY_PER_STEP`、`MAX_MANUAL_RUN_RETRY_COUNT`、`MAX_ESTIMATED_COST`、`HELD_TTL_SECONDS`、`QUEUE_TTL_SECONDS`、`APPROVAL_TTL_SECONDS`、`MAX_WALL_CLOCK_SECONDS`、`LEASE_TIMEOUT_SECONDS`、`CALLBACK_MAX_ATTEMPTS`、`CALLBACK_RETRY_ALERT_THRESHOLD`、`OUTBOX_RETENTION_DAYS`、`IDEMPOTENCY_TTL_DAYS`、`RECONCILIATION_INTERVAL_SECONDS`、`RECONCILIATION_FAILURE_THRESHOLD`、`AUDIT_SINK_DSN`、`AUDIT_RETENTION_DAYS`、`AUDIT_ALLOWED_ROLES`。模型流量控制固定 fail closed，不提供切换为进程内无限调用的配置。
-- [ ] 新增 `/health/live`，只检查进程与事件循环。
-- [ ] 新增 `/health/ready`，检查数据库 schema、Registry、outbox/queue、部署声明启用的 outbox event type 均有 handler、签名配置；draining 或启用类型缺 handler 时返回 503。
-- [ ] 新增鉴权 capabilities，返回 Contract、Agent 版本、逻辑 model policy 和能力开关，禁止返回密钥、真实 provider/connector endpoint 和租户配额。
-- [ ] 定义 `RuntimeAuditEvent(audit_id, actor_type, actor_id, action, resource_type, resource_id, reason_code, outcome, occurred_at, trace_id, metadata_summary)` 和追加写 `AuditService`；生产环境未配置持久、访问受限的 audit sink 时 readiness 失败。
-- [ ] 写测试覆盖 live/ready、依赖失败、draining 和 capabilities 脱敏。
-- [ ] 运行 `ruff check .`、`pytest tests/test_health_api.py -q`。
+- [✅] 建立 `pyproject.toml`，依赖包含 FastAPI、uvicorn、pydantic-settings、SQLAlchemy、Alembic、httpx、pytest、ruff、mypy。
+- [✅] 定义 `Settings`，包含 `DATABASE_URL`、`REDIS_URL`、`RUNTIME_ID`、`AGENT_PACKAGE_ROOT`、`CALLBACK_ALLOWED_HOSTS`、`TRUSTED_CLIENTS_JSON`、`SIGNATURE_TOLERANCE_SECONDS`、`RUN_QUEUE_NAME`、`MODEL_TRAFFIC_NAMESPACE`、`MODEL_PERMIT_TTL_SECONDS`、`MAX_STEPS`、`MAX_MODEL_CALLS`、`MAX_TOOL_CALLS`、`MAX_RUN_SECONDS`、`MAX_AUTO_RETRY_PER_STEP`、`MAX_MANUAL_RUN_RETRY_COUNT`、`MAX_ESTIMATED_COST`、`HELD_TTL_SECONDS`、`QUEUE_TTL_SECONDS`、`APPROVAL_TTL_SECONDS`、`MAX_WALL_CLOCK_SECONDS`、`LEASE_TIMEOUT_SECONDS`、`CALLBACK_MAX_ATTEMPTS`、`CALLBACK_RETRY_ALERT_THRESHOLD`、`OUTBOX_RETENTION_DAYS`、`IDEMPOTENCY_TTL_DAYS`、`RECONCILIATION_INTERVAL_SECONDS`、`RECONCILIATION_FAILURE_THRESHOLD`、`AUDIT_SINK_DSN`、`AUDIT_RETENTION_DAYS`、`AUDIT_ALLOWED_ROLES`。模型流量控制固定 fail closed，不提供切换为进程内无限调用的配置。
+- [✅] 新增 `/health/live`，只检查进程与事件循环。
+- [✅] 新增 `/health/ready`，检查数据库 schema、Registry、outbox/queue、部署声明启用的 outbox event type 均有 handler、签名配置；draining 或启用类型缺 handler 时返回 503。
+- [✅] 新增鉴权 capabilities，返回 Contract、Agent 版本、逻辑 model policy 和能力开关，禁止返回密钥、真实 provider/connector endpoint 和租户配额。
+- [✅] 定义 `RuntimeAuditEvent(audit_id, actor_type, actor_id, action, resource_type, resource_id, reason_code, outcome, occurred_at, trace_id, metadata_summary)` 和追加写 `AuditService`；生产环境未配置持久、访问受限的 audit sink 时 readiness 失败。
+- [✅] 写测试覆盖 live/ready、依赖失败、draining 和 capabilities 脱敏。
+- [✅] 运行 `ruff check .`、`pytest tests/test_health_api.py -q`。
 
 ### Task 2: 数据模型与 Alembic 迁移
 
@@ -691,19 +691,19 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: 所有 Runtime 核心表。
 
-- [ ] 定义 SQLAlchemy Base 和 session factory。
-- [ ] 创建 `AgentDefinition`、`AgentRun`、`AdmissionBucket`、`AgentPlan`、`AgentStep`、`AgentToolCall`、`AgentEvaluation`、`AgentCheckpoint`、`AgentArtifact`、`AgentModelUsage`、`CallbackEvent`、`RuntimeOutboxEvent`、`IdempotencyRecord` 模型。
-- [ ] `AgentDefinition` 生命周期字段覆盖 `status_changed_at/by/reason`，revoked 另存 revoked_at/revocation_reason；迁移不得用空操作者或空原因回填生产变更。
-- [ ] `AgentRun` 增加 package/contract、caller/tenant、dispatch、authorization、execution attempt、lease/fencing、cancel、privacy、独立时钟字段和约束；`create_idempotency_key` 仅建普通索引，不建立绕过 TTL 的永久唯一约束。
-- [ ] `AgentStep/AgentToolCall/AgentModelUsage` 增加 execution attempt；工具另存 tool attempt、稳定 logical operation key 和最终签名 body 的 request digest；ModelUsage 另存 model attempt、running/aborted_before_send/terminal/outcome_unknown 状态、permit、预留与实际 usage，并保证一个 `usage_id` 只按允许的状态转换结算。
-- [ ] Checkpoint 使用加密 blob/storage ref、TTL、classification、privacy version；Artifact 使用 envelope，不默认保存业务正文。
-- [ ] `CallbackEvent` 增加 `event_seq/status_version`，并建立 `unique(run_id, event_seq)`；两者与状态变化及 callback outbox 同事务固化。
-- [ ] `IdempotencyRecord` 保存 request hash、缓存响应、资源 ID 和 TTL；Runtime 写接口按 `SHA256(upper(method) + "\n" + normalized_path + "\n" + body_sha256)` 生成 request hash，normalized path 包含 `run_id` 等资源标识，避免空 body 的资源操作复用同一 key 时误命中。
-- [ ] `AdmissionBucket` 建立 scope 唯一约束、非负 check 和 version，global key 固定为 `*`；初始迁移不从不完整历史状态静默回填生产配额。
-- [ ] 建立状态转换和 `status_version/fencing_token/privacy_version` 条件写所需索引。
-- [ ] 创建 Alembic 初始迁移。
-- [ ] 测试所有模型表名和关键唯一约束存在。
-- [ ] 运行 `pytest tests/test_models_metadata.py -q`。
+- [✅] 定义 SQLAlchemy Base 和 session factory。
+- [✅] 创建 `AgentDefinition`、`AgentRun`、`AdmissionBucket`、`AgentPlan`、`AgentStep`、`AgentToolCall`、`AgentEvaluation`、`AgentCheckpoint`、`AgentArtifact`、`AgentModelUsage`、`CallbackEvent`、`RuntimeOutboxEvent`、`IdempotencyRecord` 模型。
+- [✅] `AgentDefinition` 生命周期字段覆盖 `status_changed_at/by/reason`，revoked 另存 revoked_at/revocation_reason；迁移不得用空操作者或空原因回填生产变更。
+- [✅] `AgentRun` 增加 package/contract、caller/tenant、dispatch、authorization、execution attempt、lease/fencing、cancel、privacy、独立时钟字段和约束；`create_idempotency_key` 仅建普通索引，不建立绕过 TTL 的永久唯一约束。
+- [✅] `AgentStep/AgentToolCall/AgentModelUsage` 增加 execution attempt；工具另存 tool attempt、稳定 logical operation key 和最终签名 body 的 request digest；ModelUsage 另存 model attempt、running/aborted_before_send/terminal/outcome_unknown 状态、permit、预留与实际 usage，并保证一个 `usage_id` 只按允许的状态转换结算。
+- [✅] Checkpoint 使用加密 blob/storage ref、TTL、classification、privacy version；Artifact 使用 envelope，不默认保存业务正文。
+- [✅] `CallbackEvent` 增加 `event_seq/status_version`，并建立 `unique(run_id, event_seq)`；两者与状态变化及 callback outbox 同事务固化。
+- [✅] `IdempotencyRecord` 保存 request hash、缓存响应、资源 ID 和 TTL；Runtime 写接口按 `SHA256(upper(method) + "\n" + normalized_path + "\n" + body_sha256)` 生成 request hash，normalized path 包含 `run_id` 等资源标识，避免空 body 的资源操作复用同一 key 时误命中。
+- [✅] `AdmissionBucket` 建立 scope 唯一约束、非负 check 和 version，global key 固定为 `*`；初始迁移不从不完整历史状态静默回填生产配额。
+- [✅] 建立状态转换和 `status_version/fencing_token/privacy_version` 条件写所需索引。
+- [✅] 创建 Alembic 初始迁移。
+- [✅] 测试所有模型表名和关键唯一约束存在。
+- [✅] 运行 `pytest tests/test_models_metadata.py -q`。
 
 ### Task 3: AgentPackage 文件化加载器
 
@@ -716,20 +716,20 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: `AgentPackageService.load(agent_id: str, version: str) -> AgentPackage`。
 
-- [ ] 定义 `AgentPackage`、`WorkflowNodeDefinition`、`ToolManifest`、`CallbackConfig`、`UiTraceConfig` schema。
-- [ ] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许 workflow 进入人工等待，选择 fallback 时必须存在确定性的恢复节点。
-- [ ] `ToolManifest` 支持可选 `mcp_server_id/mcp_tool_name/mcp_resource_uri`，HTTP Business Tool 未使用这些字段时保持为空且不影响 digest/兼容性。
-- [ ] 校验 HTTP Tool 的 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明 state 路径或写入 trusted 控制字段的映射拒绝注册。
-- [ ] 加载 `agent.yaml`、JSON Schema、受信任 `workflow.graph.py`、版本化 `prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/` 元数据。
-- [ ] 校验 `agent_id + version` 必须精确匹配，不自动使用最新版。
-- [ ] 构建器按排序文件路径和内容计算 `package_digest`，排除签名文件、构建时间和 digest 自身等生成元数据；同一 `agent_id + version` digest 变化时拒绝注册，不允许 upsert 覆盖。
-- [ ] `AgentPackageService.load()` 固定已注册 digest，校验 `contract_version` 和 `active/deprecated/revoked` 状态。
-- [ ] active/deprecated/revoked 变化记录 `status_changed_at/by/reason` 并写 RuntimeAuditEvent；revoked 额外保存 revoked_at/revocation_reason。
-- [ ] 只加载 CI 构建并由管理员注册的 package；普通业务调用方不能上传或指定 Python 文件。
-- [ ] 创建 `memoir_agent@1.0.0` AgentPackage 文件。
-- [ ] 测试缺文件、prompt 引用/版本不存在、版本不匹配、workflow 空节点、工具清单缺失、非法 `waiting_human_timeout_action`、人工等待未启用 callback、fallback 未声明恢复节点或最小 eval 用例少于 5 条时报结构化错误。
-- [ ] 测试同 digest 重复加载幂等、不同 digest 冲突、deprecated 拒绝新 create、revoked 阻止 create/start/retry/resume。
-- [ ] 测试签名/构建时间等排除元数据变化不改变 digest，任一受管 package 文件变化都会改变 digest。
+- [✅] 定义 `AgentPackage`、`WorkflowNodeDefinition`、`ToolManifest`、`CallbackConfig`、`UiTraceConfig` schema。
+- [✅] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许 workflow 进入人工等待，选择 fallback 时必须存在确定性的恢复节点。
+- [✅] `ToolManifest` 支持可选 `mcp_server_id/mcp_tool_name/mcp_resource_uri`，HTTP Business Tool 未使用这些字段时保持为空且不影响 digest/兼容性。
+- [✅] 校验 HTTP Tool 的 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明 state 路径或写入 trusted 控制字段的映射拒绝注册。
+- [✅] 加载 `agent.yaml`、JSON Schema、受信任 `workflow.graph.py`、版本化 `prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/` 元数据。
+- [✅] 校验 `agent_id + version` 必须精确匹配，不自动使用最新版。
+- [✅] 构建器按排序文件路径和内容计算 `package_digest`，排除签名文件、构建时间和 digest 自身等生成元数据；同一 `agent_id + version` digest 变化时拒绝注册，不允许 upsert 覆盖。
+- [✅] `AgentPackageService.load()` 固定已注册 digest，校验 `contract_version` 和 `active/deprecated/revoked` 状态。
+- [✅] active/deprecated/revoked 变化记录 `status_changed_at/by/reason` 并写 RuntimeAuditEvent；revoked 额外保存 revoked_at/revocation_reason。
+- [✅] 只加载 CI 构建并由管理员注册的 package；普通业务调用方不能上传或指定 Python 文件。
+- [✅] 创建 `memoir_agent@1.0.0` AgentPackage 文件。
+- [✅] 测试缺文件、prompt 引用/版本不存在、版本不匹配、workflow 空节点、工具清单缺失、非法 `waiting_human_timeout_action`、人工等待未启用 callback、fallback 未声明恢复节点或最小 eval 用例少于 5 条时报结构化错误。
+- [✅] 测试同 digest 重复加载幂等、不同 digest 冲突、deprecated 拒绝新 create、revoked 阻止 create/start/retry/resume。
+- [✅] 测试签名/构建时间等排除元数据变化不改变 digest，任一受管 package 文件变化都会改变 digest。
 
 ### Task 4: AgentRun 生命周期 API 与幂等服务
 

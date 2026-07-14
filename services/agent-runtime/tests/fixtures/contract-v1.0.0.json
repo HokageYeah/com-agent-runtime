@@ -1,0 +1,39 @@
+{
+  "contract_version": "1.0.0",
+  "runtime_events": [
+    "run_started",
+    "step_started",
+    "model_call_started",
+    "model_call_finished",
+    "tool_call_started",
+    "tool_call_finished",
+    "step_failed",
+    "fallback_used",
+    "human_review_requested",
+    "partial_succeeded",
+    "run_succeeded",
+    "run_failed",
+    "run_cancelled"
+  ],
+  "error_codes": [
+    "IDEMPOTENCY_CONFLICT",
+    "RUNTIME_OVERLOADED",
+    "MODEL_TIMEOUT",
+    "MODEL_PARSE_FAILED",
+    "TOOL_TIMEOUT",
+    "TOOL_PERMISSION_DENIED",
+    "BUSINESS_DATA_INVALID",
+    "SAFETY_BLOCKED",
+    "COST_LIMIT_EXCEEDED",
+    "CALLBACK_SIGNATURE_INVALID",
+    "CALLBACK_OUT_OF_ORDER",
+    "RECONCILIATION_NEEDED",
+    "INDIRECT_PROMPT_INJECTION",
+    "GENERATION_SUPERSEDED",
+    "DISPATCH_FAILED",
+    "PACKAGE_REVOKED",
+    "PRIVATE_DATA_PURGED",
+    "AUTHORIZATION_REVOKED",
+    "SEMANTIC_VALIDATION_FAILED"
+  ]
+}

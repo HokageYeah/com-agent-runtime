@@ -1,6 +1,6 @@
 # Couple Diary Backend
 
-这是 `couple-diary` 项目的后端服务工程。
+这是 `com-agent-runtime` 项目的后端服务工程。
 
 当前仓库里既包含“项目级”的后端基础设施，也保留了一组新的示例接口用于沉淀工程规范。因此后续做重构或让 LLM 参与开发时，需要特别注意：
 
@@ -130,7 +130,7 @@ poetry run ruff check app tests
 适合长期复用，信息更完整，能明显降低 LLM 把示例模块和正式业务模块混写的概率。
 
 ```text
-你现在在维护 backend/couple-diary-b 这个 FastAPI 后端模板工程。
+你现在在维护 com-agent-runtime-b 这个 FastAPI 后端模板工程。
 
 在开始任何改动前，请先遵守以下工程约束：
 
@@ -298,7 +298,7 @@ curl http://127.0.0.1:8002/readyz
 
 为了避免后续 LLM 或新同事在维护时误判代码性质，项目约定如下：
 
-- `PROJECT_NAME`、`PROJECT_DESCRIPTION`、README 标题、OpenAPI 标题：统一使用整个项目级命名，例如 `Couple Diary Backend`
+- `PROJECT_NAME`、`PROJECT_DESCRIPTION`、README 标题、OpenAPI 标题：统一使用整个项目级命名，例如 `Com Agent Runtime Backend`
 - `demo_api`：保留为“示例规范模块”，并且对外接口统一归属到 `demo`
 - 如果未来新增新的业务域，例如 `diary`、`auth`、`feed`，继续按“项目名通用、模块名准确”的原则扩展
 
@@ -484,9 +484,9 @@ poetry run pre-commit run --all-files
 
 远端 CI 主要解决“代码推上去之后，仓库还能不能稳定通过统一校验”。
 
-- `.github/workflows/backend-couple-diary-b-ci.yml` 是当前后端模板工程的 GitHub Actions 持续集成配置文件
-- `backend/couple-diary-b/.github/workflows/backend-couple-diary-b-ci.yml` 是给“后端工程单独上传到 GitHub 作为模板仓库”时使用的同等 CI 模板
-- 当 `backend/couple-diary-b/` 下的代码，或者这个 workflow 文件本身发生 `push` / `pull_request` 变更时，它会自动触发
+- `.github/workflows/backend-com-agent-runtime-b-ci.yml` 是当前后端模板工程的 GitHub Actions 持续集成配置文件
+- `backend/com-agent-runtime-b/.github/workflows/backend-com-agent-runtime-b-ci.yml` 是给“后端工程单独上传到 GitHub 作为模板仓库”时使用的同等 CI 模板
+- 当 `backend/com-agent-runtime-b/` 下的代码，或者这个 workflow 文件本身发生 `push` / `pull_request` 变更时，它会自动触发
 - 它会在 GitHub 提供的 Linux 环境里执行统一检查，避免不同人本地环境差异导致的误判
 
 它当前主要负责四件事：
@@ -504,9 +504,9 @@ poetry run pre-commit run --all-files
 
 两份 workflow 的分工如下：
 
-- 仓库根目录 `.github/workflows/backend-couple-diary-b-ci.yml`
-  用于当前这个 monorepo，只在 `backend/couple-diary-b/**` 发生变更时触发
-- 子工程目录 `backend/couple-diary-b/.github/workflows/backend-couple-diary-b-ci.yml`
+- 仓库根目录 `.github/workflows/backend-com-agent-runtime-b-ci.yml`
+  用于当前这个 monorepo，只在 `backend/com-agent-runtime-b/**` 发生变更时触发
+- 子工程目录 `backend/com-agent-runtime-b/.github/workflows/backend-com-agent-runtime-b-ci.yml`
   用于你后续把这个后端工程单独上传到 GitHub 后直接复用，不再依赖 monorepo 的路径前缀或工作目录
 
 #### 推荐协作方式
@@ -514,7 +514,7 @@ poetry run pre-commit run --all-files
 推荐把这两层配合起来使用：
 
 1. 本地改代码时，优先跑 `pre-commit`、`ruff`、`pytest`
-2. 提交代码后，让 `backend-couple-diary-b-ci.yml` 再做一次远端自动校验
+2. 提交代码后，让 `backend-com-agent-runtime-b-ci.yml` 再做一次远端自动校验
 3. 如果远端 CI 失败，以 CI 结果为准继续修正
 
 ### 当前测试覆盖
@@ -644,7 +644,7 @@ print(database_config.database)
 如果你要在本机放真实开发库密码，推荐新建：
 
 ```bash
-backend/couple-diary-b/.env.development.local
+backend/com-agent-runtime-b/.env.development.local
 ```
 
 示例：
@@ -1033,7 +1033,7 @@ GET /readyz
 ├── .env.production.local            # 生产环境本地覆盖文件（可选，本地使用，不提交）
 ├── .github/
 │   └── workflows/
-│       └── backend-couple-diary-b-ci.yml  # 后端工程独立发布到 GitHub 时使用的 CI 模板
+│       └── backend-com-agent-runtime-b-ci.yml  # 后端工程独立发布到 GitHub 时使用的 CI 模板
 ├── .gitignore                       # 项目级忽略规则，防止缓存、日志、虚拟环境误提交
 ├── alembic.ini                      # Alembic 主配置文件
 ├── pyproject.toml                   # Poetry 项目配置与工具链配置
