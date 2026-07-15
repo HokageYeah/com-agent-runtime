@@ -22,6 +22,8 @@ dependencies = [
     "click>=8.0.0",
     # 回忆录快照必须使用经过认证的加密算法保存，禁止自行实现加密。
     "cryptography>=43.0.0",
+    # AgentPackage 使用 YAML 描述可信工作流、工具与策略清单。
+    "PyYAML>=6.0.0",
 ]
 
 [tool.poetry]

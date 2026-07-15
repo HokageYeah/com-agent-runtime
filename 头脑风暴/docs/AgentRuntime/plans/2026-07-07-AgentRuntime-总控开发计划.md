@@ -10,6 +10,7 @@
 
 ## Global Constraints
 
+- 当前 com-agent-runtime 根工程是唯一的 Runtime 工程；禁止创建嵌套 `services/agent-runtime`、第二份 `pyproject.toml`、Alembic 或同名 `app` 包。
 - 当前工作区 15 份“回忆录技术探索”是权威基线。
 - Runtime Contract、AgentPackage、Tool、Callback、Artifact 都必须版本化。
 - 作品只能通过 `memory.publish_playback_document` 原子发布；播放器只读 `published_revision`。
@@ -30,7 +31,7 @@
 
 ## 2. 核心原则
 
-- AgentRuntime 是独立 Python 服务，不属于回忆录模块，也不属于情侣日记后端。
+- AgentRuntime 是当前 com-agent-runtime 根工程内的公共运行时模块；它与情侣日记后端复用工程基础设施，但保持独立领域边界。
 - `MemoirAgent` 是第一版验证公共 Runtime 的首个业务 Agent。
 - Runtime 只负责执行过程和通用产物；回忆录业务表、权限、密码、删除、播放器数据归情侣日记后端。
 - Runtime 不直连业务数据库，所有业务数据通过 HTTP Business Tool 读取或写回。
@@ -320,7 +321,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] 确认手动重试计数与 Runtime 自动节点重试计数隔离。
 - [✅] 确认第一版只支持 Workflow Agent。
 - [✅] 确认 `memoir_agent@1.0.0` 是首个 AgentPackage。
-- [✅] 确认 Runtime 服务目录为 `services/agent-runtime/`，权威运行数据库与迁移方案已选定。
+- [✅] 确认 Runtime 服务目录为 ``，权威运行数据库与迁移方案已选定。
 
 **Checkpoint:** Runtime、情侣日记后端、前端都以本契约为准。
 
@@ -328,7 +329,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 1。
 
-- [✅] 新建 `services/agent-runtime/`。
+- [✅] 新建 ``。
 - [✅] 建立 Contract 包、FastAPI app、配置、日志、`/health/live`、`/health/ready` 和鉴权 capabilities。
 - [✅] 建立追加写 AuditService；生产缺少持久、访问受限的 audit sink，或部署声明启用的 outbox event type 缺少 handler 时 readiness 返回 503。
 - [✅] 配置可信业务系统、签名容忍时间、Arq Redis 队列名和 Worker 启动命令。

@@ -2,14 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 新建独立 Python AgentRuntime 服务，提供公共 Agent 注册、运行、工具调用、模型调用、checkpoint、评价、callback 和观测能力，并以 `memoir_agent@1.0.0` 跑通第一版 Workflow Agent 闭环。
+**Goal:** 在当前 com-agent-runtime 根工程内建设公共 AgentRuntime 模块，提供公共 Agent 注册、运行、工具调用、模型调用、checkpoint、评价、callback 和观测能力，并以 `memoir_agent@1.0.0` 跑通第一版 Workflow Agent 闭环。
 
-**Architecture:** 服务目录建议为 `services/agent-runtime/`。FastAPI 处理短请求，权威数据库保存 run、outbox、lease、fencing、checkpoint 和幂等记录，后台 worker 执行 LangGraph workflow。Arq/Redis 只负责调度通知和限流加速；消息丢失或重复不能改变正确性。ToolGateway 通过预注册 HTTP Business Connector 访问情侣日记后端，回忆录作品只通过 `memory.publish_playback_document` 原子发布。
+**Architecture:** Runtime 直接位于当前 com-agent-runtime 根工程的 `app/` 目录。FastAPI 处理短请求，权威数据库保存 run、outbox、lease、fencing、checkpoint 和幂等记录，后台 worker 执行 LangGraph workflow。Arq/Redis 只负责调度通知和限流加速；消息丢失或重复不能改变正确性。ToolGateway 通过预注册 HTTP Business Connector 访问情侣日记后端，回忆录作品只通过 `memory.publish_playback_document` 原子发布。
 
 **Tech Stack:** Python 3.12、FastAPI、Pydantic v2、SQLAlchemy 2、Alembic、PostgreSQL（推荐）或具备同等事务/锁语义的 MySQL、Redis + Arq（可选通知）、LangGraph Python、LangChain Python、LiteLLM、httpx、pytest、ruff、mypy、OpenTelemetry / LangSmith 可选。
 
 ## Global Constraints
 
+- 当前 com-agent-runtime 根工程是唯一的 Runtime 工程；禁止创建嵌套 `services/agent-runtime`、第二份 `pyproject.toml`、Alembic 或同名 `app` 包。
 - 当前工作区 `回忆录技术探索/00-README.md` 至 `15-业务Agent接入规范.md` 是权威基线。
 - 第一版只支持 Workflow Agent；动态规划、MCP 完整接入、Runtime 原生 SSE 放二期。
 - API/Event/Tool/Artifact 使用版本化 Pydantic + JSON Schema Contract，破坏性变更提升 major version。
@@ -73,7 +74,7 @@
 新建目录：
 
 ```text
-services/agent-runtime/
+
   pyproject.toml
   README.md
   .env.example
@@ -626,13 +627,13 @@ unique(client_id, idempotency_key, scope)
 ### Task 0: Runtime Contract 与兼容性基线
 
 **Files:**
-- Create: `services/agent-runtime/app/contracts/api.py`
-- Create: `services/agent-runtime/app/contracts/events.py`
-- Create: `services/agent-runtime/app/contracts/tools.py`
-- Create: `services/agent-runtime/app/contracts/artifacts.py`
-- Create: `services/agent-runtime/app/contracts/errors.py`
-- Create: `services/agent-runtime/app/contracts/schema_export.py`
-- Test: `services/agent-runtime/tests/test_contract_compatibility.py`
+- Create: `app/contracts/api.py`
+- Create: `app/contracts/events.py`
+- Create: `app/contracts/tools.py`
+- Create: `app/contracts/artifacts.py`
+- Create: `app/contracts/errors.py`
+- Create: `app/contracts/schema_export.py`
+- Test: `tests/test_contract_compatibility.py`
 
 **Interfaces:**
 - Produces: `contract_version=1.0.0` 的 API/Event/Tool/Artifact JSON Schema；后续任务只依赖该契约包。
@@ -650,20 +651,20 @@ unique(client_id, idempotency_key, scope)
 ### Task 1: Python 工程骨架、配置、健康检查
 
 **Files:**
-- Create: `services/agent-runtime/pyproject.toml`
-- Create: `services/agent-runtime/README.md`
-- Create: `services/agent-runtime/.env.example`
-- Create: `services/agent-runtime/app/main.py`
-- Create: `services/agent-runtime/app/api/router.py`
-- Create: `services/agent-runtime/app/api/endpoints/health_api.py`
-- Create: `services/agent-runtime/app/api/endpoints/capabilities_api.py`
-- Create: `services/agent-runtime/app/core/config.py`
-- Create: `services/agent-runtime/app/core/logging.py`
-- Create: `services/agent-runtime/app/schemas/audit.py`
-- Create: `services/agent-runtime/app/services/audit_service.py`
-- Create: `services/agent-runtime/tests/test_health_api.py`
-- Create: `services/agent-runtime/tests/test_runtime_capabilities.py`
-- Create: `services/agent-runtime/tests/conftest.py`
+- Create: `pyproject.toml`
+- Create: `README.md`
+- Create: `.env.example`
+- Create: `app/main.py`
+- Create: `app/api/router.py`
+- Create: `app/api/endpoints/health_api.py`
+- Create: `app/api/endpoints/capabilities_api.py`
+- Create: `app/core/config.py`
+- Create: `app/core/logging.py`
+- Create: `app/schemas/audit.py`
+- Create: `app/services/audit_service.py`
+- Create: `tests/test_health_api.py`
+- Create: `tests/test_runtime_capabilities.py`
+- Create: `tests/conftest.py`
 
 **Interfaces:**
 - Produces: FastAPI app、`GET /health/live`、`GET /health/ready`、`GET /api/v1/runtime-capabilities`。
@@ -680,13 +681,13 @@ unique(client_id, idempotency_key, scope)
 ### Task 2: 数据模型与 Alembic 迁移
 
 **Files:**
-- Create: `services/agent-runtime/alembic.ini`
-- Create: `services/agent-runtime/app/db/base.py`
-- Create: `services/agent-runtime/app/db/session.py`
-- Create: `services/agent-runtime/app/models/*.py`
-- Create: `services/agent-runtime/alembic/env.py`
-- Create: `services/agent-runtime/alembic/versions/20260707_0001_initial_agent_runtime_tables.py`
-- Test: `services/agent-runtime/tests/test_models_metadata.py`
+- Create: `alembic.ini`
+- Create: `app/db/base.py`
+- Create: `app/db/session.py`
+- Create: `app/models/*.py`
+- Create: `alembic/env.py`
+- Create: `alembic/versions/20260707_0001_initial_agent_runtime_tables.py`
+- Test: `tests/test_models_metadata.py`
 
 **Interfaces:**
 - Produces: 所有 Runtime 核心表。
@@ -708,10 +709,10 @@ unique(client_id, idempotency_key, scope)
 ### Task 3: AgentPackage 文件化加载器
 
 **Files:**
-- Create: `services/agent-runtime/app/schemas/agent_package.py`
-- Create: `services/agent-runtime/app/services/agent_package_service.py`
-- Create: `services/agent-runtime/app/agents/memoir_agent/*`
-- Test: `services/agent-runtime/tests/test_agent_package_loader.py`
+- Create: `app/schemas/agent_package.py`
+- Create: `app/services/agent_package_service.py`
+- Create: `app/agents/memoir_agent/*`
+- Test: `tests/test_agent_package_loader.py`
 
 **Interfaces:**
 - Produces: `AgentPackageService.load(agent_id: str, version: str) -> AgentPackage`。
@@ -734,22 +735,22 @@ unique(client_id, idempotency_key, scope)
 ### Task 4: AgentRun 生命周期 API 与幂等服务
 
 **Files:**
-- Create: `services/agent-runtime/app/schemas/agent_run.py`
-- Create: `services/agent-runtime/app/api/endpoints/agent_runs_api.py`
-- Create: `services/agent-runtime/app/services/agent_run_service.py`
-- Create: `services/agent-runtime/app/services/privacy_service.py`
-- Create: `services/agent-runtime/app/core/security.py`
-- Create: `services/agent-runtime/app/core/authorization.py`
-- Create: `services/agent-runtime/app/core/connectors.py`
-- Create: `services/agent-runtime/app/core/admission.py`
-- Create: `services/agent-runtime/app/services/authorization_service.py`
-- Create: `services/agent-runtime/app/services/admission_service.py`
-- Create: `services/agent-runtime/app/services/outbox_service.py`
-- Test: `services/agent-runtime/tests/test_agent_run_api.py`
-- Test: `services/agent-runtime/tests/test_run_start_handshake.py`
-- Test: `services/agent-runtime/tests/test_privacy_purge.py`
-- Test: `services/agent-runtime/tests/test_runtime_security.py`
-- Test: `services/agent-runtime/tests/test_admission_controller.py`
+- Create: `app/schemas/agent_run.py`
+- Create: `app/api/endpoints/agent_runs_api.py`
+- Create: `app/services/agent_run_service.py`
+- Create: `app/services/privacy_service.py`
+- Create: `app/core/security.py`
+- Create: `app/core/authorization.py`
+- Create: `app/core/connectors.py`
+- Create: `app/core/admission.py`
+- Create: `app/services/authorization_service.py`
+- Create: `app/services/admission_service.py`
+- Create: `app/services/outbox_service.py`
+- Test: `tests/test_agent_run_api.py`
+- Test: `tests/test_run_start_handshake.py`
+- Test: `tests/test_privacy_purge.py`
+- Test: `tests/test_runtime_security.py`
+- Test: `tests/test_admission_controller.py`
 
 **Interfaces:**
 - Produces: `POST /api/v1/agent-runs`、`POST /start`、`GET /api/v1/agent-runs/{run_id}`、`GET /api/v1/agent-runs/{run_id}/steps`、`POST /retry`、`POST /cancel`、`POST /human-approval`、`POST /purge-private-data`。
@@ -784,17 +785,17 @@ unique(client_id, idempotency_key, scope)
 ### Task 4.5: Runtime 任务队列与 Worker
 
 **Files:**
-- Create: `services/agent-runtime/app/worker.py`
-- Create: `services/agent-runtime/app/dispatcher.py`
-- Create: `services/agent-runtime/app/services/run_queue_service.py`
-- Modify: `services/agent-runtime/app/services/outbox_service.py`
-- Create: `services/agent-runtime/app/services/lease_service.py`
-- Modify: `services/agent-runtime/app/services/agent_run_service.py`
-- Create: `services/agent-runtime/app/runtime/interfaces.py`
-- Create: `services/agent-runtime/app/schemas/execution.py`
-- Test: `services/agent-runtime/tests/test_run_queue_service.py`
-- Test: `services/agent-runtime/tests/test_outbox_delivery.py`
-- Test: `services/agent-runtime/tests/test_worker_lease_fencing.py`
+- Create: `app/worker.py`
+- Create: `app/dispatcher.py`
+- Create: `app/services/run_queue_service.py`
+- Modify: `app/services/outbox_service.py`
+- Create: `app/services/lease_service.py`
+- Modify: `app/services/agent_run_service.py`
+- Create: `app/runtime/interfaces.py`
+- Create: `app/schemas/execution.py`
+- Test: `tests/test_run_queue_service.py`
+- Test: `tests/test_outbox_delivery.py`
+- Test: `tests/test_worker_lease_fencing.py`
 
 **Interfaces:**
 - Produces: `OutboxService.append_run_dispatch(run_id, reason)`、`LeaseService.claim/heartbeat/release`。
@@ -820,9 +821,9 @@ unique(client_id, idempotency_key, scope)
 ### Task 5: 静态 Planner 与 AgentPlan 落库
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/planner.py`
-- Create: `services/agent-runtime/app/schemas/plan.py`
-- Test: `services/agent-runtime/tests/test_planner.py`
+- Create: `app/runtime/planner.py`
+- Create: `app/schemas/plan.py`
+- Test: `tests/test_planner.py`
 
 **Interfaces:**
 - Produces: `StaticPlanner.create_plan(run, package) -> AgentPlanDTO`；DTO 固定包含 `plan_id/run_id/strategy/steps/stop_conditions/fallback_policy/status`。
@@ -836,11 +837,11 @@ unique(client_id, idempotency_key, scope)
 ### Task 6: LangGraph Workflow Executor
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/state.py`
-- Create: `services/agent-runtime/app/runtime/graph_builder.py`
-- Create: `services/agent-runtime/app/runtime/executor.py`
-- Modify: `services/agent-runtime/app/schemas/execution.py`
-- Test: `services/agent-runtime/tests/test_workflow_executor.py`
+- Create: `app/runtime/state.py`
+- Create: `app/runtime/graph_builder.py`
+- Create: `app/runtime/executor.py`
+- Modify: `app/schemas/execution.py`
+- Test: `tests/test_workflow_executor.py`
 
 **Interfaces:**
 - Produces: `WorkflowExecutor.run(run_id: str, lease_context: LeaseContext) -> AgentRunResult` 并实现 Task 4.5 的 RunExecutor 协议，复用既有 LeaseContext/AgentRunResult，不重新定义返回类型。
@@ -859,17 +860,17 @@ unique(client_id, idempotency_key, scope)
 ### Task 7: ToolGateway 与 HTTP Business Tool
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/tool_gateway.py`
-- Create: `services/agent-runtime/app/runtime/tools/http_business_tool.py`
-- Create: `services/agent-runtime/app/runtime/tools/native_tools.py`
-- Create: `services/agent-runtime/app/runtime/tools/langchain_adapter.py`
-- Modify: `services/agent-runtime/app/core/security.py`
-- Modify: `services/agent-runtime/app/core/connectors.py`
-- Modify: `services/agent-runtime/app/services/authorization_service.py`
-- Create: `services/agent-runtime/app/schemas/tool.py`
-- Test: `services/agent-runtime/tests/test_tool_gateway.py`
-- Test: `services/agent-runtime/tests/test_tool_adapters.py`
-- Test: `services/agent-runtime/tests/test_authorization_revocation.py`
+- Create: `app/runtime/tool_gateway.py`
+- Create: `app/runtime/tools/http_business_tool.py`
+- Create: `app/runtime/tools/native_tools.py`
+- Create: `app/runtime/tools/langchain_adapter.py`
+- Modify: `app/core/security.py`
+- Modify: `app/core/connectors.py`
+- Modify: `app/services/authorization_service.py`
+- Create: `app/schemas/tool.py`
+- Test: `tests/test_tool_gateway.py`
+- Test: `tests/test_tool_adapters.py`
+- Test: `tests/test_authorization_revocation.py`
 
 **Interfaces:**
 - Produces: `ToolGateway.call(tool_name, run, step, state) -> ToolResult`。
@@ -898,24 +899,24 @@ unique(client_id, idempotency_key, scope)
 ### Task 8: ModelGateway、PromptRegistry、ContextManager、结构化输出
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/model_gateway.py`
-- Create: `services/agent-runtime/app/runtime/provider_traffic.py`
-- Create: `services/agent-runtime/app/runtime/prompt_registry.py`
-- Create: `services/agent-runtime/app/runtime/context_manager.py`
-- Create: `services/agent-runtime/app/runtime/json_repair.py`
-- Create: `services/agent-runtime/app/runtime/langchain_components.py`
-- Create: `services/agent-runtime/app/runtime/semantic_validation.py`
-- Create: `services/agent-runtime/app/services/model_usage_service.py`
-- Create: `services/agent-runtime/app/core/provider_security.py`
-- Create: `services/agent-runtime/app/core/model_policy.yaml`
-- Create: `services/agent-runtime/app/schemas/model.py`
-- Create: `services/agent-runtime/app/schemas/context.py`
-- Modify: `services/agent-runtime/app/api/endpoints/capabilities_api.py`
-- Test: `services/agent-runtime/tests/test_model_gateway.py`
-- Test: `services/agent-runtime/tests/test_provider_traffic_controller.py`
-- Test: `services/agent-runtime/tests/test_context_manager.py`
-- Test: `services/agent-runtime/tests/test_model_usage_service.py`
-- Test: `services/agent-runtime/tests/test_untrusted_content.py`
+- Create: `app/runtime/model_gateway.py`
+- Create: `app/runtime/provider_traffic.py`
+- Create: `app/runtime/prompt_registry.py`
+- Create: `app/runtime/context_manager.py`
+- Create: `app/runtime/json_repair.py`
+- Create: `app/runtime/langchain_components.py`
+- Create: `app/runtime/semantic_validation.py`
+- Create: `app/services/model_usage_service.py`
+- Create: `app/core/provider_security.py`
+- Create: `app/core/model_policy.yaml`
+- Create: `app/schemas/model.py`
+- Create: `app/schemas/context.py`
+- Modify: `app/api/endpoints/capabilities_api.py`
+- Test: `tests/test_model_gateway.py`
+- Test: `tests/test_provider_traffic_controller.py`
+- Test: `tests/test_context_manager.py`
+- Test: `tests/test_model_usage_service.py`
+- Test: `tests/test_untrusted_content.py`
 
 **Interfaces:**
 - Produces: `ModelGateway.generate_structured(prompt_id, variables, output_schema, policy, call_context: ModelCallContext) -> StructuredResult`；结果固定包含 `validated_value/parse_status/safety_status/usage/route/fallback_used`，原始模型文本不进入跨层 DTO。
@@ -965,14 +966,14 @@ unique(client_id, idempotency_key, scope)
 ### Task 9: Evaluator、Guardrails、PolicyEngine
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/evaluator.py`
-- Create: `services/agent-runtime/app/runtime/guardrails.py`
-- Create: `services/agent-runtime/app/runtime/policy.py`
-- Modify: `services/agent-runtime/app/core/admission.py`
-- Modify: `services/agent-runtime/app/services/admission_service.py`
-- Create: `services/agent-runtime/app/schemas/evaluation.py`
-- Test: `services/agent-runtime/tests/test_policy_engine.py`
-- Test: `services/agent-runtime/tests/test_evaluator_guardrails.py`
+- Create: `app/runtime/evaluator.py`
+- Create: `app/runtime/guardrails.py`
+- Create: `app/runtime/policy.py`
+- Modify: `app/core/admission.py`
+- Modify: `app/services/admission_service.py`
+- Create: `app/schemas/evaluation.py`
+- Test: `tests/test_policy_engine.py`
+- Test: `tests/test_evaluator_guardrails.py`
 
 **Interfaces:**
 - Produces: `Evaluator.evaluate(step, state) -> EvaluationDecision`；DTO 固定包含 `decision/reasons/scores/next_node/safe_summary`，其中 decision 只能为 `pass/retry/fallback/human_review/fail`。
@@ -994,11 +995,11 @@ unique(client_id, idempotency_key, scope)
 ### Task 10: Checkpoint、Resume、Fallback
 
 **Files:**
-- Create: `services/agent-runtime/app/runtime/checkpoint.py`
-- Create: `services/agent-runtime/app/runtime/artifact_store.py`
-- Modify: `services/agent-runtime/app/runtime/executor.py`
-- Test: `services/agent-runtime/tests/test_checkpoint_resume.py`
-- Test: `services/agent-runtime/tests/test_artifact_store.py`
+- Create: `app/runtime/checkpoint.py`
+- Create: `app/runtime/artifact_store.py`
+- Modify: `app/runtime/executor.py`
+- Test: `tests/test_checkpoint_resume.py`
+- Test: `tests/test_artifact_store.py`
 
 **Interfaces:**
 - Produces: `CheckpointStore.save(run_id, step_name, state, lease_context)`、`CheckpointStore.load_latest(run_id, actor, reason_code) -> CheckpointState`、`WorkflowExecutor.resume(run_id, lease_context) -> AgentRunResult`；读写均复用 Task 4.5 的 fencing/privacy/authorization 上下文，读取必须产生审计事件。
@@ -1017,13 +1018,13 @@ unique(client_id, idempotency_key, scope)
 ### Task 11: Callback Dispatcher 与 Public Trace
 
 **Files:**
-- Create: `services/agent-runtime/app/services/callback_service.py`
-- Modify: `services/agent-runtime/app/services/outbox_service.py`
-- Modify: `services/agent-runtime/app/dispatcher.py`
-- Create: `services/agent-runtime/app/services/public_trace_service.py`
-- Create: `services/agent-runtime/app/schemas/callback.py`
-- Create: `services/agent-runtime/app/schemas/public_trace.py`
-- Test: `services/agent-runtime/tests/test_callback_service.py`
+- Create: `app/services/callback_service.py`
+- Modify: `app/services/outbox_service.py`
+- Modify: `app/dispatcher.py`
+- Create: `app/services/public_trace_service.py`
+- Create: `app/schemas/callback.py`
+- Create: `app/schemas/public_trace.py`
+- Test: `tests/test_callback_service.py`
 
 **Interfaces:**
 - Produces: 状态事务内 `CallbackEvent + RuntimeOutboxEvent`，并为 Task 4.5 的 OutboxDeliveryHandler 注册、启用 `callback`，支持 dispatcher lease 投递与原事件重放。
@@ -1051,11 +1052,11 @@ unique(client_id, idempotency_key, scope)
 ### Task 11.5: 补偿与对账任务
 
 **Files:**
-- Create: `services/agent-runtime/app/reconciler.py`
-- Create: `services/agent-runtime/app/services/reconciliation_service.py`
-- Create: `services/agent-runtime/app/runtime/reconciliation.py`
-- Create: `services/agent-runtime/app/schemas/reconciliation.py`
-- Test: `services/agent-runtime/tests/test_reconciliation_service.py`
+- Create: `app/reconciler.py`
+- Create: `app/services/reconciliation_service.py`
+- Create: `app/runtime/reconciliation.py`
+- Create: `app/schemas/reconciliation.py`
+- Test: `tests/test_reconciliation_service.py`
 
 **Interfaces:**
 - Produces: `ReconciliationService.scan_and_repair(now: datetime) -> ReconciliationReport`；DTO 字段固定为 `scan_id/started_at/finished_at/scanned_count/repaired_count/failed_count/alerted_count/actions_by_type/error_codes`。
@@ -1079,9 +1080,9 @@ unique(client_id, idempotency_key, scope)
 ### Task 12: MemoirAgent MVP 包
 
 **Files:**
-- Modify: `services/agent-runtime/app/agents/memoir_agent/*`
-- Create: `services/agent-runtime/app/runtime/memoir_nodes.py`
-- Test: `services/agent-runtime/tests/test_memoir_agent_nodes.py`
+- Modify: `app/agents/memoir_agent/*`
+- Create: `app/runtime/memoir_nodes.py`
+- Test: `tests/test_memoir_agent_nodes.py`
 
 **Interfaces:**
 - Produces: `memoir_agent@1.0.0` 可执行 workflow。
@@ -1103,9 +1104,9 @@ unique(client_id, idempotency_key, scope)
 ### Task 13: 最小评测集与端到端测试
 
 **Files:**
-- Create: `services/agent-runtime/app/agents/memoir_agent/evals/minimal.jsonl`
-- Create: `services/agent-runtime/tests/test_memoir_agent_e2e.py`
-- Create: `services/agent-runtime/tests/fixtures/memoir_snapshots/*.json`
+- Create: `app/agents/memoir_agent/evals/minimal.jsonl`
+- Create: `tests/test_memoir_agent_e2e.py`
+- Create: `tests/fixtures/memoir_snapshots/*.json`
 
 **Interfaces:**
 - Produces: 可重复执行的 MemoirAgent MVP 验收集。
