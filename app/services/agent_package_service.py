@@ -5,12 +5,11 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from app.contracts.api import CONTRACT_VERSION
-from app.models import AgentDefinition
 from app.schemas.agent_package import (
     AgentPackage,
     CallbackConfig,
@@ -19,8 +18,10 @@ from app.schemas.agent_package import (
     UiTraceConfig,
     WorkflowNodeDefinition,
 )
-from app.schemas.audit import RuntimeAuditEvent
-from app.services.audit_service import AuditService
+
+if TYPE_CHECKING:
+    from app.models.runtime import AgentDefinition
+    from app.services.audit_service import AuditService
 
 
 class AgentPackageValidationError(ValueError):
@@ -153,6 +154,8 @@ class AgentPackageService:
             actor_id,
         )
         if self._audit_service is not None:
+            from app.schemas.audit import RuntimeAuditEvent
+
             self._audit_service.append(
                 RuntimeAuditEvent(
                     audit_id=str(uuid4()),

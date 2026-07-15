@@ -18,6 +18,8 @@ def client() -> Generator[object]:
     后续如果某个测试还需要额外 patch，比如 `database.check_ready()`，
     可以在测试函数里继续叠加，不会和这个 fixture 冲突。
     """
+    from unittest.mock import Mock
+
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -26,6 +28,7 @@ def client() -> Generator[object]:
         patch("app.main.setup_logging"),
         patch("app.main.database.connect"),
         patch("app.main.database.close"),
+        patch("app.main.database.get_session_factory", return_value=Mock()),
     ):
         with TestClient(app) as test_client:
             yield test_client

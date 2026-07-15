@@ -21,7 +21,7 @@ from app.services.admission_service import AdmissionLimits, AdmissionRejected
 from app.services.agent_run_service import AgentRunService, AgentRunServiceError
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
 
-router = APIRouter(prefix="/api/v1/agent-runs", tags=["agent-runs"])
+router = APIRouter(prefix="/agent-runs", tags=["agent-runs"])
 
 
 def _admission_limits(request: Request) -> AdmissionLimits:

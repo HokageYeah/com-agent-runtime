@@ -9,9 +9,9 @@ from time import sleep
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
-from app.core.logging import configure_logging
-from app.db.session import create_runtime_engine, create_session_factory
+from app.core.config import settings
+from app.core.logging_uru import setup_logging
+from app.db.sqlalchemy_db import database
 from app.dispatcher import Dispatcher
 from app.runtime.interfaces import AgentRunResult, LeaseContext, RunExecutor
 from app.services.lease_service import LeaseService
@@ -61,7 +61,9 @@ class WorkerLoop:
                 consumed += int(queue.consume(run_id))
             finally:
                 session.close()
-        logging.info("Worker 本轮完成 worker_id=%s claimed=%s", self._worker_id, consumed)
+        logging.info(
+            "Worker 本轮完成 worker_id=%s claimed=%s", self._worker_id, consumed
+        )
         return consumed
 
 
@@ -85,14 +87,15 @@ class BootstrapExecutor:
 def main() -> None:
     """命令行启动入口；生产由 Task 6 注入 WorkflowExecutor。"""
     parser = argparse.ArgumentParser(description="Start the AgentRuntime worker")
-    parser.add_argument("--once", action="store_true", help="只处理一轮持久 outbox 后退出")
+    parser.add_argument(
+        "--once", action="store_true", help="只处理一轮持久 outbox 后退出"
+    )
     parser.add_argument("--worker-id", default="agent-runtime-worker")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args()
-    configure_logging()
-    settings = get_settings()
-    engine = create_runtime_engine(settings.database_url)
-    session_factory = create_session_factory(engine)
+    setup_logging()
+    database.connect()
+    session_factory = database.get_session_factory()
     loop = WorkerLoop(
         session_factory,
         BootstrapExecutor(),
@@ -101,7 +104,7 @@ def main() -> None:
     logging.info(
         "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s",
         settings.runtime_id,
-        settings.run_queue_name,
+        "root-database-outbox",
         args.once,
     )
     if args.once:

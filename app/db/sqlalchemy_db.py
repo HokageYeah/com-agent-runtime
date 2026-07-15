@@ -97,6 +97,12 @@ class Database:
         finally:
             session.close()
 
+    def get_session_factory(self) -> sessionmaker[Session]:
+        """返回根工程唯一的 Session 工厂，供 Runtime Worker 创建独立事务。"""
+        if self._session_factory is None:
+            raise RuntimeError("sqlalchemy 数据库未初始化，无法启动 Runtime Worker")
+        return self._session_factory
+
     def close(self) -> None:
         if self._engine is not None:
             self._engine.dispose()

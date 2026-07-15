@@ -1,6 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.endpoints import demo_api, diary_api
+from app.api.endpoints import (
+    agent_runs_api,
+    capabilities_api,
+    demo_api,
+    diary_api,
+    health_api,
+)
 
 api_router = APIRouter()
 
@@ -13,3 +19,10 @@ api_router = APIRouter()
 # 保持路由入口统一，方便团队协作和 LLM 快速建立上下文。
 api_router.include_router(demo_api.router, prefix="/demo", tags=["工程示例接口"])
 api_router.include_router(diary_api.router, prefix="/diary", tags=["日记业务模块"])
+api_router.include_router(health_api.router, prefix="/runtime", tags=["AgentRuntime"])
+api_router.include_router(
+    capabilities_api.router, prefix="/runtime", tags=["AgentRuntime"]
+)
+api_router.include_router(
+    agent_runs_api.router, prefix="/runtime", tags=["AgentRuntime"]
+)

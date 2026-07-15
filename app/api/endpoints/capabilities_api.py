@@ -9,7 +9,7 @@ from app.contracts.api import CONTRACT_VERSION
 router = APIRouter(tags=["runtime"])
 
 
-@router.get("/api/v1/runtime-capabilities")
+@router.get("/capabilities")
 async def runtime_capabilities(request: Request) -> dict[str, object]:
     client_id = request.headers.get("X-Agent-Client-Id")
     # 这里只做骨架阶段的服务身份识别；Task 5 会补齐时间戳、HMAC 与可见性校验。

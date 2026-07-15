@@ -13,10 +13,25 @@ from sqlalchemy import (
     LargeBinary,
     String,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base, TimestampMixin
+from app.db.sqlalchemy_db import Base
+
+
+class TimestampMixin:
+    """根工程 Runtime 表共用时间戳，便于审计状态变更。"""
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 class AgentDefinition(Base, TimestampMixin):

@@ -228,6 +228,18 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 3600
     DB_POOL_TIMEOUT: int = 30
 
+    # Runtime 调用方与连接器配置。仅服务端读取，绝不写入普通接口响应或日志。
+    RUNTIME_ID: str = "agent-runtime"
+    RUNTIME_TRUSTED_CLIENTS_JSON: str = (
+        '{"couple-diary":{"tenant_id":"couple-diary",'
+        '"keys":{"dev":"development-secret"}}}'
+    )
+    RUNTIME_BUSINESS_CONNECTORS_JSON: str = '{"couple_diary_backend":{"enabled":true}}'
+    RUNTIME_SIGNATURE_TOLERANCE_SECONDS: int = 300
+    RUNTIME_ADMISSION_MAX_HELD: int = 100
+    RUNTIME_ADMISSION_MAX_QUEUED: int = 500
+    RUNTIME_ADMISSION_MAX_RUNNING: int = 50
+
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,
         env_file_encoding="utf-8",
@@ -305,6 +317,35 @@ class Settings(BaseSettings):
             pool_recycle=self.DB_POOL_RECYCLE,
             pool_timeout=self.DB_POOL_TIMEOUT,
         )
+
+    @property
+    def runtime_id(self) -> str:
+        """返回 Runtime 实例标识，仅用于安全日志和健康检查。"""
+        return self.RUNTIME_ID
+
+    @property
+    def trusted_clients(self) -> dict[str, dict[str, object]]:
+        return json.loads(self.RUNTIME_TRUSTED_CLIENTS_JSON)
+
+    @property
+    def business_connectors(self) -> dict[str, dict[str, object]]:
+        return json.loads(self.RUNTIME_BUSINESS_CONNECTORS_JSON)
+
+    @property
+    def signature_tolerance_seconds(self) -> int:
+        return self.RUNTIME_SIGNATURE_TOLERANCE_SECONDS
+
+    @property
+    def admission_max_held(self) -> int:
+        return self.RUNTIME_ADMISSION_MAX_HELD
+
+    @property
+    def admission_max_queued(self) -> int:
+        return self.RUNTIME_ADMISSION_MAX_QUEUED
+
+    @property
+    def admission_max_running(self) -> int:
+        return self.RUNTIME_ADMISSION_MAX_RUNNING
 
 
 settings = Settings()

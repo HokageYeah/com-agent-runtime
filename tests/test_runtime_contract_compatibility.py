@@ -21,7 +21,7 @@ def test_contract_schemas_are_stable_and_versioned() -> None:
 
 
 def test_contract_fixture_freezes_version_and_error_taxonomy() -> None:
-    fixture_path = Path(__file__).parent / "fixtures" / "contract-v1.0.0.json"
+    fixture_path = Path(__file__).parent / "fixtures" / "runtime-contract-v1.0.0.json"
     fixture = json.loads(fixture_path.read_text())
 
     assert fixture["contract_version"] == CONTRACT_VERSION

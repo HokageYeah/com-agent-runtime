@@ -33,6 +33,9 @@ async def lifespan(_: FastAPI):
     logging.info("应用生命周期启动，准备初始化日志与数据库连接")
     setup_logging()
     database.connect()
+    # Runtime API 与 Worker 共享根工程唯一 Session 工厂；每次请求/任务仍各自创建事务。
+    app.state.session_factory = database.get_session_factory()
+    logging.info("已向 Runtime 注入根数据库 Session 工厂")
     try:
         yield
     finally:
@@ -48,6 +51,7 @@ app = FastAPI(
     openapi_url=f"{application_config.api_prefix}/openapi.json",
     lifespan=lifespan,
 )
+app.state.settings = settings
 
 app.add_middleware(
     CORSMiddleware,
