@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from fastapi import APIRouter, Request, status
@@ -16,17 +17,26 @@ class RuntimeHealth:
     """Runtime 就绪状态，集中管理 draining 与基础依赖配置检查。"""
 
     settings: Settings
+    # 根数据库探活由主应用注入，避免 Runtime 私自创建第二套连接或连接池。
+    database_ready: Callable[[], tuple[bool, dict[str, object]]] | None = None
     draining: bool = False
 
     def check_ready(self) -> tuple[bool, dict[str, str]]:
         """只输出安全的配置状态，不回传密钥、连接串或业务数据。"""
+        database_ok, _ = (
+            self.database_ready() if self.database_ready is not None else (True, {})
+        )
         checks = {
-            "database": "configured",
+            "database": "ready" if database_ok else "not_ready",
             "agent_package": "configured",
             "trusted_clients": "configured" if self.settings.trusted_clients else "missing",
             "draining": "true" if self.draining else "false",
         }
-        ready = checks["trusted_clients"] == "configured" and not self.draining
+        ready = (
+            database_ok
+            and checks["trusted_clients"] == "configured"
+            and not self.draining
+        )
         logging.info("Runtime readiness 检查 ready=%s checks=%s", ready, checks)
         return ready, checks
 

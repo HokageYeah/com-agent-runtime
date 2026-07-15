@@ -29,6 +29,9 @@ def client() -> Generator[object]:
         patch("app.main.database.connect"),
         patch("app.main.database.close"),
         patch("app.main.database.get_session_factory", return_value=Mock()),
+        patch("app.main.database.check_ready", return_value=(True, {"database": "ready"})),
     ):
         with TestClient(app) as test_client:
+            # 测试 fixture 不连接真实数据库；同步更新已初始化 RuntimeHealth 的探活函数。
+            app.state.runtime_health.database_ready = lambda: (True, {"database": "ready"})
             yield test_client

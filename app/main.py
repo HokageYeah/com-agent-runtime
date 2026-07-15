@@ -53,7 +53,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.settings = settings
-app.state.runtime_health = RuntimeHealth(settings)
+app.state.runtime_health = RuntimeHealth(settings, database_ready=database.check_ready)
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from app.api.endpoints.health_api import RuntimeHealth
+from app.core.config import settings
+
 
 def test_runtime_capabilities_rejects_unknown_caller(client) -> None:
     """Runtime 能力发现不得向未登记的调用方泄露 Agent 或模型策略。"""
@@ -15,3 +18,13 @@ def test_runtime_ready_health_reports_configured_dependencies(client) -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
+
+
+def test_runtime_health_rejects_unready_root_database() -> None:
+    """Runtime 不能把根数据库不可用误报为可执行。"""
+    health = RuntimeHealth(settings, database_ready=lambda: (False, {}))
+
+    ready, checks = health.check_ready()
+
+    assert ready is False
+    assert checks["database"] == "not_ready"
