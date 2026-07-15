@@ -54,6 +54,22 @@ Runtime 路由挂入根应用版本前缀，采用 `/api/v1/runtime/...`，避�
 
 Worker 使用根工程模块入口，例如 `python -m app.worker`。它与 API 进程共享根配置、数据库与日志，但不在 HTTP 请求线程执行 Workflow。
 
+## 开发计划防回归
+
+必须直接修订以下两份既有计划，而不是只新增说明文档：
+
+- `头脑风暴/docs/AgentRuntime/plans/2026-07-07-AgentRuntime-总控开发计划.md`
+- `头脑风暴/docs/AgentRuntime/backend/2026-07-07-AgentRuntime-后端开发计划.md`
+
+两份计划需要统一以下内容：
+
+- 目标描述改为“在当前 `com-agent-runtime` 根工程内建设公共 AgentRuntime 模块”。
+- 所有 `services/agent-runtime/...` 文件路径改为对应的根工程路径。
+- 删除“新建独立 Python 工程”“独立 Runtime 服务目录”“独立 pyproject、Alembic、测试目录”等任务描述。
+- 明确复用根 `app/main.py`、`app/api/api.py`、`app/db/sqlalchemy_db.py`、`app/db/metadata.py`、根 `alembic/`、根 `tests/` 和根 `pyproject.toml`。
+- 任务完成标记需反映迁移后的实际状态，不能把“已新建 `services/agent-runtime/`”保留为完成项。
+- 增加“禁止重新创建嵌套 Runtime 工程或第二份同名 `app` 包”的全局约束与验收项。
+
 ## 兼容与删除
 
 本次不保留 `services/agent-runtime/` 的可运行兼容层，避免未来再次从错误目录启动服务。删除前会将所有受版本控制的实现、AgentPackage 和测试迁入根工程，并通过根工程命令验证。
