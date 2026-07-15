@@ -49,7 +49,7 @@ class CreateAgentRunRequest(ContractModel):
     input: dict[str, Any]
     callback_target_id: str = Field(min_length=1, max_length=120)
     business_connector_id: str = Field(min_length=1, max_length=120)
-    contract_version: Literal[CONTRACT_VERSION] = CONTRACT_VERSION
+    contract_version: Literal["1.0.0"] = "1.0.0"
 
 
 class AgentRunResponse(ContractModel):
@@ -58,7 +58,7 @@ class AgentRunResponse(ContractModel):
     run_id: str
     status: AgentRunStatus
     dispatch_state: DispatchState
-    contract_version: Literal[CONTRACT_VERSION] = CONTRACT_VERSION
+    contract_version: Literal["1.0.0"] = "1.0.0"
     package_digest: str
     authorization_version: int = Field(ge=1)
 

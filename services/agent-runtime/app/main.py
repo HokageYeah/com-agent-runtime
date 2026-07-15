@@ -5,9 +5,12 @@ from dataclasses import dataclass
 
 from fastapi import FastAPI
 
+import app.models as runtime_models  # noqa: F401
 from app.api.router import router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
+from app.db.base import Base
+from app.db.session import create_runtime_engine, create_session_factory
 
 
 @dataclass
@@ -16,6 +19,11 @@ class RuntimeHealth:
 
     settings: Settings
     draining: bool = False
+
+    def begin_draining(self) -> None:
+        """停止新 claim；已有 Worker 仍可 heartbeat，保证优雅收敛。"""
+        self.draining = True
+        logging.warning("Runtime 进入 draining，停止新的 Worker claim")
 
     def check_ready(self) -> tuple[bool, dict[str, str]]:
         # 此阶段先校验“依赖是否已配置”；Task 2 接入数据库后会替换为 schema 探活。
@@ -56,6 +64,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
     app = FastAPI(title="AgentRuntime", version="1.0.0")
     app.state.settings = runtime_settings
+    # 开发/测试可直接建表；生产部署仍应以 Alembic upgrade 为唯一 schema 入口。
+    engine = create_runtime_engine(runtime_settings.database_url)
+    if runtime_settings.environment != "production":
+        Base.metadata.create_all(engine)
+    app.state.session_factory = create_session_factory(engine)
     app.state.runtime_health = RuntimeHealth(runtime_settings)
     logging.info("创建 AgentRuntime 应用 runtime_id=%s", runtime_settings.runtime_id)
     app.include_router(router)

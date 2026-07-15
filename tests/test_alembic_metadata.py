@@ -12,3 +12,17 @@ def test_project_metadata_contains_diary_entries_table() -> None:
     diary_entries_table = metadata.tables["diary_entries"]
     assert "mood" in diary_entries_table.columns
     assert "entry_date" in diary_entries_table.columns
+
+
+def test_project_metadata_contains_memory_runtime_foundation_tables() -> None:
+    """回忆录归档相关表必须纳入 Alembic metadata，不能只存在于服务代码。"""
+    metadata = get_target_metadata()
+    assert {
+        "memory_archives",
+        "memory_snapshots",
+        "memory_playback_documents",
+        "memory_scenes",
+        "memory_actions",
+        "memory_media_assets",
+        "memory_agent_run_refs",
+    }.issubset(metadata.tables)

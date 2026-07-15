@@ -13,6 +13,7 @@ from app.models.runtime import (
     AgentToolCall,
     CallbackEvent,
     IdempotencyRecord,
+    RuntimeAuditRecord,
     RuntimeOutboxEvent,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "AgentToolCall",
     "CallbackEvent",
     "IdempotencyRecord",
+    "RuntimeAuditRecord",
     "RuntimeOutboxEvent",
 ]

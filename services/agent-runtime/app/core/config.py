@@ -23,7 +23,9 @@ class Settings(BaseSettings):
     runtime_id: str = "agent-runtime"
     agent_package_root: str = "./app/agents"
     callback_allowed_hosts: list[str] = Field(default_factory=list)
-    trusted_clients_json: str = '{"couple-diary":{"tenant_id":"couple-diary"}}'
+    # development key 仅供本地联调；生产必须通过密钥管理系统注入并轮换。
+    trusted_clients_json: str = '{"couple-diary":{"tenant_id":"couple-diary","keys":{"dev":"development-secret"}}}'
+    business_connectors_json: str = '{"connector":{"enabled":true},"couple_diary_backend":{"enabled":true}}'
     signature_tolerance_seconds: int = Field(default=300, gt=0)
     run_queue_name: str = "agent-runtime-runs"
     model_traffic_namespace: str = "agent-runtime:model-traffic"
@@ -46,6 +48,9 @@ class Settings(BaseSettings):
     idempotency_ttl_days: int = Field(default=7, gt=0)
     reconciliation_interval_seconds: int = Field(default=300, gt=0)
     reconciliation_failure_threshold: int = Field(default=3, gt=0)
+    admission_max_held: int = Field(default=100, gt=0)
+    admission_max_queued: int = Field(default=500, gt=0)
+    admission_max_running: int = Field(default=50, gt=0)
     audit_sink_dsn: str | None = None
     audit_retention_days: int = Field(default=180, gt=0)
     audit_allowed_roles: list[str] = Field(default_factory=lambda: ["runtime_auditor"])
@@ -69,6 +74,13 @@ class Settings(BaseSettings):
         parsed = json.loads(self.trusted_clients_json)
         if not isinstance(parsed, dict):
             raise ValueError("TRUSTED_CLIENTS_JSON must be a JSON object")
+        return parsed
+
+    @property
+    def business_connectors(self) -> dict[str, dict[str, object]]:
+        parsed = json.loads(self.business_connectors_json)
+        if not isinstance(parsed, dict):
+            raise ValueError("BUSINESS_CONNECTORS_JSON must be a JSON object")
         return parsed
 
 

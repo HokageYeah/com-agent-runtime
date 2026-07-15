@@ -755,30 +755,30 @@ unique(client_id, idempotency_key, scope)
 - Produces: `POST /api/v1/agent-runs`、`POST /start`、`GET /api/v1/agent-runs/{run_id}`、`GET /api/v1/agent-runs/{run_id}/steps`、`POST /retry`、`POST /cancel`、`POST /human-approval`、`POST /purge-private-data`。
 - Produces: `AuthorizationService.authorize_run_action(...)`、`AdmissionService.reserve_transition(run_or_identity, from_state, to_state, limits)`、`OutboxService.append_run_dispatch(...)` 和 `OutboxService.append_callback(...)`，后续任务复用而不重复实现。
 
-- [ ] 定义创建、start、查询、重试、取消、human approval、purge 的 Pydantic schema，并复用 Contract Layer。
-- [ ] 所有写接口校验 `X-Agent-Client-Id`、`X-Agent-Key-Id`、`X-Agent-Timestamp`、`X-Agent-Signature`、`Idempotency-Key`。
-- [ ] AgentRun 与 steps 查询接口校验四个服务签名头和调用方可见性，合法读请求不要求 `Idempotency-Key`；普通调用方只能访问自己创建的 run，内部审计身份除外。
-- [ ] 创建 run 时加载 AgentPackage 并校验 input schema。
-- [ ] 校验 `business_type` 属于 AgentPackage 允许范围。
-- [ ] 从凭据推导 caller/tenant，校验 Agent、business_type、callback target、business connector、数据域和 Admission 配额。
-- [ ] create held/auto、start、retry、human approval/fallback 恢复在同一数据库事务中执行配额预留、状态条件更新和 run_dispatch outbox；429 保持原状态且不完成 IdempotencyRecord，cancel/purge 不受 Admission 阻塞。
+- [✅] 定义创建、start、查询、重试、取消、human approval、purge 的 Pydantic schema，并复用 Contract Layer。
+- [✅] 所有写接口校验 `X-Agent-Client-Id`、`X-Agent-Key-Id`、`X-Agent-Timestamp`、`X-Agent-Signature`、`Idempotency-Key`。
+- [✅] AgentRun 与 steps 查询接口校验四个服务签名头和调用方可见性，合法读请求不要求 `Idempotency-Key`；普通调用方只能访问自己创建的 run，内部审计身份除外。
+- [✅] 创建 run 时加载 AgentPackage 并校验 input schema。
+- [✅] 校验 `business_type` 属于 AgentPackage 允许范围。
+- [✅] 从凭据推导 caller/tenant，校验 Agent、business_type、callback target、business connector、数据域和 Admission 配额。
+- [✅] create held/auto、start、retry、human approval/fallback 恢复在同一数据库事务中执行配额预留、状态条件更新和 run_dispatch outbox；429 保持原状态且不完成 IdempotencyRecord，cancel/purge 不受 Admission 阻塞。
 - [ ] `AdmissionService` 以 `dispatch_state` 映射占用：held/queued/claimed 分别对应 held/queued/running，finished 不占用；从认证身份生成规范 scope key，以方言安全的幂等 upsert 确保 bucket 存在，再按固定 scope 顺序锁定，先校验目标上限后原子增减。幂等命中、条件写失败和事务回滚都不得留下计数变化。
-- [ ] 固定容量迁移矩阵：create `none -> held|queued`、start `held -> queued`、retry/approval/fallback `none -> queued`、直接 cancel/终止 `held|queued -> none`；claimed run 的释放由 Worker 安全终止事务执行，API 的 cancel/purge 请求本身不等待也不受 Admission 拒绝。
-- [ ] 创建 held run，设置 `held_expires_at`、package digest、contract、authorization version 和 capability snapshot；相同 key 与 request hash 的重复创建重放首次创建响应，当前 run 状态由 AgentRun 查询接口返回。
+- [✅] 固定容量迁移矩阵：create `none -> held|queued`、start `held -> queued`、retry/approval/fallback `none -> queued`、直接 cancel/终止 `held|queued -> none`；claimed run 的释放由 Worker 安全终止事务执行，API 的 cancel/purge 请求本身不等待也不受 Admission 拒绝。
+- [✅] 创建 held run，设置 `held_expires_at`、package digest、contract、authorization version 和 capability snapshot；相同 key 与 request hash 的重复创建重放首次创建响应，当前 run 状态由 AgentRun 查询接口返回。
 - [ ] `/start` 条件更新 held -> queued，并在同一事务完成 Admission `held -> queued`、写 `queued_at`、run_dispatch outbox 和幂等响应；相同 key/hash 重放首次响应，使用新 key 请求已 queued/claimed 的 run 时返回当前安全摘要且不重复迁移配额或写 outbox。held 超时、已取消/结束、package revoked、privacy 非 active 或授权失效时拒绝。
-- [ ] 相同 `Idempotency-Key` 的 method、normalized path 或 body hash 任一项不一致时返回 HTTP `409 Conflict`，错误码 `IDEMPOTENCY_CONFLICT`；不同 `run_id` 不能因空 body 相同而复用旧结果。
-- [ ] auto create 才在创建事务写 run_dispatch outbox；任何 HTTP 请求都不执行 workflow。
-- [ ] 查询接口返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version/privacy_purge_requested_at/private_data_purged_at/updated_at`、progress、current_step、public_trace 和安全错误摘要，不返回 lease/fencing、私密 payload 或内部错误堆栈。
-- [ ] 取消与 retry/approval 互斥：`pending + held/queued` 或 `waiting_human + finished` 在 API 事务内直接写 `cancel_requested_at/status=cancelled/dispatch_state=finished`、递增 `status_version` 并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，迟到 dispatch 认领失败。
-- [ ] 重试接口只允许原 caller 或内部审计身份调用，且只允许 `failed/partial`、存在 checkpoint、`manual_retry_count < 3` 的 run 重新入队。
-- [ ] `partial` retry 只执行 Runtime 未完成的可选步骤，复用已发布 revision，不重新执行主作品发布；业务媒体 worker 失败不触发 AgentRun retry。
+- [✅] 相同 `Idempotency-Key` 的 method、normalized path 或 body hash 任一项不一致时返回 HTTP `409 Conflict`，错误码 `IDEMPOTENCY_CONFLICT`；不同 `run_id` 不能因空 body 相同而复用旧结果。
+- [✅] auto create 才在创建事务写 run_dispatch outbox；任何 HTTP 请求都不执行 workflow。
+- [✅] 查询接口返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version/privacy_purge_requested_at/private_data_purged_at/updated_at`、progress、current_step、public_trace 和安全错误摘要，不返回 lease/fencing、私密 payload 或内部错误堆栈。
+- [✅] 取消与 retry/approval 互斥：`pending + held/queued` 或 `waiting_human + finished` 在 API 事务内直接写 `cancel_requested_at/status=cancelled/dispatch_state=finished`、递增 `status_version` 并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，迟到 dispatch 认领失败。
+- [✅] 重试接口只允许原 caller 或内部审计身份调用，且只允许 `failed/partial`、存在 checkpoint、`manual_retry_count < 3` 的 run 重新入队。
+- [ ] `partial` retry 只执行 Runtime 未完成的可选步骤，复用已发布 revision，不重新执行主作品发布；业务媒体 worker 失败不触发 AgentRun retry。（依赖 Task 6/10 写入步骤状态、可选节点与 checkpoint 语义。）
 - [ ] retry 创建新 execution attempt，复用逻辑副作用键；package revoked 或 privacy 非 active 时拒绝。
-- [ ] human approval 只接受 `status=waiting_human AND dispatch_state=finished` 的 run，携带 `decision=approve|reject`、当前 `expected_status_version` 和独立幂等键；approve 只条件更新 `dispatch_state: finished -> queued`、递增 `status_version` 并同事务写 dispatch outbox，run 状态保持 `waiting_human`，由重新取得 lease 的 worker 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或明确终结为 `failed/cancelled`。
+- [✅] human approval 只接受 `status=waiting_human AND dispatch_state=finished` 的 run，携带 `decision=approve|reject`、当前 `expected_status_version` 和独立幂等键；approve 只条件更新 `dispatch_state: finished -> queued`、递增 `status_version` 并同事务写 dispatch outbox，run 状态保持 `waiting_human`，由重新取得 lease 的 worker 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或明确终结为 `failed/cancelled`。
 - [ ] purge API 在同一事务写 tombstone/version 并请求取消，提交后立即返回 `202 + privacy_state=purge_requested + privacy_version`，不等待物理清理；清理 worker 完成后才由 AgentRun 查询返回 `privacy_state=purged`。相同 key 与 request hash 的重复 POST 重放首次接受响应，不改写 `IdempotencyRecord.response_json`，也不创建第二个清理任务；当前状态只通过 AgentRun 查询。清理失败保持写屏障，由 reconciler 重试并告警，purge 后禁止 retry/resume。
-- [ ] IdempotencyService 以 `client_id + scope + key` 锁定记录：未过期时复用/冲突，过期时原子换代；purge 记录在清理完成前不得过期或复用。
-- [ ] 事务接受前的 429、连接失败和可重试 5xx 不完成 IdempotencyRecord。
-- [ ] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，与手动 run 级重试计数隔离。
-- [ ] approval/cancel/retry/purge 接受事务成功后写 RuntimeAuditEvent，actor 从服务凭据推导，metadata 只含版本、scope、结果和标准错误码。
+- [✅] IdempotencyService 以 `client_id + scope + key` 锁定记录：未过期时复用/冲突，过期时原子换代；purge 记录在清理完成前不得过期或复用。
+- [✅] 事务接受前的 429、连接失败和可重试 5xx 不完成 IdempotencyRecord。
+- [✅] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，与手动 run 级重试计数隔离。
+- [✅] approval/cancel/retry/purge 接受事务成功后写 RuntimeAuditEvent，actor 从服务凭据推导，metadata 只含版本、scope、结果和标准错误码。
 - [ ] 测试 held/start 握手、重复 create 在 run 状态变化后仍重放首次创建响应且 GET 返回当前状态、同 key start 重放首次响应、新 key start 命中 queued/claimed 时不重复迁移 Admission 或写 outbox、同 key 指向不同 run 返回幂等冲突、held 超时、Admission 429、合法签名的 GET/steps 不带幂等键可查询、读接口签名缺失或越权被拒绝、写接口缺少幂等键被拒绝、查询字段可完成 callback 与 purge 对账、签名/key 轮换、target/connector 越权、幂等冲突/过期换代、stale approval status version、retry/cancel 竞态、purge 接受时返回 202/requested、查询确认 purged、清理完成后重复 POST 仍重放首次接受响应且不重复清理、清理失败不撤销写屏障及 purge 禁止恢复。
 
 ### Task 4.5: Runtime 任务队列与 Worker
@@ -802,17 +802,18 @@ unique(client_id, idempotency_key, scope)
 - Produces: `OutboxDeliveryHandler.deliver(event) -> DeliveryResult` 与按 `event_type` 的显式处理器注册表；本任务只注册并启用 `run_dispatch`。
 - Produces: `RunExecutor.run(run_id: str, lease_context: LeaseContext) -> AgentRunResult` 协议；`LeaseContext` 固定包含 `execution_attempt/lease_owner/fencing_token/lease_expires_at/privacy_version/authorization_version`，`AgentRunResult` 固定包含 `run_id/status/execution_attempt/output_summary/artifact_refs/error_code/checkpoint_id` 且不含私密 state。Task 4.5 使用 fake executor 验证调度，Task 6 提供正式实现。
 
-- [ ] auto create、start、retry、人工确认或 fallback 恢复在状态事务内写 `RuntimeOutboxEvent(event_type=run_dispatch)`。
-- [ ] dispatcher 使用独立 lease 认领 outbox，可投递 Arq；投递重复或 Redis 丢失不改变数据库中的 run 真相。
-- [ ] dispatcher 的认领查询只选择已启用且已注册 handler 的 `event_type`；未启用/缺 handler 的事件保持 pending、不增加 attempt、不进入 dead letter。readiness 校验部署声明启用的类型都有 handler，run_dispatch/callback 分类型轮询、指标和告警，避免头阻塞。
+- [✅] auto create、start、retry、人工确认或 fallback 恢复在状态事务内写 `RuntimeOutboxEvent(event_type=run_dispatch)`。
+- [✅] dispatcher 使用独立 lease 认领 outbox，可投递 Arq；投递重复或 Redis 丢失不改变数据库中的 run 真相。
+- [✅] dispatcher 的认领查询只选择已启用且已注册 handler 的 `event_type`；未启用/缺 handler 的事件保持 pending、不增加 attempt、不进入 dead letter。readiness 校验部署声明启用的类型都有 handler，run_dispatch/callback 分类型轮询、指标和告警，避免头阻塞。
 - [ ] Worker 启动时加载配置、数据库、Redis、AgentPackage 根目录。
-- [ ] Worker 收到 `run_id` 后使用数据库条件写认领 `dispatch_state=queued` 且 status 为 `pending` 或经审批/fallback 恢复的 `waiting_human` run，实现 queued -> claimed，递增 execution attempt 与 fencing token，并写 lease owner/expiry；cancelled run 和带取消请求的 run 不能被认领。
+- [✅] Worker 收到 `run_id` 后使用数据库条件写认领 `dispatch_state=queued` 且 status 为 `pending` 或经审批/fallback 恢复的 `waiting_human` run，实现 queued -> claimed，递增 execution attempt 与 fencing token，并写 lease owner/expiry；cancelled run 和带取消请求的 run 不能被认领。
 - [ ] Worker claim 在同一事务调用 AdmissionService 执行 `queued -> running`；进入 `waiting_human` 或任一终态时执行 `running -> none`，计数迁移与 AgentRun/status_version/callback outbox 同事务。
-- [ ] Worker 只依赖注入的 RunExecutor 协议，不导入 MemoirAgent 或尚未实现的 WorkflowExecutor；调度测试使用 deterministic fake executor。
+- [✅] Worker 只依赖注入的 RunExecutor 协议，不导入 MemoirAgent 或尚未实现的 WorkflowExecutor；调度测试使用 deterministic fake executor。
 - [ ] heartbeat 续租失败后 Worker 停止模型、工具、Checkpoint、Artifact 和状态写入。
-- [ ] reaper 回收失效 lease，在同一事务执行 claimed -> queued、Admission `running -> queued` 并创建新的 run_dispatch；旧 worker 迟到写入被 fencing 拒绝。
+- [✅] reaper 回收失效 lease，在同一事务执行 claimed -> queued、Admission `running -> queued` 并创建新的 run_dispatch；旧 worker 迟到写入被 fencing 拒绝。
 - [ ] 所有状态、Checkpoint、Artifact、ToolCall 写入校验 fencing、cancel、package、privacy 和 authorization version。
-- [ ] 实例进入 draining 后立即停止认领新 run，readiness 返回 503、liveness 保持成功；在途 Worker 继续 heartbeat。run 在宽限期内完成则正常终止；先到安全 checkpoint 时先持久化 checkpoint，再条件更新当前 lease 为到期并停止全部写入；宽限期先耗尽时停止发起新模型/工具调用，让 lease 到期并停止全部写入。Admission running 占用保留到 reaper 在 `claimed -> queued` 事务中迁移，接管 Worker 创建新的 execution attempt。
+- [✅] 实例进入 draining 后立即停止认领新 run，readiness 返回 503、liveness 保持成功；在执行器安全返回边界条件更新当前 lease 为到期，Admission running 占用保留到 reaper 在 `claimed -> queued` 事务中迁移，接管 Worker 创建新的 execution attempt。
+- [ ] 在途 Worker 宽限期内继续 heartbeat、先持久化 checkpoint 后停止全部写入，以及宽限期耗尽时停止新的模型/工具调用。（依赖 Task 6/10 的真实执行器、CheckpointStore、ModelGateway 与 ToolGateway。）
 - [ ] 测试重复 dispatch、Redis 丢失、双 worker 竞争、heartbeat 失效、旧 worker 迟到写、cancel 传播、Admission claim/reaper 计数，以及 draining 期间 lease 持续续租、宽限期内完成、宽限期耗尽后单次 reaper 接管和优雅停机。
 - [ ] 测试未启用/缺 handler 的 callback 保持 pending 且 attempt 不变、readiness 对错误启用配置返回 503，以及 callback 积压不阻塞 run_dispatch。
 
@@ -826,10 +827,10 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: `StaticPlanner.create_plan(run, package) -> AgentPlanDTO`；DTO 固定包含 `plan_id/run_id/strategy/steps/stop_conditions/fallback_policy/status`。
 
-- [ ] 从受信任 `workflow.graph.py` 导出的节点 manifest 生成 `steps_json`，不执行业务方上传代码。
-- [ ] 写入 stop conditions：step/model/tool/cost、活跃执行预算、held/queue/approval TTL 和 wall clock deadline。
-- [ ] 写入每个节点的 fallback policy。
-- [ ] 落库 `AgentPlan`。
+- [✅] 从受信任 `workflow.graph.py` 导出的节点 manifest 生成 `steps_json`，不执行业务方上传代码。
+- [✅] 写入 stop conditions：step/model/tool/cost、活跃执行预算、held/queue/approval TTL 和 wall clock deadline。
+- [✅] 写入每个节点的 fallback policy。
+- [✅] 落库 `AgentPlan`。
 - [ ] 测试计划包含 `load_snapshot` 到 `publish_playback_document`；媒体关闭时节点 skipped，二期启用后只对“媒体任务入队失败”允许 partial。
 
 ### Task 6: LangGraph Workflow Executor
@@ -844,7 +845,8 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: `WorkflowExecutor.run(run_id: str, lease_context: LeaseContext) -> AgentRunResult` 并实现 Task 4.5 的 RunExecutor 协议，复用既有 LeaseContext/AgentRunResult，不重新定义返回类型。
 
-- [ ] 定义 `AgentState`，包含 `run_input`、`snapshot`、`sanitized_material`、`stats`、`highlights`、`chapter_plan`、`scenes`、`actions`、`playback_document`、`publish_result`、`media_tasks`、`safety_report`、`trust_metadata`、`errors`、`fallback_flags`。
+> 阶段完成基础（不新增计划任务）：已实现可注入的 mock `WorkflowExecutor` 验证链路，按静态 AgentPlan 写 `AgentStep.running/succeeded` 与安全 checkpoint 进度摘要；每次节点写入前复用 LeaseService 拒绝失效 fencing context。原有 Task 6 条目仍按完整验收语义逐项标记。
+- [✅] 定义 `AgentState`，包含 `run_input`、`snapshot`、`sanitized_material`、`stats`、`highlights`、`chapter_plan`、`scenes`、`actions`、`playback_document`、`publish_result`、`media_tasks`、`safety_report`、`trust_metadata`、`errors`、`fallback_flags`。
 - [ ] 将 workflow 节点映射到 LangGraph Python 节点。
 - [ ] 每个节点执行前校验 fencing、cancel、package status、privacy version 和 authorization version。
 - [ ] 每个节点开始前写 `AgentStep.running`。

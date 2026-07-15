@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from app.contracts.api import CONTRACT_VERSION, CreateAgentRunRequest
 from app.contracts.artifacts import ArtifactEnvelope
@@ -9,7 +9,7 @@ from app.contracts.tools import ToolError, ToolRequest, ToolResult
 
 
 def _stable_schema(model: type[Any]) -> dict[str, Any]:
-    return json.loads(json.dumps(model.model_json_schema(), sort_keys=True))
+    return cast(dict[str, Any], json.loads(json.dumps(model.model_json_schema(), sort_keys=True)))
 
 
 def export_contract_schemas() -> dict[str, Any]:

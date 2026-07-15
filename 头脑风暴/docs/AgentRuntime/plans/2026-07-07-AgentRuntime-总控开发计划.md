@@ -373,20 +373,23 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 4、Task 5。
 
-- [ ] 实现创建、查询、取消、重试和最小人工确认 API；复杂审核台保持二期范围。
-- [ ] 所有 Runtime 写接口校验调用方身份、时间戳、HMAC 签名和幂等键。
-- [ ] 创建 run 时校验 input schema、caller/tenant、business_type、callback target、business connector、数据域和 Admission 配额。
-- [ ] 实现 held create、幂等 start、held 超时和 auto 模式；首次 start 在同一事务完成 `held -> queued`、Admission 迁移、`queued_at`、run_dispatch outbox 和幂等响应。同 key/hash 重放首次响应，新 key 请求已 queued/claimed 的 run 只返回当前安全摘要，不重复迁移配额或写 outbox。
-- [ ] 在 AgentRun API 阶段完成签名、授权、connector registry、AdmissionService 和事务 OutboxService；create held/auto、start、retry、human approval/fallback 恢复的配额预留、状态迁移和 dispatch outbox 同事务，429 不改变状态或固化幂等结果，cancel/purge 永不被 Admission 阻塞。
-- [ ] AdmissionService 以 global 规范键 `*` 和认证上下文中的 caller/tenant/agent ID 幂等 upsert bucket，再按 `(scope_type, scope_key)` 固定顺序锁定，并以 `dispatch_state` 完成 `none/held/queued/claimed/finished` 占用迁移；幂等命中、条件写失败和回滚不改变计数。
-- [ ] 实现 `IdempotencyRecord`，按 `client_id + scope + key` 隔离 `create/start/retry/cancel/human_approval/purge`；request hash 固定覆盖 method、normalized path 和 body hash，未过期且 hash 相同返回原结果，不同返回 HTTP `409 Conflict` + `IDEMPOTENCY_CONFLICT`，过期记录在数据库锁保护下原子换代。
-- [ ] AgentRun 查询返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version`、purge 时间、更新时间和安全 public trace；业务对账不得依赖 create/start/purge 的缓存响应推断当前状态。
-- [ ] `AgentRun` 仅保存 `create_idempotency_key` 作为普通审计索引，不建立跨 TTL 的永久唯一约束；维护任务清理过期记录，purge 记录至少保留至清理完成并满足审计保留期。
-- [ ] 取消 `pending + held/queued` 或 `waiting_human + finished` 时在 API 事务内直接终止并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，所有路径与 retry/approval 互斥。
-- [ ] 人工确认只接受 `status=waiting_human AND dispatch_state=finished` 的 run，要求独立幂等键、`decision=approve|reject` 和 `expected_status_version`；approve 在同一事务只推进 `dispatch_state: finished -> queued`、递增 `status_version` 并写 dispatch outbox，run 状态由新 worker 取得 lease 后从 `waiting_human` 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或终结为 failed/cancelled，过期版本返回冲突且不推进状态。
-- [ ] Retry 只允许原 caller 或内部审计身份调用，手动 run 级重试默认最多 3 次；partial 只重试 Runtime 未完成的可选步骤，不重新发布主作品。
-- [ ] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，不消耗手动重试次数。
-- [ ] 为 `memoir_agent` 生成静态 `AgentPlan`；产生真实恢复状态后再保存首个 checkpoint，不创建空 Artifact。
+- [✅] 实现创建、查询、取消、重试和最小人工确认 API；复杂审核台保持二期范围。
+- [✅] 所有 Runtime 写接口校验调用方身份、时间戳、HMAC 签名和幂等键。
+- [✅] 创建 run 时校验 input schema、caller/tenant、business_type、callback target、business connector、数据域和 Admission 配额。
+- [✅] 实现 held create、幂等 start、held 超时和 auto 模式；首次 start 在同一事务完成 `held -> queued`、Admission 迁移、`queued_at`、run_dispatch outbox 和幂等响应。同 key/hash 重放首次响应，新 key 请求已 queued/claimed 的 run 只返回当前安全摘要，不重复迁移配额或写 outbox。
+- [✅] 在 AgentRun API 阶段完成签名、授权、connector registry、AdmissionService 和事务 OutboxService；create held/auto、start、retry、human approval/fallback 恢复的配额预留、状态迁移和 dispatch outbox 同事务，429 不改变状态或固化幂等结果，cancel/purge 永不被 Admission 阻塞。
+- [✅] AdmissionService 以 global 规范键 `*` 和认证上下文中的 caller/tenant/agent ID 幂等 upsert bucket，再按 `(scope_type, scope_key)` 固定顺序锁定，并以 `dispatch_state` 完成 `none/held/queued/claimed/finished` 占用迁移；幂等命中、条件写失败和回滚不改变计数。
+- [✅] 实现 `IdempotencyRecord`，按 `client_id + scope + key` 隔离 `create/start/retry/cancel/human_approval/purge`；request hash 固定覆盖 method、normalized path 和 body hash，未过期且 hash 相同返回原结果，不同返回 HTTP `409 Conflict` + `IDEMPOTENCY_CONFLICT`，过期记录在数据库锁保护下原子换代。
+- [✅] AgentRun 查询返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version`、purge 时间、更新时间和安全 public trace；业务对账不得依赖 create/start/purge 的缓存响应推断当前状态。
+- [✅] 创建时冻结不含密钥/endpoint 的 capability snapshot；查询额外返回由持久 `AgentStep` 推导的安全 `progress/current_step` 摘要。
+- [✅] `AgentRun` 仅保存 `create_idempotency_key` 作为普通审计索引，不建立跨 TTL 的永久唯一约束；维护任务清理过期记录，purge 记录至少保留至清理完成并满足审计保留期。
+- [✅] 取消 `pending + held/queued` 或 `waiting_human + finished` 时在 API 事务内直接终止并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，所有路径与 retry/approval 互斥。
+- [✅] approval/cancel/retry/purge 写入脱敏且追加的 `RuntimeAuditEvent`，与 Run 状态变更在同一事务持久化。
+- [✅] 人工确认只接受 `status=waiting_human AND dispatch_state=finished` 的 run，要求独立幂等键、`decision=approve|reject` 和 `expected_status_version`；approve 在同一事务只推进 `dispatch_state: finished -> queued`、递增 `status_version` 并写 dispatch outbox，run 状态由新 worker 取得 lease 后从 `waiting_human` 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或终结为 failed/cancelled，过期版本返回冲突且不推进状态。
+- [✅] Retry 只允许原 caller 或内部审计身份调用，手动 run 级重试默认最多 3 次。
+- [ ] `partial` 只重试 Runtime 未完成的可选步骤，不重新发布主作品；依赖 Task 6 写入节点完成状态、可选节点声明与发布结果。
+- [✅] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，不消耗手动重试次数。
+- [✅] 为 `memoir_agent` 生成静态 `AgentPlan`；产生真实恢复状态后再保存首个 checkpoint，不创建空 Artifact。
 
 **Checkpoint:** 情侣日记后端可以创建 run 并拿到 `run_id`。
 
@@ -394,15 +397,17 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 4.5。
 
-- [ ] 实现 `RunQueueService`。
-- [ ] 实现 `python -m app.worker` 或等价 Arq Worker 启动入口。
-- [ ] dispatcher lease 认领 run_dispatch outbox，可用 Arq 通知 Worker。
-- [ ] dispatcher 使用按 `event_type` 的显式 handler registry；本阶段只启用 `run_dispatch`，认领查询不选择未启用或缺 handler 的事件，后者保持 pending 且不增加 attempt/dead-letter；两类事件分开轮询以避免头阻塞。
-- [ ] Worker 使用数据库条件写原子认领 `dispatch_state=queued` 且 status 为 `pending/waiting_human` 的可执行 run，取得 execution attempt、lease 和 fencing token；cancelled 或已请求取消的 run 不可认领。
-- [ ] Worker claim 同事务执行 Admission `queued -> running`，进入 waiting_human/终态执行 `running -> none`；reaper 回收 lease 时执行 `running -> queued` 并写新的 dispatch outbox。
-- [ ] 队列阶段先冻结可注入的 `RunExecutor.run(run_id, lease_context)` 协议并用 fake executor 验证；后端 Task 6 的 WorkflowExecutor 再实现该协议，避免 Worker 任务前向依赖未完成执行器。
-- [ ] heartbeat 失效由 reaper 回收；旧 worker 迟到写入被 fencing 拒绝。
-- [ ] cancel/retry 互斥；实例进入 draining 后停止新认领、readiness 503、liveness 成功，在途 Worker 继续 heartbeat。run 在宽限期内完成则正常终止；先到安全 checkpoint 时持久化后让 lease 到期并停止写入；宽限期先耗尽时停止新模型/工具调用，让 lease 到期并停止写入。Admission 占用由 reaper 的 `claimed -> queued` 事务迁移，接管时只创建一个新 execution attempt。
+- [✅] 实现 `RunQueueService`。
+- [✅] 实现 `python -m app.worker` 或等价 Arq Worker 启动入口。
+- [✅] dispatcher lease 认领 run_dispatch outbox，可用 Arq 通知 Worker。
+- [✅] dispatcher 使用按 `event_type` 的显式 handler registry；本阶段只启用 `run_dispatch`，认领查询不选择未启用或缺 handler 的事件，后者保持 pending 且不增加 attempt/dead-letter；两类事件分开轮询以避免头阻塞。
+- [✅] Worker 使用数据库条件写原子认领 `dispatch_state=queued` 且 status 为 `pending/waiting_human` 的可执行 run，取得 execution attempt、lease 和 fencing token；cancelled 或已请求取消的 run 不可认领。
+- [✅] Worker claim 同事务执行 Admission `queued -> running`，进入 waiting_human/终态执行 `running -> none`；reaper 回收 lease 时执行 `running -> queued` 并写新的 dispatch outbox。
+- [✅] 队列阶段先冻结可注入的 `RunExecutor.run(run_id, lease_context)` 协议并用 fake executor 验证；后端 Task 6 的 WorkflowExecutor 再实现该协议，避免 Worker 任务前向依赖未完成执行器。
+- [✅] heartbeat 失效由 reaper 回收；旧 worker 迟到写入被 fencing 拒绝。
+- [✅] draining 在执行器返回的非终态安全边界停止续租，由 reaper 以原子 `claimed -> queued` 迁移接管，Admission 占用不会提前释放。
+- [✅] cancel/retry 互斥；实例进入 draining 后停止新认领、readiness 503、liveness 成功；安全返回边界会让 lease 到期，Admission 占用由 reaper 的 `claimed -> queued` 事务迁移，接管时只创建一个新 execution attempt。
+- [ ] 在途 Worker 宽限期内 heartbeat、checkpoint 落库后停止写入，以及宽限期耗尽时停止新的模型/工具调用；依赖 Task 6 的真实执行器、CheckpointStore、ModelGateway 与 ToolGateway。
 
 **Checkpoint:** 长任务脱离 HTTP 请求执行，Redis 丢失/重复不影响正确性，同一 run 只有有效 fencing token 的 Worker 可以写入。
 
@@ -410,6 +415,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 6、Task 10。
 
+> 阶段完成基础（不新增计划任务）：已实现可注入 mock `WorkflowExecutor`，可按静态 AgentPlan 写 `AgentStep.running/succeeded` 安全摘要；同时提供独立 `CheckpointStore`，以 Fernet 认证加密完整恢复状态，写入仅含节点进度的安全摘要、TTL、privacy/fencing 校验及脱敏持久审计。执行器与加密恢复状态的正式注入仍待后续节点/密钥配置一并完成。原有 Task 6 条目仍按完整验收语义逐项标记。
 - [ ] 加载受信任 `workflow.graph.py` 并从导出 manifest 生成 AgentPlan。
 - [ ] 执行每个节点时写 `AgentStep`。
 - [ ] 每个节点完成后写 checkpoint。
@@ -441,6 +447,8 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 **Interfaces:**
 - Produces: `MemoryArchiveService.create_archives_for_relationship(relationship_id)`、加密 `MemorySnapshot`、revision 0 baseline、`published_revision` 读取边界和 `MemoryAgentRunRef`。
 
+- [✅] 建立 `MemoryArchive/MemorySnapshot/MemoryPlaybackDocument/MemoryScene/MemoryAction/MemoryMediaAsset/MemoryAgentRunRef`、Alembic 迁移和 `MemoryArchiveService` 基础实现；以显式 `FrozenMemoryInput` 接收冻结素材，使用 Fernet 认证加密快照，并在同一事务为双方创建隔离 archive 与 revision 0 baseline。
+- [✅] 建立 `MemoryPlayerService` 的 `published_revision` 读取边界，以及完整 PlaybackDocument 的原子发布：先校验并落库完整 `scenes/actions/media_manifest`，再在同一事务切换唯一发布指针。
 - [ ] 和平解绑或强制拉黑事务冻结 `space_id + relationship_segment_no + snapshot_cutoff_at + source manifest/version`，为双方创建独立 archive，并写 snapshot/run outbox。
 - [ ] `MemoryArchive` 保存 owner/partner 快照、关系时间、summary、content/enhancement 状态、generation epoch、active run、published revision、pin/delete 字段；`MemoryAgentRunRef` 保存运行摘要、retry、event/status version、row version、各操作幂等键和 purge 对账字段。
 - [ ] 快照 materializer 只按冻结 manifest 读取素材，保存 `source_manifest_hash/privacy_filter_version`，不读取任务执行时新增或变更的数据。

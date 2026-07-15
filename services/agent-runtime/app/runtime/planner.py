@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import logging
+from uuid import uuid4
+
+from sqlalchemy.orm import Session
+
+from app.models import AgentPlan
+from app.schemas.agent_package import AgentPackage
+from app.schemas.plan import AgentPlanDTO
+
+DEFAULT_STOP_CONDITIONS: dict[str, int | float] = {
+    "max_steps": 16,
+    "max_model_calls": 8,
+    "max_tool_calls": 20,
+    "max_estimated_cost": 2.0,
+    "max_run_seconds": 300,
+    "held_ttl_seconds": 600,
+    "queue_ttl_seconds": 900,
+    "approval_ttl_seconds": 86_400,
+    "max_wall_clock_seconds": 172_800,
+}
+
+DEFAULT_FALLBACK_POLICY: dict[str, str] = {
+    "default": "failed",
+    "media": "skipped(capability_disabled)",
+}
+
+
+class StaticPlanner:
+    """仅将受信任 Package 的静态节点清单转换为可审计计划，不调用模型。"""
+
+    def create_plan(self, run_id: str, package: AgentPackage) -> AgentPlanDTO:
+        steps = [node.model_dump(mode="json") for node in package.workflow_nodes]
+        logging.info("生成静态 AgentPlan run_id=%s steps=%s", run_id, len(steps))
+        return AgentPlanDTO(
+            plan_id=str(uuid4()),
+            run_id=run_id,
+            strategy="static_workflow",
+            steps=steps,
+            stop_conditions=DEFAULT_STOP_CONDITIONS.copy(),
+            fallback_policy=DEFAULT_FALLBACK_POLICY.copy(),
+            status="planned",
+        )
+
+    def create_plan_from_definition(
+        self, run_id: str, definition: dict[str, object]
+    ) -> AgentPlanDTO:
+        """从已注册的受信任定义生成计划，避免 API 层再读取业务文件。"""
+        raw_nodes = definition.get("workflow_nodes", [])
+        steps = raw_nodes if isinstance(raw_nodes, list) else []
+        if not steps:
+            # 旧注册记录尚未写入节点摘要时保留明确的空计划，Worker 会安全失败，
+            # 绝不凭 agent_id 猜测或执行任意工作流。
+            logging.warning("AgentDefinition 缺少 workflow_nodes run_id=%s", run_id)
+        return AgentPlanDTO(
+            plan_id=str(uuid4()),
+            run_id=run_id,
+            strategy="static_workflow",
+            steps=steps,
+            stop_conditions=DEFAULT_STOP_CONDITIONS.copy(),
+            fallback_policy=DEFAULT_FALLBACK_POLICY.copy(),
+            status="planned",
+        )
+
+    def persist(self, session: Session, plan: AgentPlanDTO) -> AgentPlan:
+        """Plan 与 Run 同属权威运行库；只保存节点摘要，不保存任何私密执行 state。"""
+        record = AgentPlan(
+            plan_id=plan.plan_id,
+            run_id=plan.run_id,
+            strategy=plan.strategy,
+            steps_json=plan.steps,
+            stop_conditions_json=plan.stop_conditions,
+            fallback_policy_json=plan.fallback_policy,
+            status=plan.status,
+        )
+        session.add(record)
+        logging.info(
+            "静态 AgentPlan 已落库 run_id=%s plan_id=%s", plan.run_id, plan.plan_id
+        )
+        return record

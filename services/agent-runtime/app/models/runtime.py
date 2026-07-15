@@ -25,7 +25,8 @@ class AgentDefinition(Base, TimestampMixin):
     __tablename__ = "agent_definitions"
     __table_args__ = (UniqueConstraint("agent_id", "version"),)
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # SQLite 测试环境要求 INTEGER PRIMARY KEY 才能自增；生产数据库同样可安全映射。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     agent_id: Mapped[str] = mapped_column(String(80), nullable=False)
     version: Mapped[str] = mapped_column(String(40), nullable=False)
     runtime_type: Mapped[str] = mapped_column(
@@ -50,7 +51,7 @@ class AgentRun(Base, TimestampMixin):
 
     __tablename__ = "agent_runs"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[str] = mapped_column(
         String(80), unique=True, index=True, nullable=False
     )
@@ -133,7 +134,8 @@ class AdmissionBucket(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # SQLite 联调需要 INTEGER PRIMARY KEY 才会生成 rowid；生产数据库仍可映射为整型主键。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scope_type: Mapped[str] = mapped_column(String(32), nullable=False)
     scope_key: Mapped[str] = mapped_column(String(160), nullable=False)
     held_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -144,7 +146,8 @@ class AdmissionBucket(Base, TimestampMixin):
 
 class AgentPlan(Base, TimestampMixin):
     __tablename__ = "agent_plans"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # 统一使用 INTEGER 自增主键，保证 SQLite 联调与生产 ORM 行为一致。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     plan_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     strategy: Mapped[str] = mapped_column(String(24), nullable=False)
@@ -157,7 +160,8 @@ class AgentPlan(Base, TimestampMixin):
 
 class AgentStep(Base, TimestampMixin):
     __tablename__ = "agent_steps"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # SQLite 只有 INTEGER PRIMARY KEY 才能自动生成步骤审计行主键。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     step_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     step_name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -223,7 +227,8 @@ class AgentCheckpoint(Base):
 
     __tablename__ = "agent_checkpoints"
     __table_args__ = (UniqueConstraint("run_id", "checkpoint_key"),)
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # 与 AgentStep 一致，使用 SQLite/生产均兼容的整型自增主键。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     checkpoint_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     checkpoint_key: Mapped[str] = mapped_column(String(160), nullable=False)
@@ -287,7 +292,8 @@ class CallbackEvent(Base):
 
     __tablename__ = "callback_events"
     __table_args__ = (UniqueConstraint("run_id", "event_seq"),)
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # 与其他 Runtime 表一致，SQLite 测试/本地联调使用 rowid 自增主键。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     event_seq: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -301,7 +307,7 @@ class CallbackEvent(Base):
 
 class RuntimeOutboxEvent(Base, TimestampMixin):
     __tablename__ = "runtime_outbox_events"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     outbox_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     aggregate_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -328,7 +334,7 @@ class IdempotencyRecord(Base, TimestampMixin):
 
     __tablename__ = "idempotency_records"
     __table_args__ = (UniqueConstraint("client_id", "idempotency_key", "scope"),)
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
     scope: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -337,5 +343,32 @@ class IdempotencyRecord(Base, TimestampMixin):
     resource_type: Mapped[str | None] = mapped_column(String(80))
     resource_id: Mapped[str | None] = mapped_column(String(120))
     expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+
+
+class RuntimeAuditRecord(Base):
+    """Runtime 的追加写安全审计账本，绝不存业务正文或原始模型/工具数据。"""
+
+    __tablename__ = "runtime_audit_records"
+
+    # SQLite 与生产环境共用整型自增主键，审计业务标识使用独立 audit_id。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 用 UUID 标识一条审计事实，方便外部审计系统去重与关联。
+    audit_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    # actor_type/actor_id 记录调用者身份，不能从敏感输入推导或回填。
+    actor_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # action/resource 二元组用于按操作和资源追查状态变更。
+    action: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    # reason/outcome 只保存受控错误码和结论，避免写入用户自由文本。
+    reason_code: Mapped[str | None] = mapped_column(String(80))
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    trace_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    # 调用方只可传入已脱敏的短字段摘要，禁止存 prompt、正文、密钥或 payload。
+    metadata_summary: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), index=True, nullable=False
     )
