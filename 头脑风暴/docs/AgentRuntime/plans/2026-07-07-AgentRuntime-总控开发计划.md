@@ -321,7 +321,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] 确认手动重试计数与 Runtime 自动节点重试计数隔离。
 - [✅] 确认第一版只支持 Workflow Agent。
 - [✅] 确认 `memoir_agent@1.0.0` 是首个 AgentPackage。
-- [✅] 确认 Runtime 服务目录为 ``，权威运行数据库与迁移方案已选定。
+- [✅] 确认 Runtime 模块目录为根工程 `app/`，并复用根 `alembic/` 与权威数据库方案。
 
 **Checkpoint:** Runtime、情侣日记后端、前端都以本契约为准。
 
@@ -329,7 +329,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 1。
 
-- [✅] 新建 ``。
+- [✅] 在根工程 `app/` 中建立 Runtime 模块。
 - [✅] 建立 Contract 包、FastAPI app、配置、日志、`/health/live`、`/health/ready` 和鉴权 capabilities。
 - [✅] 建立追加写 AuditService；生产缺少持久、访问受限的 audit sink，或部署声明启用的 outbox event type 缺少 handler 时 readiness 返回 503。
 - [✅] 配置可信业务系统、签名容忍时间、Arq Redis 队列名和 Worker 启动命令。
@@ -337,7 +337,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] 建立测试框架和 lint/type check 命令。
 - [✅] 跑 `ruff check .` 和健康检查测试。
 
-**Checkpoint:** AgentRuntime 服务可以单独启动。
+**Checkpoint:** 根 FastAPI 应用与根 Worker 可以加载 AgentRuntime 模块。
 
 ### Task 3: Runtime 数据模型与迁移
 

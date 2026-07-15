@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+
+import app.models  # noqa: F401
+from app.db.sqlalchemy_db import Base
+from app.models import AgentDefinition, AgentRun, RuntimeAuditRecord
+from app.schemas.agent_run import CreateRunCommand
+from app.services.agent_run_service import AgentRunService
+
+
+def test_held_create_then_start_writes_one_dispatch_event() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent",
+            version="1.0.0",
+            runtime_type="workflow",
+            definition_json={},
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            status="active",
+            status_changed_at=datetime.now(UTC),
+            status_changed_by="admin",
+            status_change_reason="test",
+        )
+    )
+    session.commit()
+    service = AgentRunService(session)
+    command = CreateRunCommand(
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive_1",
+        start_mode="held",
+        input={"snapshot_id": "snapshot_1"},
+        callback_target_id="memory_callback",
+        business_connector_id="couple_diary_backend",
+    )
+
+    created = service.create(
+        command,
+        caller_id="couple-diary",
+        tenant_id="tenant_1",
+        idempotency_key="create-1",
+    )
+    started = service.start(
+        created.run_id, caller_id="couple-diary", idempotency_key="start-1"
+    )
+
+    assert created.dispatch_state == "held"
+    assert started.dispatch_state == "queued"
+    assert service.count_dispatch_events(created.run_id) == 1
+
+
+def test_auto_retry_counter_is_independent_from_manual_retry_counter() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="auto-retry-run",
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        package_digest="sha256:test",
+        contract_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive",
+        status="running",
+        dispatch_state="claimed",
+        input_json={},
+        authorization_version=1,
+        caller_id="caller",
+        tenant_id="tenant",
+        create_idempotency_key="key",
+        callback_target_id="callback",
+        business_connector_id="connector",
+        trace_id="trace",
+        run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.commit()
+
+    AgentRunService(session).record_auto_retry("auto-retry-run")
+    assert run.auto_retry_count == 1
+    assert run.manual_retry_count == 0
+
+
+def test_cancel_persists_desensitized_runtime_audit_record() -> None:
+    """审计记录必须与 Run 的状态变更在同一 Session 内持久化。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="audit-cancel-run",
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        package_digest="sha256:test",
+        contract_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive",
+        status="pending",
+        dispatch_state="held",
+        input_json={"private": "must-not-be-audited"},
+        authorization_version=1,
+        caller_id="caller",
+        tenant_id="tenant",
+        create_idempotency_key="key",
+        callback_target_id="callback",
+        business_connector_id="connector",
+        trace_id="trace-audit",
+        run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.commit()
+
+    AgentRunService(session).cancel("audit-cancel-run", "caller")
+    audit = session.scalar(
+        select(RuntimeAuditRecord).where(
+            RuntimeAuditRecord.resource_id == "audit-cancel-run"
+        )
+    )
+
+    assert audit is not None
+    assert audit.action == "agent_run_cancelled"
+    assert audit.actor_id == "caller"
+    assert audit.trace_id == "trace-audit"
+    assert audit.metadata_summary == {"dispatch_state": "finished"}
+
+
+def test_internal_auditor_can_read_other_callers_run_without_private_input() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(
+        AgentRun(
+            run_id="auditor-read-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="pending", dispatch_state="held", input_json={"private": "x"},
+            authorization_version=1, caller_id="owner", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            run_deadline_at=datetime.now(UTC),
+        )
+    )
+    session.commit()
+
+    detail = AgentRunService(session).get(
+        "auditor-read-run", "runtime-auditor", allow_auditor=True
+    )
+
+    assert detail.run_id == "auditor-read-run"
+    assert "input_json" not in detail.model_dump()
+
+
+def test_waiting_human_cancel_is_immediately_terminal() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="waiting-cancel-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="waiting_human", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.commit()
+
+    result = AgentRunService(session).cancel("waiting-cancel-run", "caller")
+
+    assert result.status == "cancelled"
+    assert result.dispatch_state == "finished"

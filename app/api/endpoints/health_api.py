@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from app.core.config import Settings
+
 router = APIRouter(tags=["health"])
+
+
+@dataclass
+class RuntimeHealth:
+    """Runtime 就绪状态，集中管理 draining 与基础依赖配置检查。"""
+
+    settings: Settings
+    draining: bool = False
+
+    def check_ready(self) -> tuple[bool, dict[str, str]]:
+        """只输出安全的配置状态，不回传密钥、连接串或业务数据。"""
+        checks = {
+            "database": "configured",
+            "agent_package": "configured",
+            "trusted_clients": "configured" if self.settings.trusted_clients else "missing",
+            "draining": "true" if self.draining else "false",
+        }
+        ready = checks["trusted_clients"] == "configured" and not self.draining
+        logging.info("Runtime readiness 检查 ready=%s checks=%s", ready, checks)
+        return ready, checks
 
 
 @router.get("/health/live")

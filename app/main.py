@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.api import api_router
+from app.api.endpoints.health_api import RuntimeHealth
 from app.core.config import settings
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
@@ -52,6 +53,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.settings = settings
+app.state.runtime_health = RuntimeHealth(settings)
 
 app.add_middleware(
     CORSMiddleware,
