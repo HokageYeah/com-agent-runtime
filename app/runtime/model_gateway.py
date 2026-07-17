@@ -294,6 +294,10 @@ class ModelGateway:
         # 熔断预检同样必须在 policy reservation 前执行，稳定打开时不留下 usage。
         circuit = self._traffic.preflight_circuit(route)
         if circuit.status != "circuit_available":
+            logging.info(
+                "模型熔断拒绝 run_id=%s step_id=%s route_id=%s status=%s",
+                context.run_id, context.step_id, route_id, circuit.status,
+            )
             return ModelGatewayResult(
                 circuit.status, retry_after_seconds=circuit.retry_after_seconds,
             )

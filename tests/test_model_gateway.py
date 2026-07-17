@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
@@ -901,6 +902,51 @@ def test_step_revoked_after_reservation_cannot_reach_provider() -> None:
 
     assert result.status == "aborted_before_send"
     assert provider.calls == 0
+
+
+def test_model_governance_denial_logs_exclude_request_body(caplog: pytest.LogCaptureFixture) -> None:
+    """policy、熔断与 draining 的拒绝日志只含安全标识，不能回显请求正文。"""
+    caplog.set_level(logging.INFO)
+    request = {"prompt": "private-body-987", "token": "secret-token-456"}
+
+    policy_session, policy_lease = _run_session()
+    policy_run = policy_session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert policy_run is not None
+    policy_run.capability_snapshot_json = {
+        "allowed_model_route_ids": ["summary"], "model_policy": {"max_model_calls": 0},
+    }
+    policy_session.commit()
+    assert _gateway(policy_session, RevokingLease([True]), RecordingProvider()).call(
+        _context(policy_session, policy_lease), "summary", request,
+    ).status == "policy_denied"
+
+    circuit_session, circuit_lease = _run_session()
+    guarded = ModelRoute(**{
+        **_route().__dict__, "circuit_failure_threshold": 1, "circuit_open_seconds": 30,
+    })
+    traffic = ProviderTrafficController(FakeRedis())
+    assert traffic.record_circuit_failure(guarded).status == "circuit_opened"
+    assert ModelGateway(
+        ModelRouteRegistry([guarded]), traffic, ModelUsageService(circuit_session),
+        RevokingLease([True]), RecordingProvider(), PolicyEngine(circuit_session),
+    ).call(_context(circuit_session, circuit_lease), "summary", request).status == "circuit_open"
+
+    class DrainingGuard:
+        def permits_new_call(self, context: ModelCallContext) -> bool:
+            return False
+
+    drain_session, drain_lease = _run_session()
+    assert ModelGateway(
+        ModelRouteRegistry([_route()]), ProviderTrafficController(FakeRedis()),
+        ModelUsageService(drain_session), RevokingLease([True]), RecordingProvider(),
+        PolicyEngine(drain_session), call_guard=DrainingGuard(),
+    ).call(_context(drain_session, drain_lease), "summary", request).status == "aborted_before_send"
+
+    assert "模型策略拒绝" in caplog.text
+    assert "模型熔断拒绝" in caplog.text
+    assert "worker_draining" in caplog.text
+    assert "private-body-987" not in caplog.text
+    assert "secret-token-456" not in caplog.text
 
 
 def test_created_run_freezes_server_routes_and_rejects_command_route_override() -> None:
