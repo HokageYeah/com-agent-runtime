@@ -86,6 +86,8 @@ class ModelRoute:
             raise ValueError("circuit_open_seconds 必须是非负有限数")
         if self.circuit_failure_threshold == 0 and self.circuit_open_seconds != 0:
             raise ValueError("未启用熔断时 circuit_open_seconds 必须为 0")
+        if self.circuit_failure_threshold > 0 and self.circuit_open_seconds <= 0:
+            raise ValueError("启用熔断时 circuit_open_seconds 必须为正数")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> ModelRoute:
@@ -491,6 +493,8 @@ if op == 'circuit_failure' then
   local failures = 'model_gateway:circuit_failures:'..route_id
   local circuit_open = 'model_gateway:circuit_open:'..route_id
   local count = redis.call('INCR', failures)
+  -- 每次确认失败刷新计数窗口，避免很久以前的故障永久累计。
+  redis.call('EXPIRE', failures, math.max(1, math.ceil(open_seconds)))
   if count >= threshold then
     local open_until = now + open_seconds
     redis.call('SET', circuit_open, open_until, 'EX', math.max(1, math.ceil(open_seconds)))

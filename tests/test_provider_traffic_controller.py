@@ -18,6 +18,7 @@ class FakeRedis:
         self.rpm: dict[str, list[float]] = defaultdict(list)
         self.tpm: dict[str, list[tuple[float, int]]] = defaultdict(list)
         self.circuit_failures: dict[str, int] = defaultdict(int)
+        self.circuit_failure_expires_at: dict[str, float] = {}
         self.circuit_open_until: dict[str, float] = {}
 
     def eval(self, script: str, numkeys: int, *args: object) -> list[object]:
@@ -64,7 +65,10 @@ class FakeRedis:
             threshold, open_seconds, route_id = int(args[5]), float(args[6]), str(args[7])
             if threshold == 0:
                 return ["circuit_disabled", 0]
+            if self.circuit_failure_expires_at.get(route_id, 0) <= now:
+                self.circuit_failures.pop(route_id, None)
             self.circuit_failures[route_id] += 1
+            self.circuit_failure_expires_at[route_id] = now + max(1, open_seconds)
             if self.circuit_failures[route_id] >= threshold:
                 self.circuit_open_until[route_id] = now + open_seconds
                 return ["circuit_opened", self.circuit_open_until[route_id]]
@@ -72,6 +76,7 @@ class FakeRedis:
         if operation == "circuit_success":
             route_id = str(args[5])
             self.circuit_failures.pop(route_id, None)
+            self.circuit_failure_expires_at.pop(route_id, None)
             self.circuit_open_until.pop(route_id, None)
             return ["circuit_reset", 0]
         if operation == "started":
@@ -166,6 +171,19 @@ def test_circuit_opens_after_consecutive_failures_and_rejects_before_permit(rout
     assert rejected.status == "circuit_open"
     assert rejected.retry_after_seconds == 30
     assert "model_gateway:permit:permit-circuit" not in redis.permits
+
+
+def test_old_circuit_failures_expire_before_a_later_failure(route: ModelRoute) -> None:
+    """连续失败计数只能在 open 窗口内累计，久远故障不得永久打开熔断。"""
+    now = [100.0]
+    guarded = ModelRoute(**{
+        **route.__dict__, "circuit_failure_threshold": 2, "circuit_open_seconds": 30,
+    })
+    controller = ProviderTrafficController(FakeRedis(), clock=lambda: now[0])
+
+    assert controller.record_circuit_failure(guarded).status == "circuit_failure"
+    now[0] += 31
+    assert controller.record_circuit_failure(guarded).status == "circuit_failure"
 
 
 def test_circuit_success_resets_and_429_does_not_count_as_failure(route: ModelRoute) -> None:
