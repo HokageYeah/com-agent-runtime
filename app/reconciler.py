@@ -3,24 +3,126 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
+import socket
+from collections.abc import Callable
+from time import sleep as default_sleep
+from typing import Any
 
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
+from app.services.reconciliation_lease_service import ReconciliationLeaseService
 from app.services.reconciliation_service import ReconciliationService
 
 
+class ReconcilerRunner:
+    """每轮使用独立 Session，并以数据库租约限制扫描所有权。"""
+
+    def __init__(
+        self,
+        session_factory: Callable[[], Any],
+        owner_id: str,
+        *,
+        reconciler_factory: Callable[[Any], Any] = ReconciliationService,
+        interval_seconds: int = 300,
+        lease_ttl_seconds: int = 300,
+        clock: Callable[[], Any] | None = None,
+        sleep: Callable[[float], None] = default_sleep,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds 必须大于零")
+        self._session_factory = session_factory
+        self._owner_id = owner_id
+        self._reconciler_factory = reconciler_factory
+        self._interval_seconds = interval_seconds
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._clock = clock
+        self._sleep = sleep
+        self._failure_streaks: dict[str, int] = {}
+
+    def run_once(self) -> Any | None:
+        """执行至多一轮；租约被占用时立即返回，不创建扫描副作用。"""
+        lease_session = self._session_factory()
+        lease = ReconciliationLeaseService(lease_session, ttl_seconds=self._lease_ttl_seconds)
+        now = self._clock() if self._clock is not None else None
+        try:
+            if not lease.acquire(self._owner_id, now=now):
+                logging.info("reconciler_skip operation=lease_unavailable")
+                return None
+            fencing_token = lease.fencing_token
+            assert fencing_token is not None
+            scan_session = self._session_factory()
+
+            def lease_guard() -> bool:
+                """续租失败即通知扫描停止，防止被接管的旧实例继续修复。"""
+                renewal_session = self._session_factory()
+                try:
+                    held = ReconciliationLeaseService(
+                        renewal_session, ttl_seconds=self._lease_ttl_seconds
+                    ).renew(
+                        self._owner_id,
+                        fencing_token,
+                        now=self._clock() if self._clock else None,
+                    )
+                finally:
+                    renewal_session.close()
+                if not held:
+                    # renewal 使用独立事务；这里显式丢弃扫描事务中的所有未提交修复。
+                    scan_session.rollback()
+                    logging.warning("reconciler_abort operation=lease_lost")
+                return held
+
+            try:
+                reconciler = self._reconciler_factory(scan_session)
+                set_failure_streaks = getattr(reconciler, "set_failure_streaks", None)
+                if callable(set_failure_streaks):
+                    set_failure_streaks(self._failure_streaks)
+                return reconciler.run_once(lease_guard=lease_guard)
+            finally:
+                scan_session.close()
+                release_session = self._session_factory()
+                try:
+                    ReconciliationLeaseService(
+                        release_session, ttl_seconds=self._lease_ttl_seconds
+                    ).release(
+                        self._owner_id,
+                        fencing_token,
+                        now=self._clock() if self._clock else None,
+                    )
+                finally:
+                    release_session.close()
+        finally:
+            lease_session.close()
+
+    def run_forever(self, *, max_cycles: int | None = None) -> None:
+        """按固定间隔周期运行；max_cycles 仅用于确定性的进程入口测试。"""
+        cycles = 0
+        while max_cycles is None or cycles < max_cycles:
+            self.run_once()
+            cycles += 1
+            if max_cycles is None or cycles < max_cycles:
+                self._sleep(self._interval_seconds)
+
+
 def main() -> None:
-    """执行一次安全对账；生产调度器可按固定周期调用本入口。"""
+    """运行安全对账器：--once 单轮，默认每 300 秒一轮。"""
     parser = argparse.ArgumentParser(description="Run AgentRuntime reconciliation once")
-    parser.add_argument("--once", action="store_true", help="兼容调度器显式单次调用")
-    parser.parse_args()
+    parser.add_argument("--once", action="store_true", help="仅执行一轮")
+    parser.add_argument("--interval-seconds", type=int, default=300, help="循环间隔")
+    args = parser.parse_args()
     setup_logging()
     database.connect()
-    session = database.get_session_factory()()
     try:
-        ReconciliationService(session).run_once()
+        owner_id = f"{socket.gethostname()}:{os.getpid()}"
+        runner = ReconcilerRunner(
+            database.get_session_factory(), owner_id, interval_seconds=args.interval_seconds
+        )
+        if args.once:
+            runner.run_once()
+        else:
+            runner.run_forever()
     finally:
-        session.close()
         database.close()
 
 

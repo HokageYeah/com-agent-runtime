@@ -99,6 +99,7 @@ def test_create_captures_safe_capability_snapshot_from_package_definition() -> N
         "contract_version": "1.0.0",
         "package_digest": "sha256:test",
         "business_connector_id": "couple_diary_backend",
+        "allowed_model_route_ids": [],
     }
 
 

@@ -2,14 +2,61 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
 from app.models import AgentDefinition, AgentPlan, AgentRun, RuntimeAuditRecord
+from app.schemas.agent_package import PackagePolicy
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
+
+
+def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> None:
+    """模型预算只可来自已注册 definition，不能由 create 请求伪造。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(AgentDefinition(
+        agent_id="governed-agent", version="1", runtime_type="workflow",
+        definition_json={
+            "policy": {"max_model_calls": 2, "max_model_cost": 1.5},
+            "workflow_nodes": [],
+        },
+        package_digest="sha256:test", contract_version="1", status="active",
+        status_changed_at=datetime.now(UTC), status_changed_by="test",
+        status_change_reason="fixture",
+    ))
+    session.commit()
+
+    created = AgentRunService(session).create(
+        CreateRunCommand(
+            agent_id="governed-agent", agent_version="1", business_type="memoir",
+            business_id="business", start_mode="held",
+            input={"model_policy": {"max_model_calls": 999, "max_model_cost": 999}},
+            callback_target_id="callback", business_connector_id="connector",
+        ), "caller", "tenant", "model-policy-freeze",
+    )
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == created.run_id))
+
+    assert run is not None and run.capability_snapshot_json is not None
+    assert run.capability_snapshot_json["model_policy"] == {
+        "max_model_calls": 2, "max_model_cost": 1.5,
+    }
+
+
+@pytest.mark.parametrize("policy", [
+    {"max_model_calls": True},
+    {"max_model_calls": -1},
+    {"max_model_cost": -0.01},
+    {"max_model_cost": float("nan")},
+])
+def test_package_policy_rejects_invalid_model_limits(policy: dict[str, object]) -> None:
+    """bool、负数与 NaN 不能作为可绕过的模型预算。"""
+    with pytest.raises(ValueError):
+        PackagePolicy.model_validate(policy)
 
 
 def test_held_create_then_start_writes_one_dispatch_event() -> None:

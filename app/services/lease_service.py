@@ -12,6 +12,11 @@ from app.services.admission_service import AdmissionService
 from app.services.outbox_service import OutboxService
 
 
+def _as_utc(value: datetime) -> datetime:
+    """SQLite 会丢失 timezone；持久化时间一律按 UTC 解释。"""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 class LeaseService:
     """数据库 fencing 是单写者真相；Redis 通知丢失不能影响本服务的正确性。"""
 
@@ -82,6 +87,7 @@ class LeaseService:
         即使在 reaper 接管后恢复，也不能再推进任何 Runtime 状态。
         """
         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+        now = datetime.now(UTC)
         allowed = bool(
             run
             and run.dispatch_state == "claimed"
@@ -91,6 +97,10 @@ class LeaseService:
             and run.privacy_version == context.privacy_version
             and run.authorization_version == context.authorization_version
             and run.cancel_requested_at is None
+            and run.lease_expires_at is not None
+            and _as_utc(run.lease_expires_at) > now
+            and _as_utc(context.lease_expires_at) > now
+            and _as_utc(run.run_deadline_at) > now
         )
         if not allowed:
             logging.warning("Worker 写入被 fencing/状态边界拒绝 run_id=%s", run_id)
@@ -153,7 +163,7 @@ class LeaseService:
         )
         return True
 
-    def reap_expired(self) -> list[str]:
+    def reap_expired(self, *, commit: bool = True) -> list[str]:
         """回收失效 lease 并回到 queued；旧 fencing token 之后不可再写入。"""
         now = datetime.now(UTC)
         recovered: list[str] = []
@@ -183,5 +193,6 @@ class LeaseService:
             OutboxService(self._session).append_run_dispatch(run.run_id, "lease_reaped")
             recovered.append(run.run_id)
             logging.warning("reaper 回收过期 Worker lease run_id=%s", run.run_id)
-        self._session.commit()
+        if commit:
+            self._session.commit()
         return recovered

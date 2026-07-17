@@ -5,7 +5,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -249,6 +249,10 @@ class Settings(BaseSettings):
     RUNTIME_ADMISSION_MAX_HELD: int = 100
     RUNTIME_ADMISSION_MAX_QUEUED: int = 500
     RUNTIME_ADMISSION_MAX_RUNNING: int = 50
+    # 模型路由只从部署配置读取；业务请求不得自带 endpoint、价格或限流参数。
+    MODEL_ROUTES_JSON: str = "[]"
+    RUNTIME_REDIS_URL: str = ""
+    MEMOIR_MODEL_NODE_ROUTES_JSON: str = "{}"
     MEMORY_SNAPSHOT_FERNET_KEY: str = "UIdCWOsJY0GWrMpXlM444_JDKJC-zFwylDAJCymPvPg="
     MEMORY_TOOL_TRUSTED_RUNTIMES_JSON: str = '{"agent-runtime":{"keys":{"dev":"runtime-tool-development-secret"}}}'
 
@@ -258,6 +262,21 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    @field_validator("MODEL_ROUTES_JSON")
+    @classmethod
+    def validate_model_routes_json(cls, value: str) -> str:
+        """在配置加载时拒绝无效或重复的模型路由。"""
+        from app.runtime.model_gateway import ModelRouteRegistry
+
+        try:
+            routes = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MODEL_ROUTES_JSON 必须是 JSON 数组") from exc
+        if not isinstance(routes, list) or not all(isinstance(item, dict) for item in routes):
+            raise ValueError("MODEL_ROUTES_JSON 必须是对象数组")
+        ModelRouteRegistry.from_config(routes)
+        return value
 
     @property
     def resolved_cors_origins(self) -> list[str]:
@@ -367,6 +386,38 @@ class Settings(BaseSettings):
     @property
     def admission_max_running(self) -> int:
         return self.RUNTIME_ADMISSION_MAX_RUNNING
+
+    @property
+    def model_routes(self) -> list[object]:
+        """解析并校验部署预注册的模型路由。
+
+        延迟导入避免基础配置在应用启动时引入 HTTP/Redis 运行时依赖。
+        """
+        from app.runtime.model_gateway import ModelRoute, ModelRouteRegistry
+
+        try:
+            routes = json.loads(self.MODEL_ROUTES_JSON)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MODEL_ROUTES_JSON 必须是 JSON 数组") from exc
+        if not isinstance(routes, list) or not all(isinstance(item, dict) for item in routes):
+            raise ValueError("MODEL_ROUTES_JSON 必须是对象数组")
+        model_routes = [ModelRoute.from_mapping(item) for item in routes]
+        ModelRouteRegistry(model_routes)
+        return model_routes
+
+    @property
+    def memoir_model_node_routes(self) -> dict[str, str]:
+        """返回固定 Memoir 节点到可信 route ID 的部署映射。"""
+        try:
+            routes = json.loads(self.MEMOIR_MODEL_NODE_ROUTES_JSON)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MEMOIR_MODEL_NODE_ROUTES_JSON 必须是 JSON 对象") from exc
+        if not isinstance(routes, dict) or not all(
+            isinstance(node_id, str) and isinstance(route_id, str) and route_id
+            for node_id, route_id in routes.items()
+        ):
+            raise ValueError("MEMOIR_MODEL_NODE_ROUTES_JSON 必须是字符串映射")
+        return routes
 
 
 settings = Settings()

@@ -134,7 +134,11 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
         ConnectorRegistry(request.app.state.settings.business_connectors).require_enabled(
             command.business_connector_id
         )
-        result = AgentRunService(session, _admission_limits(request)).create(
+        result = AgentRunService(
+            session,
+            _admission_limits(request),
+            trusted_model_route_ids=(route.route_id for route in request.app.state.settings.model_routes),
+        ).create(
             command, caller, tenant, request.headers["Idempotency-Key"]
         )
         IdempotencyService(session).store(

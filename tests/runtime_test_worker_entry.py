@@ -26,7 +26,7 @@ from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.services.agent_run_service import AgentRunService
 from app.services.reconciliation_service import ReconciliationService
 from app.services.tool_call_audit_service import ToolCallAuditService
-from app.worker import WorkerLoop
+from app.worker import WorkerLoop, configured_model_gateway
 
 
 class FakeExecutor:
@@ -49,6 +49,109 @@ class FakeExecutor:
             status="succeeded",
             execution_attempt=lease_context.execution_attempt,
         )
+
+
+def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> None:
+    class FakeRedis:
+        @classmethod
+        def from_url(cls, url: str) -> FakeRedis:
+            assert url == "redis://trusted"
+            return cls()
+
+        def eval(self, *args: object) -> object:
+            return ["acquired", 0]
+
+    import app.worker as worker
+
+    monkeypatch.setattr(worker, "Redis", FakeRedis)
+    monkeypatch.setattr(
+        worker.settings,
+        "MODEL_ROUTES_JSON",
+        '[{"route_id":"memoir","provider":"provider","model":"model",'
+        '"endpoint":"https://model.example.test/v1","rate_limit_key":"memoir",'
+        '"max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,'
+        '"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens",'
+        '"input_price":0,"output_price":0}]',
+    )
+    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
+    monkeypatch.setattr(
+        worker.settings,
+        "MEMOIR_MODEL_NODE_ROUTES_JSON",
+        '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}',
+        raising=False,
+    )
+
+    gateway = configured_model_gateway(object())
+
+    assert gateway is not None
+    assert gateway._route_ids == {
+        "extract_highlights": "memoir",
+        "plan_chapters": "memoir",
+        "generate_scenes": "memoir",
+    }
+
+
+def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> None:
+    class FakeRedis:
+        @classmethod
+        def from_url(cls, url: str) -> FakeRedis:
+            return cls()
+
+        def eval(self, *args: object) -> object:
+            from tests.test_provider_traffic_controller import FakeRedis as TrafficRedis
+
+            if not hasattr(self, "delegate"):
+                self.delegate = TrafficRedis()
+            return self.delegate.eval(*args)
+
+    class RecordingProvider:
+        calls = 0
+
+        def __init__(self, client: object) -> None:
+            pass
+
+        def call(self, *args: object, **kwargs: object) -> object:
+            type(self).calls += 1
+            return {"ok": True}
+
+    import app.worker as worker
+
+    monkeypatch.setattr(worker, "Redis", FakeRedis)
+    monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
+    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0}]')
+    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
+    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(run_id="guarded-run", agent_id="memoir_agent", agent_version="1", package_digest="digest", contract_version="1", business_type="memoir", business_id="business", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(minutes=1), capability_snapshot_json={"allowed_model_route_ids": ["memoir"]}, run_deadline_at=now + timedelta(days=1)))
+    session.add(AgentStep(step_id="guarded-step", run_id="guarded-run", step_name="extract_highlights", step_type="model", status="running", execution_attempt=1, step_attempt=1, input_summary={"estimated_input_tokens": 1}))
+    session.commit()
+    lease = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(minutes=1), privacy_version=1, authorization_version=1)
+
+    draining = configured_model_gateway(session, is_draining=lambda: True)
+    assert draining is not None
+    draining.bind_lease(lease)
+    assert draining.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
+    assert RecordingProvider.calls == 0
+
+    active = configured_model_gateway(session, is_draining=lambda: False)
+    assert active is not None
+    active.bind_lease(lease)
+    assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "succeeded"
+    assert RecordingProvider.calls == 1
+
+
+def test_configured_model_gateway_is_disabled_for_incomplete_settings(monkeypatch) -> None:
+    import app.worker as worker
+
+    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", "[]")
+    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "", raising=False)
+    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", "{}", raising=False)
+
+    assert configured_model_gateway(object()) is None
 
 
 def test_worker_once_dispatches_and_claims_run_with_injected_executor() -> None:
@@ -94,6 +197,64 @@ def test_worker_once_dispatches_and_claims_run_with_injected_executor() -> None:
 
     assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
     assert executor.run_ids == ["worker-run"]
+
+
+def test_worker_passes_live_draining_callable_to_keyword_executor_factory() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    session.add(
+        AgentRun(
+            run_id="worker-draining-factory-run",
+            agent_id="memoir_agent",
+            agent_version="1.0.0",
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            business_type="couple_memory",
+            business_id="archive",
+            status="pending",
+            dispatch_state="queued",
+            input_json={},
+            authorization_version=1,
+            caller_id="caller",
+            tenant_id="tenant",
+            create_idempotency_key="key",
+            callback_target_id="callback",
+            business_connector_id="connector",
+            trace_id="trace",
+            run_deadline_at=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.add(
+        RuntimeOutboxEvent(
+            outbox_id="worker-draining-factory-dispatch",
+            event_type="run_dispatch",
+            aggregate_type="agent_run",
+            aggregate_id="worker-draining-factory-run",
+            payload_json={"run_id": "worker-draining-factory-run"},
+            status="pending",
+            retention_until=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.commit()
+    state = {"draining": False}
+    received: list[object] = []
+    executor = FakeExecutor()
+
+    def is_draining() -> bool:
+        return state["draining"]
+
+    def executor_factory(worker_session, *, is_draining):
+        received.append(is_draining)
+        return executor
+
+    assert WorkerLoop(
+        factory, executor_factory, worker_id="worker-1", is_draining=is_draining
+    ).run_once() == 1
+    assert received == [is_draining]
+    state["draining"] = True
+    assert received[0]() is True
 
 
 def test_worker_resumes_reconciled_waiting_human_run() -> None:

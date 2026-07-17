@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -71,6 +72,32 @@ class UiTraceConfig(PackageSchema):
 class PackagePolicy(PackageSchema):
     waiting_human_timeout_action: Literal["fallback", "failed", "cancelled"] = "failed"
     waiting_human_fallback_node: str | None = None
+    # 缺失表示不设额度，不能被解释为零额度。
+    max_model_calls: int | None = None
+    max_model_cost: float | None = None
+
+    @field_validator("max_model_calls", mode="before")
+    @classmethod
+    def validate_max_model_calls(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("max_model_calls 必须为非负整数")
+        return value
+
+    @field_validator("max_model_cost", mode="before")
+    @classmethod
+    def validate_max_model_cost(cls, value: object) -> object:
+        if value is None:
+            return value
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("max_model_cost 必须为非负有限数")
+        return value
 
     @model_validator(mode="after")
     def fallback_requires_node(self) -> PackagePolicy:

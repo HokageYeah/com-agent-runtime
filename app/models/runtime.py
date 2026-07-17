@@ -159,6 +159,19 @@ class AdmissionBucket(Base, TimestampMixin):
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
 
 
+class RuntimeReconciliationLease(Base, TimestampMixin):
+    """对账扫描的单行租约；不保存任务正文或扫描结果。"""
+
+    __tablename__ = "runtime_reconciliation_leases"
+
+    lease_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True, nullable=False
+    )
+    fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+
+
 class AgentPlan(Base, TimestampMixin):
     __tablename__ = "agent_plans"
     # 统一使用 INTEGER 自增主键，保证 SQLite 联调与生产 ORM 行为一致。

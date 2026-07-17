@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 from collections.abc import Callable
 from time import sleep
+
+try:
+    from redis import Redis
+except ImportError:  # 部署未安装 Redis 客户端时模型能力必须显式关闭。
+    Redis = None  # type: ignore[assignment,misc]
 
 import httpx
 from sqlalchemy import select
@@ -22,12 +28,23 @@ from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext, RunExecutor
+from app.runtime.memoir_model_gateway import MemoirModelGatewayAdapter
+from app.runtime.model_gateway import (
+    HttpProviderAdapter,
+    ModelCallContext,
+    ModelCallGuard,
+    ModelGateway,
+    ModelRouteRegistry,
+    ProviderTrafficController,
+)
+from app.runtime.policy_engine import PolicyEngine
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.services.callback_delivery_service import (
     CallbackDeliveryService,
     CallbackSender,
 )
 from app.services.lease_service import LeaseService
+from app.services.model_usage_service import ModelUsageService
 from app.services.run_queue_service import RunQueueService
 from app.services.tool_call_audit_service import ToolCallAuditService
 
@@ -74,9 +91,17 @@ class WorkerLoop:
         for run_id in run_ids:
             session = self._session_factory()
             try:
+                executor = self._executor
+                if callable(executor):
+                    parameters = inspect.signature(executor).parameters
+                    executor = (
+                        executor(session, is_draining=self._is_draining)
+                        if "is_draining" in parameters
+                        else executor(session)
+                    )
                 queue = RunQueueService(
                     session,
-                    self._executor(session) if callable(self._executor) else self._executor,
+                    executor,
                     self._worker_id,
                     is_draining=self._is_draining,
                 )
@@ -109,34 +134,87 @@ class BootstrapExecutor:
         return self.run(run_id, lease_context)
 
 
-def configured_executor(session: Session) -> RunExecutor:
+_MEMOIR_MODEL_NODES = frozenset(
+    {"extract_highlights", "plan_chapters", "generate_scenes"}
+)
+
+
+def configured_model_gateway(
+    session: Session, *, is_draining: Callable[[], bool] = lambda: False,
+) -> MemoirModelGatewayAdapter | None:
+    """只从受信任 Settings 装配模型边界；任何缺项都禁用模型能力。"""
+    try:
+        routes = settings.model_routes
+        node_routes = settings.memoir_model_node_routes
+    except ValueError:
+        logging.exception("Memoir Worker 模型配置无效，使用模板 fallback")
+        return None
+    if (
+        Redis is None
+        or not isinstance(settings.RUNTIME_REDIS_URL, str)
+        or not settings.RUNTIME_REDIS_URL
+        or set(node_routes) != _MEMOIR_MODEL_NODES
+        or any(route_id not in {route.route_id for route in routes} for route_id in node_routes.values())
+    ):
+        logging.warning("Memoir Worker 模型配置不完整，使用模板 fallback")
+        return None
+    try:
+        redis = Redis.from_url(settings.RUNTIME_REDIS_URL)
+    except Exception:
+        logging.exception("Memoir Worker Redis 初始化失败，使用模板 fallback")
+        return None
+    class _WorkerDrainingGuard(ModelCallGuard):
+        """每次检查实时读取 Worker 状态，不能把状态写入 Run。"""
+
+        def permits_new_call(self, context: ModelCallContext) -> bool:
+            return not is_draining()
+
+    gateway = ModelGateway(
+        ModelRouteRegistry(routes),
+        ProviderTrafficController(redis),
+        ModelUsageService(session),
+        LeaseService(session),
+        HttpProviderAdapter(httpx.Client()),
+        PolicyEngine(session),
+        call_guard=_WorkerDrainingGuard(),
+    )
+    return MemoirModelGatewayAdapter(session, gateway, node_routes)
+
+
+def configured_executor(
+    session: Session, *, is_draining: Callable[[], bool] = lambda: False,
+) -> RunExecutor:
     """按 Worker 当前事务装配 Memoir 执行器，配置不完整时安全退回占位器。"""
     class _Executor:
-        def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+        @staticmethod
+        def _memoir_executor(run_id: str, lease_context: LeaseContext) -> WorkflowExecutor | None:
             agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
             if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != ("memoir_agent", "1.0.0"):
-                return BootstrapExecutor().run(run_id, lease_context)
+                return None
             config = settings.business_connectors.get(agent_run.business_connector_id, {})
             required = ("base_url", "runtime_id", "key_id", "secret")
             if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
                 logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
-                return BootstrapExecutor().run(run_id, lease_context)
+                return None
             connector = BusinessConnector(**{key: config[key] for key in required})
-            gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
-            return WorkflowExecutor(session, MemoirNodeRunner(gateway, ToolCallAuditService(session)), CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())), ArtifactStore(session)).run(run_id, lease_context)
+            tool_gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
+            model_gateway = configured_model_gateway(session, is_draining=is_draining)
+            if model_gateway is not None:
+                model_gateway.bind_lease(lease_context)
+            return WorkflowExecutor(
+                session,
+                MemoirNodeRunner(tool_gateway, ToolCallAuditService(session), model_gateway),
+                CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())),
+                ArtifactStore(session),
+            )
+
+        def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+            executor = self._memoir_executor(run_id, lease_context)
+            return BootstrapExecutor().run(run_id, lease_context) if executor is None else executor.run(run_id, lease_context)
 
         def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
-            agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
-            if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != ("memoir_agent", "1.0.0"):
-                return BootstrapExecutor().resume(run_id, lease_context)
-            config = settings.business_connectors.get(agent_run.business_connector_id, {})
-            required = ("base_url", "runtime_id", "key_id", "secret")
-            if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
-                logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
-                return BootstrapExecutor().resume(run_id, lease_context)
-            connector = BusinessConnector(**{key: config[key] for key in required})
-            gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
-            return WorkflowExecutor(session, MemoirNodeRunner(gateway, ToolCallAuditService(session)), CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())), ArtifactStore(session)).resume(run_id, lease_context)
+            executor = self._memoir_executor(run_id, lease_context)
+            return BootstrapExecutor().resume(run_id, lease_context) if executor is None else executor.resume(run_id, lease_context)
     return _Executor()
 
 

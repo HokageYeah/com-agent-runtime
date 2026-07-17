@@ -409,6 +409,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] draining 在执行器返回的非终态安全边界停止续租，由 reaper 以原子 `claimed -> queued` 迁移接管，Admission 占用不会提前释放。
 - [✅] cancel/retry 互斥；实例进入 draining 后停止新认领、readiness 503、liveness 成功；安全返回边界会让 lease 到期，Admission 占用由 reaper 的 `claimed -> queued` 事务迁移，接管时只创建一个新 execution attempt。
 - [ ] 在途 Worker 宽限期内 heartbeat、checkpoint 落库后停止写入，以及宽限期耗尽时停止新的模型/工具调用；依赖 Task 6 的真实执行器、CheckpointStore、ModelGateway 与 ToolGateway。
+- [✅] Worker draining 模型调用边界：运行期 guard 在 permit、usage 与 Provider HTTP 前/后复核，draining 时拒绝新的模型调用并安全释放已获资源；工具调用与 checkpoint 停写边界仍按上项推进。
 
 **Checkpoint:** 长任务脱离 HTTP 请求执行，Redis 丢失/重复不影响正确性，同一 run 只有有效 fencing token 的 Worker 可以写入。
 
@@ -524,7 +525,7 @@ Runtime 侧：
 - [ ] 实现文件化 PromptRegistry。
 - [ ] PromptRegistry 校验 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，节点精确引用版本且不自动回退 latest，模型调用记录 prompt id/version。
 - [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate`、Pydantic structured parser 和 ContextManager/usage/安全 middleware hook；第一版不启用 createAgent 动态工具选择。
-- [ ] 实现 LiteLLM / Provider Adapter。
+- [✅] 实现受信任 HTTP Provider Adapter 与 ModelGateway：Redis 共享 permit、route allowlist、fail-closed、429 共享冷却、usage 安全结算；LiteLLM 适配仍按后续 Provider 扩展处理。
 - [ ] 固化第一版 `model_policy.yaml`，包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 映射。
 - [ ] 每个可信 route 配置 `rate_limit_key/max_concurrency/rpm/tpm/request_timeout_seconds/permit_ttl_seconds/settle_margin_seconds/circuit_failure_threshold/circuit_open_seconds/pricing_config_version/cost_unit/input_unit_cost/output_unit_cost`；rate_limit_key 由 provider account、model 和部署分区生成，不含 key，价格与流量字段均不接受业务输入覆盖。
 - [ ] route 注册强制 `permit_ttl_seconds >= request_timeout_seconds + settle_margin_seconds`，单次 HTTP timeout 不超过 acquire deadline；配置非法时禁用 route，避免 permit 已释放而请求仍占用上游并发。
@@ -535,14 +536,14 @@ Runtime 侧：
 - [ ] 实现 ContextManager 的 token 预算、素材分块、工具结果摘要压缩和敏感字段二次扫描。
 - [ ] 隔离 trusted instructions/untrusted content，并对 material/source ID、数字、Action 和工具参数做确定性语义校验。
 - [ ] 实现结构化输出、JSON repair、schema 校验。
-- [ ] 实现 `ProviderTrafficController.acquire/mark_started/settle`；Redis 原子维护共享并发、RPM/TPM、blocked_until、熔断和 `acquired -> started -> settled` permit 状态，mark/settle 采用 CAS 且重复调用不重复增减计数。
+- [✅] 实现 `ProviderTrafficController.acquire/mark_started/settle` 与 route 级连续失败熔断；Redis 原子维护共享并发、RPM/TPM、blocked_until、circuit open 与 `acquired -> started -> settled` permit，重复调用不重复增减计数；半开探测仍待后续策略扩展。
 - [ ] 每次候选请求单独 acquire/finally settle；只有 acquired permit 可按 aborted_before_send 原子释放并发槽、回滚 RPM/TPM 预留，started permit 无 usage 或结果未知时保留预留到窗口过期。acquired TTL 回收时回滚未发送预留，started TTL 回收只释放并发槽；重试等待不持有 permit，上游 429 的 Retry-After 写入共享冷却，fallback route 单独取 permit。
 - [ ] permit 等待受节点 timeout、剩余 active budget 和 run deadline 的最小值约束并计入 active elapsed；共享控制不可用时进入显式 provider fallback、模板 fallback 或安全失败。
 - [ ] Executor 只从有效 LeaseContext 构造 `ModelCallContext(run/step/execution attempt/lease owner/fencing/privacy/authorization/deadline)`；prompt、业务 input、AgentState 和模型输出不能覆盖这些字段。
 - [ ] acquire 后再次校验 lease/fencing、cancel、package、privacy、authorization、route/capability 和 deadline；等待期间失效时释放 permit，不写 usage、不请求 provider。
-- [ ] 实现 `ModelUsageService` 与 `AgentModelUsage` 生命周期：二次校验后先提交 running usage 和 token/成本预留，提交后、真正发送 HTTP 前再次执行发送边界校验；失效时把既有 usage/acquired permit 结算为 aborted_before_send。复核通过后也要先成功 mark_started 再请求 provider；每次 retry/fallback 独立记录候选 model attempt，返回后分别 settle permit 和 usage。
+- [✅] 实现 `ModelUsageService` 与 `AgentModelUsage` 生命周期：权威 Context、发送前/后边界校验、running/started/aborted/unknown 条件结算、实际 token 成本与 permit 回收；重试策略扩展仍待后续节点策略接入。
 - [ ] 响应后执行同一安全边界校验；上下文已失效时丢弃模型输出，只允许幂等结算原 usage 行的无内容 token、成本、provider request ID 和状态，不能推进 run/step/checkpoint/artifact。
-- [ ] 过期 running usage 转为 `outcome_unknown` 并继续按预留成本计量；PolicyEngine 计算 `max_model_calls/max_estimated_cost` 时，aborted_before_send 不计，已观察 usage 用实际估算成本，未决/未知记录用预留成本，同一行不重复相加。
+- [✅] 对账将过期 running usage 条件转为 `outcome_unknown` 并保留预留成本；PolicyEngine 已按冻结 package policy 聚合模型调用次数与保守成本，在 permit 前以条件预留拒绝超限；active/held/queue/approval/wall clock 与工具预算仍待实现。
 - [ ] `thinking_summary` 只记录能力开关、预算和归一化参数，不保存隐藏推理文本。
 - [ ] 实现 Evaluator、Guardrails、PolicyEngine。
 - [ ] 实现 AdmissionController：AdmissionBucket 管理 global/caller/tenant/agent 的 held/queued/running；实际路由确定后由 ProviderTrafficController 管理 provider/model 流量。PolicyEngine 负责 active/held/queue/approval/wall clock 预算，不重复实现限流状态。
@@ -619,8 +620,8 @@ Runtime 侧：
 - [ ] Runtime 对账比较 AdmissionBucket 与 AgentRun.dispatch_state 的 global/caller/tenant/agent 聚合占用；漂移时按固定锁序和 bucket version 条件修复，保证计数非负并记录安全指标。
 - [✅] held/queued/waiting_human 超时与 package 撤销路径复用 AdmissionService；claimed run 只写取消请求或由 lease reaper 安全接管，条件写失败不产生 Admission/Outbox 副作用。authorization 主动扫描仍待权威来源。
 - [✅] run_dispatch dead letter 仅对仍可终结的 queued Run 条件置 `failed(DISPATCH_FAILED)`，同事务释放 Admission；callback dead letter 保持原事件重放和业务主动查询恢复。
-- [ ] 对账任务默认每 5 分钟执行一次；同一对象连续 3 次修复失败后升级告警。
-- [ ] 多实例对账使用数据库/分布式 lease 或按 `run_id` 分片，同一对象同一时间只允许一个修复者。
+- [✅] 对账任务默认每 5 分钟执行，数据库 fencing lease 保证多实例互斥；连续 3 次修复失败输出安全告警计数，外部告警平台仍待接入。
+- [✅] 多实例对账使用数据库 fencing lease；失租实例回滚未提交扫描副作用，接管者安全继续。
 - [✅] 提供独立 reconciler 进程入口；P0 的纯规则判定、事务修复和安全报告聚合已归入 service，完整调度/lease 分层仍随原扫描范围推进。
 - [ ] 每个扫描批次输出安全 `ReconciliationReport` 结构化日志和指标，固定包含扫描、修复、失败、告警计数、动作类型与标准错误码，不携带业务正文或 Runtime 私密 payload。
 - [ ] 情侣日记后端保留按 `run_id` 查询 Runtime 的兜底能力，使用 `status_version/last_event_seq` 修复 callback 摘要，并以 `privacy_state/privacy_version` 确认 purge 进度。

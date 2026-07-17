@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from app.models import (
     RuntimeOutboxEvent,
 )
 from app.runtime.planner import StaticPlanner
+from app.schemas.agent_package import PackagePolicy
 from app.schemas.agent_run import CreateRunCommand, RunDetail, RunSummary, StepSummary
 from app.schemas.audit import RuntimeAuditEvent
 from app.services.admission_service import AdmissionLimits, AdmissionService
@@ -31,12 +33,21 @@ class AgentRunService:
     """held/start 生命周期服务；HTTP 层只负责认证与 DTO 转换。"""
 
     def __init__(
-        self, session: Session, admission_limits: AdmissionLimits | None = None
+        self,
+        session: Session,
+        admission_limits: AdmissionLimits | None = None,
+        *,
+        trusted_model_route_ids: Iterable[str] = (),
     ) -> None:
         self._session = session
         self._outbox = OutboxService(session)
         self._admission = AdmissionService(session, admission_limits)
         self._audit = AuditService(session=session)
+        # 只接受应用启动时已验证的服务端 route registry；请求 command/input
+        # 绝不能参与 capability 冻结或扩大权限。
+        self._trusted_model_route_ids = tuple(
+            sorted({route_id for route_id in trusted_model_route_ids if isinstance(route_id, str) and route_id})
+        )
 
     def create(
         self,
@@ -61,6 +72,20 @@ class AgentRunService:
             raise AgentRunServiceError("business_type 未获 AgentPackage 授权")
         run_id = str(uuid4())
         now = datetime.now(UTC)
+        # definition 是注册后的权威来源；请求 input 不得扩大或伪造模型额度。
+        definition_json = definition.definition_json
+        definition_policy = (
+            definition_json.get("policy", {}) if isinstance(definition_json, dict) else {}
+        )
+        policy = PackagePolicy.model_validate(definition_policy)
+        model_policy = {
+            key: value
+            for key, value in {
+                "max_model_calls": policy.max_model_calls,
+                "max_model_cost": policy.max_model_cost,
+            }.items()
+            if value is not None
+        }
         run = AgentRun(
             run_id=run_id,
             agent_id=command.agent_id,
@@ -79,6 +104,8 @@ class AgentRunService:
                 "contract_version": definition.contract_version,
                 "package_digest": definition.package_digest,
                 "business_connector_id": command.business_connector_id,
+                "allowed_model_route_ids": list(self._trusted_model_route_ids),
+                "model_policy": model_policy,
             },
             authorization_version=1,
             caller_id=caller_id,
