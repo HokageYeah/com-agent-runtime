@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -291,26 +291,43 @@ class AgentRunService:
             or run.status_version != expected_version
         ):
             raise AgentRunServiceError("人工审批状态版本冲突")
+        dispatch_reason: str | None = None
+        terminal_reject = False
         if decision == "approve":
-            run.dispatch_state = "queued"
-            self._admission.transition_run(run, "finished", "queued")
-            self._outbox.append_run_dispatch(run_id, "human_approve")
+            # 正常 approve 只能按 checkpoint 已完成节点继续；不能把等待时预置的
+            # fallback 目标当作恢复入口。
+            values = {"error_code": None, "dispatch_state": "queued"}
+            dispatch_reason = "human_approve"
         else:
-            definition = self._session.scalar(
-                select(AgentDefinition).where(
-                    AgentDefinition.agent_id == run.agent_id,
-                    AgentDefinition.version == run.agent_version,
-                )
-            )
-            policy = definition.definition_json.get("policy", {}) if definition else {}
+            plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run_id))
+            policy = plan.fallback_policy_json if plan is not None else {}
             if isinstance(policy, dict) and policy.get("reject_action") == "fallback":
-                run.dispatch_state = "queued"
-                self._admission.transition_run(run, "finished", "queued")
-                self._outbox.append_run_dispatch(run_id, "human_reject_fallback")
+                values = {
+                    "error_code": "WAITING_HUMAN_FALLBACK",
+                    "dispatch_state": "queued",
+                }
+                dispatch_reason = "human_reject_fallback"
             else:
-                run.status, run.dispatch_state = "failed", "finished"
-        run.status_version += 1
-        if decision == "reject" and run.dispatch_state == "finished":
+                values = {"status": "failed", "dispatch_state": "finished"}
+                terminal_reject = True
+        approved = self._session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.run_id == run_id,
+                AgentRun.status == "waiting_human",
+                AgentRun.dispatch_state == "finished",
+                AgentRun.status_version == expected_version,
+            )
+            .execution_options(synchronize_session=False)
+            .values(status_version=AgentRun.status_version + 1, **values)
+        )
+        if approved.rowcount != 1:  # type: ignore[attr-defined]
+            raise AgentRunServiceError("人工审批状态版本冲突")
+        self._session.refresh(run)
+        if dispatch_reason is not None:
+            self._admission.transition_run(run, "finished", "queued")
+            self._outbox.append_run_dispatch(run_id, dispatch_reason)
+        elif terminal_reject:
             self._outbox.append_callback(run, "failed")
         self._append_audit(
             run,

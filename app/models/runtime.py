@@ -196,7 +196,8 @@ class AgentToolCall(Base):
     """每次物理工具调用均保留审计记录；重试复用稳定 logical key。"""
 
     __tablename__ = "agent_tool_calls"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # SQLite 测试同样需要 INTEGER PRIMARY KEY 自动生成 rowid。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tool_call_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     step_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
@@ -264,7 +265,8 @@ class AgentCheckpoint(Base):
 
 class AgentArtifact(Base, TimestampMixin):
     __tablename__ = "agent_artifacts"
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # SQLite 仅对 INTEGER PRIMARY KEY 生成 rowid；根工程测试与生产共用该模型。
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     artifact_id: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     run_id: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
     artifact_type: Mapped[str] = mapped_column(String(80), nullable=False)

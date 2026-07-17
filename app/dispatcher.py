@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ class Dispatcher:
         *,
         owner: str = "runtime-dispatcher",
         notify_run: Callable[[str], None] | None = None,
+        callback_sender: Callable[[RuntimeOutboxEvent], None] | None = None,
         lease_seconds: int = 30,
     ) -> None:
         self._session = session
@@ -30,6 +32,9 @@ class Dispatcher:
         self._handlers: dict[str, Callable[[RuntimeOutboxEvent], None]] = {
             "run_dispatch": self._deliver_run_dispatch
         }
+        # callback 只有在投递器已完成目标配置时才启用，历史 pending 事件会保留等待。
+        if callback_sender is not None:
+            self._handlers["callback"] = callback_sender
 
     @property
     def enabled_event_types(self) -> set[str]:
@@ -56,13 +61,17 @@ class Dispatcher:
                 continue
             try:
                 handler(event)
-            except Exception:  # noqa: BLE001 - dispatcher 必须把失败安全留在 outbox。
-                event.status = "pending"
+            except Exception as exc:  # noqa: BLE001 - dispatcher 必须把失败安全留在 outbox。
                 event.lease_owner = None
                 event.lease_expires_at = None
                 event.attempt_count += 1
-                event.next_attempt_at = now + timedelta(seconds=min(60, 2**event.attempt_count))
-                event.last_error_code = "DISPATCH_DELIVERY_FAILED"
+                event.last_error_code = "CALLBACK_DELIVERY_FAILED" if event.event_type == "callback" else "DISPATCH_DELIVERY_FAILED"
+                if event.event_type == "callback" and event.attempt_count >= 5:
+                    # callback 死信不回写 Run；业务侧可由原 event_id 重放或主动查询恢复。
+                    event.status, event.next_attempt_at = "dead_letter", None
+                else:
+                    event.status = "pending"
+                    event.next_attempt_at = now + timedelta(seconds=self._retry_delay_seconds(exc, event.attempt_count))
                 logging.exception("outbox 投递失败 outbox_id=%s", event.outbox_id)
             else:
                 event.status = "delivered"
@@ -106,6 +115,15 @@ class Dispatcher:
             run_id,
         )
         self._notify_run(run_id)
+
+    @staticmethod
+    def _retry_delay_seconds(exc: Exception, attempt_count: int) -> int:
+        """优先尊重上游 Retry-After，其他错误采用有上限的指数退避。"""
+        if isinstance(exc, httpx.HTTPStatusError):
+            retry_after = exc.response.headers.get("Retry-After")
+            if retry_after is not None and retry_after.isdigit():
+                return min(300, max(1, int(retry_after)))
+        return min(60, 2**attempt_count)
 
     @staticmethod
     def _log_run_notification(run_id: str) -> None:

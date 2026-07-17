@@ -184,6 +184,33 @@ def test_direct_cancel_finishes_run_releases_admission_and_writes_callback() -> 
     assert all(bucket.held_count == 0 for bucket in session.scalars(select(AdmissionBucket)))
 
 
+def test_terminal_callback_uses_safe_contract_envelope_and_registered_target() -> None:
+    """终态 callback 只携带安全状态摘要，并固定使用 Run 创建时的 target。"""
+    session = _session()
+    created = AgentRunService(session).create(
+        _command("held"), "couple-diary", "tenant-1", "create-callback-envelope"
+    )
+    session.commit()
+
+    AgentRunService(session).cancel(created.run_id, "couple-diary")
+    session.commit()
+
+    callback = session.scalar(select(CallbackEvent).where(CallbackEvent.run_id == created.run_id))
+    outbox = session.scalar(select(RuntimeOutboxEvent).where(RuntimeOutboxEvent.event_type == "callback"))
+    assert callback is not None and outbox is not None
+    assert callback.event_type == "run_cancelled"
+    assert callback.payload_json == {
+        "event": "run_cancelled", "event_id": callback.event_id,
+        "event_seq": 1, "status_version": 2, "run_id": created.run_id,
+        "agent_id": "memoir_agent", "business_id": "archive_1",
+        "status": "cancelled", "error": None, "public_trace": [],
+    }
+    assert outbox.payload_json == {
+        "event_id": callback.event_id, "event_type": "run_cancelled",
+        "target_id": "memory_callback",
+    }
+
+
 def test_purge_completion_removes_private_input_and_blocks_retry() -> None:
     session = _session()
     created = AgentRunService(session).create(

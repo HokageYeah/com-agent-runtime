@@ -416,15 +416,15 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 6、Task 10。
 
-> 阶段完成基础（不新增计划任务）：已实现可注入 mock `WorkflowExecutor`，可按静态 AgentPlan 写 `AgentStep.running/succeeded` 安全摘要；同时提供独立 `CheckpointStore`，以 Fernet 认证加密完整恢复状态，写入仅含节点进度的安全摘要、TTL、privacy/fencing 校验及脱敏持久审计。执行器与加密恢复状态的正式注入仍待后续节点/密钥配置一并完成。原有 Task 6 条目仍按完整验收语义逐项标记。
+> 阶段完成基础（不新增计划任务）：已实现可注入 mock `WorkflowExecutor`，可按静态 AgentPlan 写 `AgentStep.running/succeeded` 安全摘要；节点完成后通过 `CheckpointStore` 以 Fernet 认证加密完整恢复状态，并写入仅含节点进度的安全摘要、TTL、privacy/fencing 校验及脱敏持久审计。执行器可从同一加密 checkpoint 恢复已完成节点；同时通过 `ArtifactStore` 持久化仅含节点名、结果字段名、digest 与业务资源引用的安全 Artifact。真实 Tool/Model 节点 Runner、生产密钥注入与 Worker 装配仍待后续任务完成，避免当前安全 mock 产生业务假成功。原有 Task 6 条目仍按完整验收语义逐项标记。
 - [ ] 加载受信任 `workflow.graph.py` 并从导出 manifest 生成 AgentPlan。
-- [ ] 执行每个节点时写 `AgentStep`。
-- [ ] 每个节点完成后写 checkpoint。
-- [ ] 通过 ArtifactStore 保存摘要、digest 和业务资源引用；临时私密 payload 受 fencing/privacy version、TTL 和 purge 联动约束。
-- [ ] 支持从 checkpoint resume。
-- [ ] 支持 fallback 节点。
-- [ ] `human_review` 决策先持久化恢复 checkpoint；成功后 Worker 原子设置 `waiting_expires_at`、收敛 `status=waiting_human/dispatch_state=finished`、释放 lease 和 Admission，并创建 callback outbox。超时按 package 的 `waiting_human_timeout_action` 条件恢复或终止，迟到审批因 `status_version` 不匹配而失败。
-- [ ] 每个节点前校验 fencing、cancel、package、privacy 和 authorization version。
+- [✅] 执行每个节点时写 `AgentStep`。
+- [✅] 每个节点完成后写加密 checkpoint。
+- [✅] 通过 ArtifactStore 保存摘要、digest 和业务资源引用；临时私密 payload 受 fencing/privacy version、TTL 和 purge 联动约束。
+- [✅] 支持从 checkpoint resume。
+- [✅] 支持冻结 Package 的确定性 fallback 节点：正常 approve 从 checkpoint 线性继续，reject/timeout fallback 才跳转；无效目标安全失败，私密恢复目标不进入日志、Artifact 或 callback。
+- [✅] `human_review` 先持久化恢复 checkpoint，再原子设置等待状态、释放 lease/Admission 并创建 callback；超时按冻结策略条件恢复或终止，审批与对账竞争均以 status/version 条件写拒绝迟到覆盖。
+- [✅] 每个节点前校验 fencing、cancel、package、privacy 和 authorization version。
 
 **Checkpoint:** mock workflow 可以完整执行，并能在失败后恢复。
 
@@ -507,7 +507,9 @@ Runtime 侧：
 
 情侣日记后端侧：
 
-- [ ] 暴露 `POST /api/v1/internal/agent-tools/memory.get_snapshot`。
+> 进度说明（2026-07-16）：`memory.publish_playback_document` 已具备 Runtime HMAC、`active_run_id + generation_epoch`、完整 document 容器校验与服务端稳定幂等重放；尚未完成 snapshot/source-ref allowlist、Runtime `AgentToolCall` 审计和写工具接管/对账，因此以下完整验收条目保持未完成。
+
+- [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.get_snapshot`：校验 Runtime HMAC、archive/snapshot 归属并解密冻结快照；正文仅返回给内部 Runtime，不写日志、checkpoint 摘要或 Artifact。
 - [ ] 暴露 `POST /api/v1/internal/agent-tools/memory.publish_playback_document`，单事务发布完整作品。
 - [ ] 发布请求接收完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定幂等键；媒体能力关闭时仍要求空 `media_manifest`，并按 scenes/actions/`media_manifest` 规范化内容计算或复核 digest；成功返回 `revision/content_digest`，供 Runtime 固化 `publish_result`。
 - [ ] 第一版只预留 `memory.enqueue_tts` 契约，不启用媒体任务。
@@ -553,17 +555,21 @@ Runtime 侧：
 
 **Plan:** 后端计划 Task 12。
 
-- [ ] 实现 `load_snapshot`。
+- [✅] 实现 `load_snapshot`：仅经签名的内部工具按 archive/snapshot 读取冻结快照，Runner 不记录素材正文。
 - [ ] 实现 `sanitize_materials`。
-- [ ] 实现 `compute_stats`。
-- [ ] 实现 `extract_highlights` 和模板高光。
-- [ ] 实现 `plan_chapters` 和模板章节。
-- [ ] 实现 `generate_scenes` 和模板场景。
-- [ ] 实现规则版 `generate_actions`。
+- [✅] 实现 `compute_stats`：仅计算已加载快照的日记/赌局数量与是否有素材；空快照返回零值 fallback，不保存素材正文。
+- [✅] 实现 `extract_highlights` 的模板高光 fallback：只保留最多 8 个稳定素材 ID，不复制正文；空素材返回空引用。
+- [ ] 接入 ModelGateway 后实现模型版 `extract_highlights`，并继续复用素材引用 allowlist。
+- [✅] 实现 `plan_chapters` 模板章节：生成 1 个仅含章节 ID、类型和安全素材引用的基础回顾章节。
+- [ ] 接入 ModelGateway 后实现模型版 `plan_chapters`。
+- [✅] 实现 `generate_scenes` 模板场景：按章节生成最多 3 个 summary Scene，空输入仍保留基础场景。
+- [ ] 接入 ModelGateway 后实现模型版 `generate_scenes`。
+- [✅] 实现规则版 `generate_actions`：每个 Scene 生成 `show_card` 与固定 3000ms 时长，不包含正文。
 - [ ] MemoirAgent MVP 正常生成 3～8 张场景卡，单卡主体文案不超过 80 字；发布契约硬上限 16，越界由 evaluator 裁剪、fallback 或拒绝。
-- [ ] 实现 `safety_review`。
-- [ ] 构建包含 scenes/actions/`media_manifest` 的完整 playback document，并实现 `publish_playback_document` 原子发布；媒体能力关闭时提交必填空清单。
-- [ ] 发布请求带 `run_id/snapshot_id/generation_epoch` 和稳定逻辑幂等键，业务后端复核包含 `media_manifest` 的 `content_digest`，只有成功后才允许 run 终止为 succeeded/partial。
+- [✅] 实现 `safety_review`：校验模板 Scene/Action 的结构、引用和时长；不合法时回退为无素材引用的基础卡片。
+- [✅] 构建包含 scenes/actions/`media_manifest` 的完整 playback document，并实现 `publish_playback_document` 原子发布；媒体能力关闭时提交必填空清单。
+- [✅] 发布请求带 `run_id/snapshot_id/generation_epoch` 和稳定逻辑幂等键，业务后端复核快照归属、active Run、epoch 与包含 `media_manifest` 的 `content_digest`；只有成功后才允许 run 终止为 succeeded/partial。
+- [✅] 模板工作流端到端回归：Worker 经 run_dispatch、lease、8 个静态节点与发布审计后将 Run 终结为 `succeeded`，且 Artifact/审计不保存日记正文。
 - [ ] 第一版媒体节点在 capability 关闭时 skipped；媒体生成放二期。
 
 **Checkpoint:** `revision 0 baseline -> MemorySnapshot -> 完整 PlaybackDocument 原子发布 -> published_revision` 闭环可跑通。
@@ -574,26 +580,32 @@ Runtime 侧：
 
 Runtime 侧：
 
-- [ ] 生成 `run_started`、`step_changed`、可选 `waiting_human`、`run_succeeded`、`run_failed`、`partial_succeeded`、`run_cancelled` 事件；内部 `human_review_requested` 确定性映射为 `waiting_human`。
-- [ ] 每个 callback 事件带 `event_id/event_seq/status_version`。
-- [ ] 为 dispatcher 注册 callback OutboxDeliveryHandler 后才启用 `callback` 类型；此前 pending 事件不算失败，启用后继续使用原事件身份投递，callback 堆积不阻塞 run_dispatch。
-- [ ] callback payload 只包含安全摘要。
-- [ ] callback 请求带 `X-Agent-Runtime-Id`、`X-Agent-Key-Id`、`X-Agent-Run-Id`、`X-Agent-Business-Id`、`X-Agent-Event-Id`、`X-Agent-Event-Seq`、`X-Agent-Timestamp`、`X-Agent-Signature`、`Idempotency-Key` 并由业务后端验签；幂等键固定为 `callback:{event_id}`。
-- [ ] 业务后端按原始 body bytes 计算 hash、使用恒定时间比较，并只在密钥轮换窗口接受新旧 key；签名 callback 禁止重定向。
-- [ ] retry/resume 后 callback `event_seq` 继续从当前 run 最大值累加。
-- [ ] callback 失败重试复用原 `event_id/event_seq/status_version/Idempotency-Key`；业务端对同事件同 body 返回成功且不重复写，对同事件不同 body 返回 409 幂等冲突。
-- [ ] 状态变化、CallbackEvent 与 callback outbox 同事务提交；dispatcher 使用 lease、Retry-After、dead letter 和原事件重放。
+- [✅] 终态 callback 信封：`succeeded/partial/failed/cancelled` 映射为冻结事件名，事件与 callback outbox 同事务写入，并只包含 Run、业务标识、版本、状态和空的安全轨迹。
+- [✅] WorkflowExecutor 在开始执行时写入 `run_started`，每个成功静态节点写入 `step_changed`；轨迹仅含节点名、状态，且与 checkpoint/artifact 同一事务提交。
+- [✅] 生成 `run_started`、`step_changed`、可选 `waiting_human`、`run_succeeded`、`run_failed`、`partial_succeeded`、`run_cancelled` 事件；内部 `human_review_requested` 确定性映射为 `waiting_human`。
+- [✅] 每个 callback 事件带 `event_id/event_seq/status_version`。
+- [✅] 为 dispatcher 注册 callback OutboxDeliveryHandler 后才启用 `callback` 类型；此前 pending 事件不算失败，启用后继续使用原事件身份投递，callback 堆积不阻塞 run_dispatch。
+- [✅] callback payload 只包含安全摘要。
+- [✅] callback 请求带 `X-Agent-Runtime-Id`、`X-Agent-Key-Id`、`X-Agent-Run-Id`、`X-Agent-Business-Id`、`X-Agent-Event-Id`、`X-Agent-Event-Seq`、`X-Agent-Timestamp`、`X-Agent-Signature`、`Idempotency-Key` 并由业务后端验签；幂等键固定为 `callback:{event_id}`。
+- [ ] 业务后端按原始 body bytes 计算 hash、使用恒定时间比较，并只在密钥轮换窗口接受新旧 key；签名 callback 禁止重定向。（已完成原始 body 验签与禁止重定向，待密钥轮换窗口。）
+- [✅] retry/resume 后 callback `event_seq` 继续从当前 run 最大值累加。
+- [✅] callback 失败重试复用原 `event_id/event_seq/status_version/Idempotency-Key`；业务端对同事件同 body 返回成功且不重复写，对同事件不同 body 返回 409 幂等冲突。
+- [✅] 状态变化、CallbackEvent 与 callback outbox 同事务提交；dispatcher 使用 lease、Retry-After、五次失败 dead letter 和原事件重放。
 - [ ] callback 前复核 target 当前 authorization version，撤销后停止发送并告警。
 
 情侣日记后端侧：
 
-- [ ] 新增或更新 `memory_agent_run_refs`。
+- [✅] 提供签名 `memory` callback 内部接口：校验 Runtime 身份、`run_id/business_id/event_id/event_seq` 头体一致和 `callback:{event_id}` 幂等键；同事件同 body 重放返回原结果。
+- [✅] callback 投影仅接受 archive 当前 `active_run_id` 且 RunRef generation 与 archive 一致的事件；`run_succeeded/partial_succeeded` 缺少已发布 revision 时写 `reconciliation_status=needed`，不伪造成功状态。
+- [✅] `MemoryAgentRunRef` 持久化 callback 的白名单 `public_trace`，只接受最多 8 条 `step/status/label` 展示字段，拒绝模型、工具和素材内容。
+- [✅] 提供已验签的回忆录生成状态查询：返回 archive 内容状态、发布 revision、当前 RunRef 状态、对账标记和 `public_trace`，不返回快照、日记或播放文档。
+- [✅] 新增或更新 `memory_agent_run_refs`。
 - [ ] 每次 create/start/retry/purge 保存独立幂等键、`run_id/active_run_id/generation_epoch/row_version`、contract/package/authorization 摘要、last_event_seq、last_runtime_status_version，以及 `privacy_purge_status=not_requested/requested/purged/failed`、`privacy_purge_idempotency_key` 和请求/完成时间。
-- [ ] 接收 callback 后始终幂等更新对应 `MemoryAgentRunRef`；只有 active run/epoch 匹配且内容尚未发布时，callback 才可推进 `content_status` 的 pending/running/waiting_human/failed/cancelled 与 `public_trace`，不得写 `published_revision/enhancement_status/succeeded`。
-- [ ] `run_succeeded/partial_succeeded` 必须确认业务库已存在该 run 原子发布的 revision 且 `content_status=succeeded`；callback 只接受终态摘要，不重复写成功。缺少发布结果时保留 baseline/上一版本，记录 `RECONCILIATION_NEEDED` 并告警对账。
-- [ ] 按 `event_seq/status_version` 拒绝 callback 乱序导致的状态倒退。
-- [ ] 重复 callback 不重复写入。
-- [ ] 为前端生成状态接口返回 `public_trace`。
+- [✅] 接收 callback 后幂等更新对应 `MemoryAgentRunRef`；只有 active run/epoch 匹配且内容尚未发布时，callback 才可推进 `content_status` 的 pending/running/waiting_human/failed/cancelled 与 `public_trace`，不得写 `published_revision/enhancement_status/succeeded`。
+- [✅] `run_succeeded/partial_succeeded` 必须确认业务库已存在该 run 原子发布的 revision 且 `content_status=succeeded`；callback 只接受终态摘要，不重复写成功。缺少发布结果时保留 baseline/上一版本，记录 `RECONCILIATION_NEEDED` 并告警对账。
+- [✅] 按 `event_seq/status_version` 拒绝 callback 乱序导致的状态倒退。
+- [✅] 重复 callback 不重复写入。
+- [✅] 为前端生成状态接口返回 `public_trace`。
 
 **Checkpoint:** 前端通过情侣日记后端能看到生成状态变化，不需要直连 Runtime。
 
@@ -601,14 +613,15 @@ Runtime 侧：
 
 **Plan:** 后端计划 Task 11.5 + 回忆录技术探索 `06-后端接口与AgentRuntime集成.md`。
 
-- [ ] Runtime 对账扫描 dispatch/callback dead letter、lease/heartbeat、active elapsed、held/queued/waiting_human、wall clock、tool call、purge、package revoked 和 authorization version 状态；没有 worker 的挂起 run 必须由对账任务直接条件终止或按 package 策略重新入队。
+- [ ] Runtime 对账扫描 callback dead letter、active elapsed、wall clock、tool call、purge 与 authorization version；已完成 dispatch dead letter、lease、held/queued/waiting_human 与 package revoked 的 P0 条目，未覆盖部分保持待实现。
+- [✅] P0 对账器具备独立进程入口：条件修复 waiting_human fallback/终态、lease、held/queued 超时、run_dispatch 死信及 package revoked；仅成功条件写后迁移 Admission/写 Outbox，不读取私密 payload、不重放副作用。
 - [ ] Runtime 对账扫描超过请求 deadline 的 `AgentModelUsage.running` 并条件标记 `outcome_unknown`；不猜测零成本、不用旧 fencing 推进执行，迟到可信计量只结算原 usage 行。
 - [ ] Runtime 对账比较 AdmissionBucket 与 AgentRun.dispatch_state 的 global/caller/tenant/agent 聚合占用；漂移时按固定锁序和 bucket version 条件修复，保证计数非负并记录安全指标。
-- [ ] held/queued/waiting_human 超时、package/authorization 撤销和其他对账终止路径统一复用 AdmissionService；claimed run 只在有效 worker/reaper 的最终状态事务释放 running，避免提前复用仍在执行的槽位。
-- [ ] run_dispatch 原事件重放仍失败时置 `failed(DISPATCH_FAILED)`，同事务释放 held/queued Admission 占用；callback dead letter 由原事件重放和业务主动查询恢复。
+- [✅] held/queued/waiting_human 超时与 package 撤销路径复用 AdmissionService；claimed run 只写取消请求或由 lease reaper 安全接管，条件写失败不产生 Admission/Outbox 副作用。authorization 主动扫描仍待权威来源。
+- [✅] run_dispatch dead letter 仅对仍可终结的 queued Run 条件置 `failed(DISPATCH_FAILED)`，同事务释放 Admission；callback dead letter 保持原事件重放和业务主动查询恢复。
 - [ ] 对账任务默认每 5 分钟执行一次；同一对象连续 3 次修复失败后升级告警。
 - [ ] 多实例对账使用数据库/分布式 lease 或按 `run_id` 分片，同一对象同一时间只允许一个修复者。
-- [ ] 提供独立 reconciler 进程入口；调度/lease、纯规则判定、事务修复和报告聚合分别归入口、runtime rule、service、schema 负责。
+- [✅] 提供独立 reconciler 进程入口；P0 的纯规则判定、事务修复和安全报告聚合已归入 service，完整调度/lease 分层仍随原扫描范围推进。
 - [ ] 每个扫描批次输出安全 `ReconciliationReport` 结构化日志和指标，固定包含扫描、修复、失败、告警计数、动作类型与标准错误码，不携带业务正文或 Runtime 私密 payload。
 - [ ] 情侣日记后端保留按 `run_id` 查询 Runtime 的兜底能力，使用 `status_version/last_event_seq` 修复 callback 摘要，并以 `privacy_state/privacy_version` 确认 purge 进度。
 - [ ] 业务使用 held create；create 失败只重试 create，绑定后 start 失败只重试 start。

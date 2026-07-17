@@ -34,7 +34,8 @@ class MemoryArchive(Base):
     relationship_segment_no = Column(Integer, nullable=False)
     owner_user_id = Column(Integer, nullable=False, index=True)
     partner_user_id = Column(Integer, nullable=False)
-    content_status = Column(String(32), nullable=False, default="baseline_ready")
+    # 内容状态由原子发布工具与 callback adapter 分工写入，播放器只认 published_revision。
+    content_status = Column(String(32), nullable=False, default="baseline")
     enhancement_status = Column(String(32), nullable=False, default="not_started")
     generation_epoch = Column(Integer, nullable=False, default=0)
     active_run_id = Column(String(80), nullable=True, unique=True)

@@ -129,6 +129,30 @@ class LeaseService:
         logging.warning("draining 主动释放 lease run_id=%s", run_id)
         return True
 
+    def pause_for_human(
+        self, run_id: str, context: LeaseContext, timeout_seconds: int
+    ) -> bool:
+        """在 checkpoint 已落库后原子进入人工等待，并释放 Worker 与 Admission 占用。"""
+        if timeout_seconds <= 0 or not self.can_write(run_id, context):
+            return False
+        run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+        assert run is not None
+        run.status = "waiting_human"
+        run.dispatch_state = "finished"
+        run.waiting_expires_at = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.status_version += 1
+        AdmissionService(self._session).transition_run(run, "claimed", "finished")
+        OutboxService(self._session).append_callback_event(run, "waiting_human")
+        self._session.commit()
+        logging.info(
+            "Worker 进入人工等待 run_id=%s timeout_seconds=%s",
+            run_id,
+            timeout_seconds,
+        )
+        return True
+
     def reap_expired(self) -> list[str]:
         """回收失效 lease 并回到 queued；旧 fencing token 之后不可再写入。"""
         now = datetime.now(UTC)
@@ -138,11 +162,23 @@ class LeaseService:
                 AgentRun.dispatch_state == "claimed", AgentRun.lease_expires_at < now
             )
         ).all():
-            run.dispatch_state, run.lease_owner, run.lease_expires_at = (
-                "queued",
-                None,
-                None,
+            reaped = self._session.execute(
+                update(AgentRun)
+                .where(
+                    AgentRun.run_id == run.run_id,
+                    AgentRun.dispatch_state == "claimed",
+                    AgentRun.lease_expires_at < now,
+                )
+                .execution_options(synchronize_session=False)
+                .values(
+                    dispatch_state="queued",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
             )
+            if reaped.rowcount != 1:  # type: ignore[attr-defined]
+                continue
+            self._session.refresh(run)
             AdmissionService(self._session).transition_run(run, "claimed", "queued")
             OutboxService(self._session).append_run_dispatch(run.run_id, "lease_reaped")
             recovered.append(run.run_id)

@@ -79,7 +79,7 @@ class MemoryArchiveService:
                 relationship_segment_no=frozen.relationship_segment_no,
                 owner_user_id=owner_user_id,
                 partner_user_id=partner_user_id,
-                content_status="baseline_ready",
+                content_status="baseline",
                 enhancement_status="not_started",
                 published_revision=0,
                 summary="回忆录基础版本已创建，等待增强生成。",
@@ -133,6 +133,7 @@ class MemoryArchiveService:
         archive_id: str,
         *,
         expected_generation_epoch: int,
+        expected_run_id: str | None = None,
         document: dict[str, Any],
     ) -> MemoryPlaybackDocument:
         """完整文档先落库，再在同一事务切换 archive 的唯一发布指针。"""
@@ -149,6 +150,8 @@ class MemoryArchiveService:
             raise ValueError("回忆录归档不存在或已删除")
         if archive.generation_epoch != expected_generation_epoch:
             raise ValueError("GENERATION_SUPERSEDED")
+        if expected_run_id is not None and archive.active_run_id != expected_run_id:
+            raise ValueError("MEMORY_RUN_NOT_ACTIVE")
         next_revision = archive.published_revision + 1
         previous = self._session.scalar(
             select(MemoryPlaybackDocument).where(
@@ -169,7 +172,8 @@ class MemoryArchiveService:
         )
         self._session.add(published)
         archive.published_revision = next_revision
-        archive.content_status = "enhanced_ready"
+        # 原子提交完整 revision 后，只有这里可将内容切换为成功。
+        archive.content_status = "succeeded"
         archive.enhancement_status = "succeeded"
         logger.info(
             "原子发布回忆录文档 archive_id={} revision={} generation_epoch={}",

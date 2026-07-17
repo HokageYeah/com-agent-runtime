@@ -4,22 +4,46 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
+from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
-from app.models import AgentRun, RuntimeOutboxEvent
+from app.models import (
+    AgentPlan,
+    AgentRun,
+    AgentStep,
+    AgentToolCall,
+    CallbackEvent,
+    RuntimeOutboxEvent,
+)
+from app.runtime.artifact import ArtifactStore
+from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
+from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext
+from app.services.agent_run_service import AgentRunService
+from app.services.reconciliation_service import ReconciliationService
+from app.services.tool_call_audit_service import ToolCallAuditService
 from app.worker import WorkerLoop
 
 
 class FakeExecutor:
     def __init__(self) -> None:
         self.run_ids: list[str] = []
+        self.resume_ids: list[str] = []
 
     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
         self.run_ids.append(run_id)
+        return AgentRunResult(
+            run_id=run_id,
+            status="succeeded",
+            execution_attempt=lease_context.execution_attempt,
+        )
+
+    def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+        self.resume_ids.append(run_id)
         return AgentRunResult(
             run_id=run_id,
             status="succeeded",
@@ -70,3 +94,177 @@ def test_worker_once_dispatches_and_claims_run_with_injected_executor() -> None:
 
     assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
     assert executor.run_ids == ["worker-run"]
+
+
+def test_worker_resumes_reconciled_waiting_human_run() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    session.add(
+        AgentRun(
+            run_id="fallback-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="waiting_human", dispatch_state="queued", input_json={},
+            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            run_deadline_at=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.add(
+        RuntimeOutboxEvent(
+            outbox_id="fallback-dispatch", event_type="run_dispatch", aggregate_type="agent_run",
+            aggregate_id="fallback-run", payload_json={"run_id": "fallback-run"},
+            status="pending", retention_until=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.commit()
+    executor = FakeExecutor()
+
+    assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
+    assert executor.resume_ids == ["fallback-run"]
+    assert executor.run_ids == []
+
+
+def test_worker_resumes_timeout_fallback_requeued_by_reconciler() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    now = datetime.now(UTC)
+    run = AgentRun(run_id="timeout-fallback-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="waiting_human", dispatch_state="finished", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", waiting_expires_at=now - timedelta(seconds=1), run_deadline_at=now + timedelta(days=1))
+    session.add(run)
+    session.add(AgentPlan(plan_id="timeout-fallback-plan", run_id=run.run_id, strategy="static_workflow", steps_json=[{"node_id": "fallback", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={"waiting_human_timeout_action": "fallback", "waiting_human_fallback_node": "fallback"}, status="planned"))
+    session.commit()
+    ReconciliationService(session).run_once(now=now)
+    executor = FakeExecutor()
+
+    assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
+    assert executor.resume_ids == ["timeout-fallback-run"]
+    assert executor.run_ids == []
+
+
+def test_worker_approve_resumes_from_completed_checkpoint_not_fallback_target() -> None:
+    class HumanThenContinueRunner:
+        def __init__(self) -> None:
+            self.node_ids: list[str] = []
+
+        def run_node(self, node, run, state):
+            node_id = str(node["node_id"])
+            self.node_ids.append(node_id)
+            return {"node_id": node_id, "waiting_human": node_id == "review"}
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    now = datetime.now(UTC)
+    session.add(AgentRun(run_id="approve-resume-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker-a", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    session.add(AgentPlan(plan_id="approve-resume-plan", run_id="approve-resume-run", strategy="static_workflow", steps_json=[{"node_id": "review", "node_type": "guardrail"}, {"node_id": "continue", "node_type": "deterministic"}, {"node_id": "fallback", "node_type": "deterministic"}], stop_conditions_json={"approval_ttl_seconds": 60}, fallback_policy_json={"waiting_human_fallback_node": "fallback"}, status="planned"))
+    session.commit()
+    cipher = FernetCheckpointCipher.generate()
+    runner = HumanThenContinueRunner()
+    initial_context = LeaseContext(execution_attempt=1, lease_owner="worker-a", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
+    executor = WorkflowExecutor(session, runner, CheckpointStore(session, cipher), ArtifactStore(session))
+    assert executor.run("approve-resume-run", initial_context).status == "waiting_human"
+    waiting = session.scalar(select(AgentRun).where(AgentRun.run_id == "approve-resume-run"))
+    assert waiting is not None
+    AgentRunService(session).approve("approve-resume-run", "caller", "approve", waiting.status_version)
+    session.commit()
+
+    def resumed_executor(worker_session):
+        return WorkflowExecutor(worker_session, runner, CheckpointStore(worker_session, cipher), ArtifactStore(worker_session))
+
+    assert WorkerLoop(factory, resumed_executor, worker_id="worker-b").run_once() == 1
+    assert runner.node_ids == ["review", "continue", "fallback"]
+
+
+def test_worker_completes_template_memoir_workflow_and_publishes_document() -> None:
+    """真实 Worker 路径必须从 outbox、lease 到发布节点一次闭环。"""
+    published: list[tuple[object, ...]] = []
+
+    class Gateway:
+        """模拟受信任业务工具；断言发布载荷不需要日记正文。"""
+
+        def get_snapshot(self, *args: object) -> dict[str, object]:
+            return {"diaries": [{"id": "diary-1"}], "bets": []}
+
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            published.append(args)
+            return {"revision": 1, "content_digest": "published-digest"}
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    session.add(
+        AgentRun(
+            run_id="memoir-worker-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive-1", status="pending", dispatch_state="queued",
+            input_json={"archive_id": "archive-1", "snapshot_id": "snapshot-1", "generation_epoch": 0},
+            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            run_deadline_at=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.add(
+        AgentPlan(
+            plan_id="memoir-worker-plan", run_id="memoir-worker-run", strategy="static_workflow",
+            steps_json=[
+                {"node_id": node_id, "node_type": "workflow"}
+                for node_id in ("load_snapshot", "compute_stats", "extract_highlights", "plan_chapters", "generate_scenes", "generate_actions", "safety_review", "publish_document")
+            ],
+            stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        )
+    )
+    session.add(
+        RuntimeOutboxEvent(
+            outbox_id="memoir-worker-dispatch", event_type="run_dispatch", aggregate_type="agent_run",
+            aggregate_id="memoir-worker-run", payload_json={"run_id": "memoir-worker-run"},
+            status="pending", retention_until=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    session.commit()
+
+    def executor_factory(worker_session):
+        return WorkflowExecutor(
+            worker_session,
+            MemoirNodeRunner(Gateway(), ToolCallAuditService(worker_session)),
+            CheckpointStore(worker_session, FernetCheckpointCipher.generate()),
+            ArtifactStore(worker_session),
+        )
+
+    assert WorkerLoop(factory, executor_factory, worker_id="worker-1").run_once() == 1
+    run = factory().scalar(select(AgentRun).where(AgentRun.run_id == "memoir-worker-run"))
+    assert run is not None and (run.status, run.dispatch_state) == ("succeeded", "finished")
+    assert len(factory().scalars(select(AgentStep).where(AgentStep.run_id == run.run_id)).all()) == 8
+    assert factory().scalar(select(AgentToolCall).where(AgentToolCall.run_id == run.run_id)).output_summary == {"revision": 1, "content_digest": "published-digest"}
+    assert published[0][1:5] == ("archive-1", "memoir-worker-run", "snapshot-1", 0)
+    assert published[0][5] == {"schema_version": "1.0.0", "scenes": [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]}], "actions": [{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}], "media_manifest": []}
+
+
+def test_worker_dispatches_callback_outbox_when_callback_gateway_is_configured() -> None:
+    """Worker 只在明确注入 callback 网关时消费 callback Outbox。"""
+    sent: list[tuple[str, dict[str, object]]] = []
+
+    class Gateway:
+        def send(self, target_id: str, payload: dict[str, object]) -> None:
+            sent.append((target_id, payload))
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    payload = {"event": "run_cancelled", "event_id": "event-worker", "event_seq": 1, "run_id": "run-worker", "business_id": "archive-worker"}
+    session.add(AgentRun(run_id="run-worker", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive-worker", status="cancelled", dispatch_state="finished", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="memory", business_connector_id="connector", trace_id="trace", run_deadline_at=datetime.now(UTC) + timedelta(days=1)))
+    session.add(CallbackEvent(event_id="event-worker", run_id="run-worker", event_seq=1, status_version=2, event_type="run_cancelled", payload_json=payload, created_at=datetime.now(UTC)))
+    session.add(RuntimeOutboxEvent(outbox_id="callback-worker", event_type="callback", aggregate_type="agent_run", aggregate_id="run-worker", payload_json={"event_id": "event-worker", "target_id": "memory"}, status="pending", retention_until=datetime.now(UTC) + timedelta(days=1)))
+    session.commit()
+
+    assert WorkerLoop(factory, FakeExecutor(), worker_id="worker-1", callback_gateway=Gateway()).run_once() == 0
+    assert sent == [("memory", payload)]

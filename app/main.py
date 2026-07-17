@@ -23,6 +23,7 @@ from app.middleware.exception_handlers import (
     response_validation_error_handler,
 )
 from app.middleware.request_logging import request_logging_middleware
+from app.services.memory_archive_service import FernetSnapshotCipher
 
 application_config = settings.application
 server_config = settings.server
@@ -53,6 +54,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.settings = settings
+app.state.memory_snapshot_cipher = FernetSnapshotCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())
 app.state.runtime_health = RuntimeHealth(settings, database_ready=database.check_ready)
 
 app.add_middleware(

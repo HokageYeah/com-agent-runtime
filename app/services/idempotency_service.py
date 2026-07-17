@@ -81,3 +81,25 @@ class IdempotencyService:
             self._session.delete(record)
         logging.info("清理过期幂等记录 count=%s", len(records))
         return len(records)
+
+    def lookup_result(
+        self, client_id: str, scope: str, key: str, resource_id: str
+    ) -> dict[str, Any] | None:
+        """按原幂等键查询已提交副作用结果，不需要重放原请求正文。"""
+        record = self._session.scalar(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.client_id == client_id,
+                IdempotencyRecord.scope == scope,
+                IdempotencyRecord.idempotency_key == key,
+                IdempotencyRecord.resource_id == resource_id,
+            )
+        )
+        if record is None:
+            return None
+        expires_at = record.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at < datetime.now(UTC):
+            return None
+        logging.info("副作用结果对账命中 client_id=%s scope=%s", client_id, scope)
+        return record.response_json

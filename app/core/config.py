@@ -234,11 +234,23 @@ class Settings(BaseSettings):
         '{"couple-diary":{"tenant_id":"couple-diary",'
         '"keys":{"dev":"development-secret"}}}'
     )
-    RUNTIME_BUSINESS_CONNECTORS_JSON: str = '{"couple_diary_backend":{"enabled":true}}'
+    RUNTIME_BUSINESS_CONNECTORS_JSON: str = (
+        '{"couple_diary_backend":{"enabled":true,'
+        '"base_url":"http://127.0.0.1:8002","runtime_id":"agent-runtime",'
+        '"key_id":"dev","secret":"runtime-tool-development-secret"}}'
+    )
+    RUNTIME_CALLBACK_TARGETS_JSON: str = (
+        '{"memory_callback":{"enabled":true,'
+        '"url":"http://127.0.0.1:8002/api/v1/internal/agent-callbacks/memory",'
+        '"runtime_id":"agent-runtime","key_id":"dev",'
+        '"secret":"runtime-tool-development-secret"}}'
+    )
     RUNTIME_SIGNATURE_TOLERANCE_SECONDS: int = 300
     RUNTIME_ADMISSION_MAX_HELD: int = 100
     RUNTIME_ADMISSION_MAX_QUEUED: int = 500
     RUNTIME_ADMISSION_MAX_RUNNING: int = 50
+    MEMORY_SNAPSHOT_FERNET_KEY: str = "UIdCWOsJY0GWrMpXlM444_JDKJC-zFwylDAJCymPvPg="
+    MEMORY_TOOL_TRUSTED_RUNTIMES_JSON: str = '{"agent-runtime":{"keys":{"dev":"runtime-tool-development-secret"}}}'
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,
@@ -332,8 +344,17 @@ class Settings(BaseSettings):
         return json.loads(self.RUNTIME_BUSINESS_CONNECTORS_JSON)
 
     @property
+    def callback_targets(self) -> dict[str, dict[str, object]]:
+        """返回部署预注册 callback 目标；业务请求不得提供出站 URL 或密钥。"""
+        return json.loads(self.RUNTIME_CALLBACK_TARGETS_JSON)
+
+    @property
     def signature_tolerance_seconds(self) -> int:
         return self.RUNTIME_SIGNATURE_TOLERANCE_SECONDS
+
+    @property
+    def memory_tool_runtimes(self) -> dict[str, dict[str, object]]:
+        return json.loads(self.MEMORY_TOOL_TRUSTED_RUNTIMES_JSON)
 
     @property
     def admission_max_held(self) -> int:

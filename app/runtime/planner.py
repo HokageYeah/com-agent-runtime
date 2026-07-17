@@ -53,13 +53,37 @@ class StaticPlanner:
             # 旧注册记录尚未写入节点摘要时保留明确的空计划，Worker 会安全失败，
             # 绝不凭 agent_id 猜测或执行任意工作流。
             logging.warning("AgentDefinition 缺少 workflow_nodes run_id=%s", run_id)
+        fallback_policy = DEFAULT_FALLBACK_POLICY.copy()
+        policy = definition.get("policy", {})
+        timeout_action = (
+            policy.get("waiting_human_timeout_action")
+            if isinstance(policy, dict)
+            else None
+        )
+        if timeout_action in {"fallback", "failed", "cancelled"}:
+            fallback_policy["waiting_human_timeout_action"] = timeout_action
+        reject_action = policy.get("reject_action") if isinstance(policy, dict) else None
+        if reject_action in {"fallback", "failed"}:
+            fallback_policy["reject_action"] = reject_action
+        fallback_node_id = (
+            policy.get("waiting_human_fallback_node")
+            if isinstance(policy, dict)
+            else None
+        )
+        step_node_ids = {
+            node.get("node_id")
+            for node in steps
+            if isinstance(node, dict) and isinstance(node.get("node_id"), str)
+        }
+        if isinstance(fallback_node_id, str) and fallback_node_id in step_node_ids:
+            fallback_policy["waiting_human_fallback_node"] = fallback_node_id
         return AgentPlanDTO(
             plan_id=str(uuid4()),
             run_id=run_id,
             strategy="static_workflow",
             steps=steps,
             stop_conditions=DEFAULT_STOP_CONDITIONS.copy(),
-            fallback_policy=DEFAULT_FALLBACK_POLICY.copy(),
+            fallback_policy=fallback_policy,
             status="planned",
         )
 

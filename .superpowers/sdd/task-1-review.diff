@@ -1,0 +1,962 @@
+diff --git a/app/runtime/executor.py b/app/runtime/executor.py
+index 33f6302..ebeeaa5 100644
+--- a/app/runtime/executor.py
++++ b/app/runtime/executor.py
+@@ -2,7 +2,6 @@
+ 
+ from __future__ import annotations
+ 
+-import hashlib
+ import logging
+ from collections.abc import Mapping
+ from datetime import UTC, datetime
+@@ -12,46 +11,59 @@ from uuid import uuid4
+ from sqlalchemy import select
+ from sqlalchemy.orm import Session
+ 
+-from app.models import AgentCheckpoint, AgentPlan, AgentRun, AgentStep
++from app.models import AgentPlan, AgentRun, AgentStep
++from app.runtime.artifact import ArtifactError, ArtifactStore
++from app.runtime.checkpoint import CheckpointError, CheckpointStore
+ from app.runtime.interfaces import AgentRunResult, LeaseContext
+ from app.runtime.state import AgentState
+ from app.services.lease_service import LeaseService
++from app.services.outbox_service import OutboxService
+ 
+ 
+ class WorkflowNodeRunner(Protocol):
+     """受控节点适配器；不得把业务正文或工具原始 payload 返回给 Runtime 账本。"""
+ 
+-    def run_node(self, node: dict[str, object], run: AgentRun) -> dict[str, object]: ...
++    def run_node(
++        self, node: dict[str, object], run: AgentRun, state: AgentState
++    ) -> dict[str, object]: ...
+ 
+ 
+ class WorkflowExecutor:
+     """按已落库静态计划执行节点，并在每个成功节点后写安全 checkpoint。"""
+ 
+-    def __init__(self, session: Session, node_runner: WorkflowNodeRunner) -> None:
++    def __init__(
++        self,
++        session: Session,
++        node_runner: WorkflowNodeRunner,
++        checkpoint_store: CheckpointStore,
++        artifact_store: ArtifactStore,
++    ) -> None:
+         self._session = session
+         self._node_runner = node_runner
++        self._checkpoint_store = checkpoint_store
++        self._artifact_store = artifact_store
+         self._lease = LeaseService(session)
++        self._outbox = OutboxService(session)
+ 
+     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+         """执行当前 execution attempt；所有状态写入前均复核 lease/fencing 边界。"""
+-        return self._execute(run_id, lease_context, completed_node_ids=set())
++        return self._execute(
++            run_id, lease_context, completed_node_ids=set(), state_data=None
++        )
+ 
+     def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+         """从最近兼容 checkpoint 恢复；只跳过已安全完成的静态节点。"""
+-        checkpoint = self._session.scalar(
+-            select(AgentCheckpoint)
+-            .where(AgentCheckpoint.run_id == run_id)
+-            .order_by(AgentCheckpoint.created_at.desc(), AgentCheckpoint.id.desc())
+-        )
+-        if checkpoint is None or checkpoint.privacy_version != lease_context.privacy_version:
++        try:
++            state = self._checkpoint_store.load_latest(run_id, lease_context)
++        except CheckpointError as exc:
++            logging.warning("Workflow checkpoint 不可恢复 run_id=%s error=%s", run_id, exc)
+             return AgentRunResult(
+                 run_id=run_id,
+                 status="failed",
+                 execution_attempt=lease_context.execution_attempt,
+                 error_code="CHECKPOINT_NOT_RESUMABLE",
+             )
+-        summary = checkpoint.state_summary or {}
+-        raw_node_ids = summary.get("completed_node_ids", [])
++        raw_node_ids = state.get("completed_node_ids", [])
+         if not isinstance(raw_node_ids, list) or not all(
+             isinstance(node_id, str) for node_id in raw_node_ids
+         ):
+@@ -61,18 +73,34 @@ class WorkflowExecutor:
+                 execution_attempt=lease_context.execution_attempt,
+                 error_code="CHECKPOINT_STATE_INVALID",
+             )
++        resume_from_node_id = state.get("resume_from_node_id")
++        if resume_from_node_id is not None and not isinstance(resume_from_node_id, str):
++            return AgentRunResult(
++                run_id=run_id,
++                status="failed",
++                execution_attempt=lease_context.execution_attempt,
++                error_code="CHECKPOINT_STATE_INVALID",
++            )
+         logging.info(
+             "Workflow 从 checkpoint 恢复 run_id=%s completed_nodes=%s",
+             run_id,
+             len(raw_node_ids),
+         )
+-        return self._execute(run_id, lease_context, completed_node_ids=set(raw_node_ids))
++        return self._execute(
++            run_id,
++            lease_context,
++            completed_node_ids=set(raw_node_ids),
++            state_data=state,
++            resume_from_node_id=resume_from_node_id,
++        )
+ 
+     def _execute(
+         self,
+         run_id: str,
+         lease_context: LeaseContext,
+         completed_node_ids: set[str],
++        state_data: dict[str, object] | None,
++        resume_from_node_id: str | None = None,
+     ) -> AgentRunResult:
+         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+         plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run_id))
+@@ -83,6 +111,25 @@ class WorkflowExecutor:
+                 execution_attempt=lease_context.execution_attempt,
+                 error_code="WORKFLOW_PLAN_NOT_FOUND",
+             )
++        if resume_from_node_id is not None:
++            fallback_node_id = plan.fallback_policy_json.get(
++                "waiting_human_fallback_node"
++            )
++            if (
++                fallback_node_id != resume_from_node_id
++                or resume_from_node_id
++                not in {
++                    node.get("node_id")
++                    for node in plan.steps_json
++                    if isinstance(node, Mapping)
++                }
++            ):
++                return AgentRunResult(
++                    run_id=run_id,
++                    status="failed",
++                    execution_attempt=lease_context.execution_attempt,
++                    error_code="FALLBACK_NODE_INVALID",
++                )
+         if not self._lease.can_write(run_id, lease_context):
+             return AgentRunResult(
+                 run_id=run_id,
+@@ -90,18 +137,34 @@ class WorkflowExecutor:
+                 execution_attempt=lease_context.execution_attempt,
+                 error_code="LEASE_CONTEXT_INVALID",
+             )
+-        run.status = "running"
++        if run.status != "running":
++            run.status = "running"
++            run.status_version += 1
++            self._outbox.append_callback_event(run, "run_started")
+         run.started_at = run.started_at or datetime.now(UTC)
+         completed_steps = len(completed_node_ids)
+-        state = AgentState(
+-            run_input=run.input_json,
+-            completed_node_ids=sorted(completed_node_ids),
+-        )
++        # checkpoint 完整状态只存在 Fernet 密文中；恢复时丢弃仅供摘要展示的计数字段。
++        if state_data is None:
++            state = AgentState(run_input=run.input_json, completed_node_ids=sorted(completed_node_ids))
++        else:
++            state = AgentState.model_validate(
++                {
++                    key: value
++                    for key, value in state_data.items()
++                    if key not in {"completed_steps", "resume_from_node_id"}
++                }
++            )
++            state.completed_node_ids = sorted(completed_node_ids)
++        skipping = resume_from_node_id is not None
+         for raw_node in plan.steps_json:
+             node = self._validated_node(raw_node)
+             if node is None:
+                 return self._fail(run, lease_context, "WORKFLOW_NODE_INVALID")
+             node_id = str(node["node_id"])
++            if skipping:
++                skipping = node_id != resume_from_node_id
++                if skipping:
++                    continue
+             if node_id in completed_node_ids:
+                 continue
+             if not self._lease.can_write(run_id, lease_context):
+@@ -119,7 +182,7 @@ class WorkflowExecutor:
+             self._session.add(step)
+             self._session.flush()
+             try:
+-                self._node_runner.run_node(node, run)
++                node_result = self._node_runner.run_node(node, run, state)
+             except Exception:  # noqa: BLE001 - 节点异常必须转为安全错误码。
+                 logging.exception("Workflow 节点执行失败 run_id=%s node=%s", run_id, node["node_id"])
+                 step.status = "failed"
+@@ -128,33 +191,65 @@ class WorkflowExecutor:
+                 return self._fail(run, lease_context, "WORKFLOW_NODE_FAILED")
+             if not self._lease.can_write(run_id, lease_context):
+                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
++            try:
++                self._artifact_store.save_node_result(
++                    run, node_id, node_result, lease_context
++                )
++            except ArtifactError:
++                logging.exception("Workflow 节点 Artifact 写入失败 run_id=%s node=%s", run_id, node_id)
++                step.status = "failed"
++                step.error_code = "ARTIFACT_WRITE_FAILED"
++                step.finished_at = datetime.now(UTC)
++                return self._fail(run, lease_context, "ARTIFACT_WRITE_FAILED")
+             completed_steps += 1
+             completed_node_ids.add(node_id)
+             state.completed_node_ids = sorted(completed_node_ids)
+             step.status = "succeeded"
+             step.output_summary = {"node_id": node_id, "status": "ok"}
+             step.finished_at = datetime.now(UTC)
+-            self._session.add(
+-                AgentCheckpoint(
+-                    checkpoint_id=str(uuid4()),
++            checkpoint_state = {
++                "completed_steps": completed_steps,
++                **state.model_dump(mode="json"),
++            }
++            if node_result.get("waiting_human") is True:
++                fallback_node_id = plan.fallback_policy_json.get(
++                    "waiting_human_fallback_node"
++                )
++                if fallback_node_id is not None:
++                    if (
++                        not isinstance(fallback_node_id, str)
++                        or fallback_node_id
++                        not in {
++                            candidate.get("node_id")
++                            for candidate in plan.steps_json
++                            if isinstance(candidate, Mapping)
++                        }
++                    ):
++                        return self._fail(run, lease_context, "FALLBACK_NODE_INVALID")
++                    checkpoint_state["resume_from_node_id"] = fallback_node_id
++            self._checkpoint_store.save(
++                run_id,
++                f"attempt:{lease_context.execution_attempt}:step:{completed_steps}",
++                checkpoint_state,
++                lease_context,
++            )
++            if node_result.get("waiting_human") is True:
++                timeout = plan.stop_conditions_json.get("approval_ttl_seconds", 86400)
++                if not isinstance(timeout, int) or timeout <= 0:
++                    return self._fail(run, lease_context, "WAITING_HUMAN_TIMEOUT_INVALID")
++                if not self._lease.pause_for_human(run_id, lease_context, timeout):
++                    return self._fail(run, lease_context, "WAITING_HUMAN_PAUSE_FAILED")
++                return AgentRunResult(
+                     run_id=run_id,
+-                    checkpoint_key=f"attempt:{lease_context.execution_attempt}:step:{completed_steps}",
+-                    state_schema_version="1.0.0",
+-                    data_classification="runtime_internal",
+-                    privacy_version=lease_context.privacy_version,
+-                    # Task 10 接入加密完整恢复 state；Task 6 只持久化安全进度摘要。
+-                    encrypted_state_blob=None,
+-                    storage_ref=None,
+-                    state_summary={
+-                        "completed_steps": completed_steps,
+-                        **state.checkpoint_summary(),
+-                    },
+-                    content_digest=hashlib.sha256(
+-                        f"{run_id}:{lease_context.execution_attempt}:{completed_steps}".encode()
+-                    ).hexdigest(),
+-                    expires_at=run.run_deadline_at,
+-                    created_at=datetime.now(UTC),
++                    status="waiting_human",
++                    execution_attempt=lease_context.execution_attempt,
++                    output_summary={"completed_steps": completed_steps},
+                 )
++            # 过程事件只公开节点名和状态，不能包含工具返回、快照或播放文档。
++            self._outbox.append_callback_event(
++                run,
++                "step_changed",
++                [{"step": node_id, "status": "succeeded"}],
+             )
+         logging.info(
+             "Workflow 静态计划执行完成 run_id=%s execution_attempt=%s steps=%s",
+diff --git a/app/runtime/planner.py b/app/runtime/planner.py
+index c7d2266..c8202a0 100644
+--- a/app/runtime/planner.py
++++ b/app/runtime/planner.py
+@@ -53,13 +53,27 @@ class StaticPlanner:
+             # 旧注册记录尚未写入节点摘要时保留明确的空计划，Worker 会安全失败，
+             # 绝不凭 agent_id 猜测或执行任意工作流。
+             logging.warning("AgentDefinition 缺少 workflow_nodes run_id=%s", run_id)
++        fallback_policy = DEFAULT_FALLBACK_POLICY.copy()
++        policy = definition.get("policy", {})
++        fallback_node_id = (
++            policy.get("waiting_human_fallback_node")
++            if isinstance(policy, dict)
++            else None
++        )
++        step_node_ids = {
++            node.get("node_id")
++            for node in steps
++            if isinstance(node, dict) and isinstance(node.get("node_id"), str)
++        }
++        if isinstance(fallback_node_id, str) and fallback_node_id in step_node_ids:
++            fallback_policy["waiting_human_fallback_node"] = fallback_node_id
+         return AgentPlanDTO(
+             plan_id=str(uuid4()),
+             run_id=run_id,
+             strategy="static_workflow",
+             steps=steps,
+             stop_conditions=DEFAULT_STOP_CONDITIONS.copy(),
+-            fallback_policy=DEFAULT_FALLBACK_POLICY.copy(),
++            fallback_policy=fallback_policy,
+             status="planned",
+         )
+ 
+diff --git a/app/services/run_queue_service.py b/app/services/run_queue_service.py
+index 881e036..abd8991 100644
+--- a/app/services/run_queue_service.py
++++ b/app/services/run_queue_service.py
+@@ -3,8 +3,10 @@ from __future__ import annotations
+ import logging
+ from collections.abc import Callable
+ 
++from sqlalchemy import select
+ from sqlalchemy.orm import Session
+ 
++from app.models import AgentRun
+ from app.runtime.interfaces import RunExecutor
+ from app.services.lease_service import LeaseService
+ 
+@@ -19,6 +21,7 @@ class RunQueueService:
+         worker_id: str,
+         is_draining: Callable[[], bool] = lambda: False,
+     ) -> None:
++        self._session = session
+         self._lease = LeaseService(session)
+         self._executor, self._worker_id = executor, worker_id
+         self._is_draining = is_draining
+@@ -28,11 +31,18 @@ class RunQueueService:
+         if self._is_draining():
+             logging.warning("Worker draining，拒绝新 claim run_id=%s", run_id)
+             return False
++        status = self._session.scalar(
++            select(AgentRun.status).where(AgentRun.run_id == run_id)
++        )
+         context = self._lease.claim(run_id, self._worker_id)
+         if context is None:
+             logging.info("Worker 忽略不可认领 Run run_id=%s", run_id)
+             return False
+-        result = self._executor.run(run_id, context)
++        result = (
++            self._executor.resume(run_id, context)
++            if status == "waiting_human"
++            else self._executor.run(run_id, context)
++        )
+         terminal_states = {"succeeded", "partial", "failed", "cancelled"}
+         if result.status in terminal_states:
+             # Task 6 WorkflowExecutor 返回终态时统一由 lease 服务条件收敛。
+diff --git a/app/worker.py b/app/worker.py
+index 1014290..9760d28 100644
+--- a/app/worker.py
++++ b/app/worker.py
+@@ -7,15 +7,29 @@ import logging
+ from collections.abc import Callable
+ from time import sleep
+ 
++import httpx
++from sqlalchemy import select
+ from sqlalchemy.orm import Session
+ 
++from app.agents.memoir_agent.runner import MemoirNodeRunner
+ from app.core.config import settings
+ from app.core.logging_uru import setup_logging
+ from app.db.sqlalchemy_db import database
+ from app.dispatcher import Dispatcher
++from app.models import AgentRun
++from app.runtime.artifact import ArtifactStore
++from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
++from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
++from app.runtime.executor import WorkflowExecutor
+ from app.runtime.interfaces import AgentRunResult, LeaseContext, RunExecutor
++from app.runtime.tool_gateway import BusinessConnector, ToolGateway
++from app.services.callback_delivery_service import (
++    CallbackDeliveryService,
++    CallbackSender,
++)
+ from app.services.lease_service import LeaseService
+ from app.services.run_queue_service import RunQueueService
++from app.services.tool_call_audit_service import ToolCallAuditService
+ 
+ 
+ class WorkerLoop:
+@@ -24,25 +38,33 @@ class WorkerLoop:
+     def __init__(
+         self,
+         session_factory: Callable[[], Session],
+-        executor: RunExecutor,
++        executor: RunExecutor | Callable[[Session], RunExecutor],
+         *,
+         worker_id: str,
+         is_draining: Callable[[], bool] = lambda: False,
++        callback_gateway: CallbackSender | None = None,
+     ) -> None:
+         self._session_factory = session_factory
+         self._executor = executor
+         self._worker_id = worker_id
+         self._is_draining = is_draining
++        self._callback_gateway = callback_gateway
+ 
+     def run_once(self) -> int:
+         """派发持久 outbox、消费本批通知并回收超时 lease。"""
+         run_ids: list[str] = []
+         dispatcher_session = self._session_factory()
+         try:
++            callback_sender = (
++                CallbackDeliveryService(dispatcher_session, self._callback_gateway).send
++                if self._callback_gateway is not None
++                else None
++            )
+             Dispatcher(
+                 dispatcher_session,
+                 owner=f"dispatcher:{self._worker_id}",
+                 notify_run=run_ids.append,
++                callback_sender=callback_sender,
+             ).dispatch_pending()
+             LeaseService(dispatcher_session).reap_expired()
+         finally:
+@@ -54,7 +76,7 @@ class WorkerLoop:
+             try:
+                 queue = RunQueueService(
+                     session,
+-                    self._executor,
++                    self._executor(session) if callable(self._executor) else self._executor,
+                     self._worker_id,
+                     is_draining=self._is_draining,
+                 )
+@@ -83,6 +105,52 @@ class BootstrapExecutor:
+             error_code="WORKFLOW_EXECUTOR_NOT_CONFIGURED",
+         )
+ 
++    def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
++        return self.run(run_id, lease_context)
++
++
++def configured_executor(session: Session) -> RunExecutor:
++    """按 Worker 当前事务装配 Memoir 执行器，配置不完整时安全退回占位器。"""
++    class _Executor:
++        def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
++            agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
++            if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != ("memoir_agent", "1.0.0"):
++                return BootstrapExecutor().run(run_id, lease_context)
++            config = settings.business_connectors.get(agent_run.business_connector_id, {})
++            required = ("base_url", "runtime_id", "key_id", "secret")
++            if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
++                logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
++                return BootstrapExecutor().run(run_id, lease_context)
++            connector = BusinessConnector(**{key: config[key] for key in required})
++            gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
++            return WorkflowExecutor(session, MemoirNodeRunner(gateway, ToolCallAuditService(session)), CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())), ArtifactStore(session)).run(run_id, lease_context)
++
++        def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
++            agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
++            if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != ("memoir_agent", "1.0.0"):
++                return BootstrapExecutor().resume(run_id, lease_context)
++            config = settings.business_connectors.get(agent_run.business_connector_id, {})
++            required = ("base_url", "runtime_id", "key_id", "secret")
++            if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
++                logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
++                return BootstrapExecutor().resume(run_id, lease_context)
++            connector = BusinessConnector(**{key: config[key] for key in required})
++            gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
++            return WorkflowExecutor(session, MemoirNodeRunner(gateway, ToolCallAuditService(session)), CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())), ArtifactStore(session)).resume(run_id, lease_context)
++    return _Executor()
++
++
++def configured_callback_gateway() -> CallbackGateway | None:
++    """按部署白名单装配 callback 网关；非法或关闭配置不启用 callback 消费。"""
++    targets: dict[str, CallbackTarget] = {}
++    for target_id, config in settings.callback_targets.items():
++        required = ("url", "runtime_id", "key_id", "secret")
++        if bool(config.get("enabled")) and all(isinstance(config.get(key), str) for key in required):
++            targets[target_id] = CallbackTarget(**{key: config[key] for key in required})
++        else:
++            logging.warning("callback target 未启用或配置不完整 target_id=%s", target_id)
++    return CallbackGateway(targets, httpx.Client()) if targets else None
++
+ 
+ def main() -> None:
+     """命令行启动入口；生产由 Task 6 注入 WorkflowExecutor。"""
+@@ -98,8 +166,9 @@ def main() -> None:
+     session_factory = database.get_session_factory()
+     loop = WorkerLoop(
+         session_factory,
+-        BootstrapExecutor(),
++        configured_executor,
+         worker_id=args.worker_id,
++        callback_gateway=configured_callback_gateway(),
+     )
+     logging.info(
+         "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s",
+diff --git a/tests/runtime_test_worker_entry.py b/tests/runtime_test_worker_entry.py
+index b043b4c..936bc13 100644
+--- a/tests/runtime_test_worker_entry.py
++++ b/tests/runtime_test_worker_entry.py
+@@ -4,19 +4,33 @@ from __future__ import annotations
+ 
+ from datetime import UTC, datetime, timedelta
+ 
+-from sqlalchemy import create_engine
++from sqlalchemy import create_engine, select
+ from sqlalchemy.orm import sessionmaker
++from sqlalchemy.pool import StaticPool
+ 
+ import app.models  # noqa: F401
++from app.agents.memoir_agent.runner import MemoirNodeRunner
+ from app.db.sqlalchemy_db import Base
+-from app.models import AgentRun, RuntimeOutboxEvent
++from app.models import (
++    AgentPlan,
++    AgentRun,
++    AgentStep,
++    AgentToolCall,
++    CallbackEvent,
++    RuntimeOutboxEvent,
++)
++from app.runtime.artifact import ArtifactStore
++from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
++from app.runtime.executor import WorkflowExecutor
+ from app.runtime.interfaces import AgentRunResult, LeaseContext
++from app.services.tool_call_audit_service import ToolCallAuditService
+ from app.worker import WorkerLoop
+ 
+ 
+ class FakeExecutor:
+     def __init__(self) -> None:
+         self.run_ids: list[str] = []
++        self.resume_ids: list[str] = []
+ 
+     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
+         self.run_ids.append(run_id)
+@@ -26,6 +40,14 @@ class FakeExecutor:
+             execution_attempt=lease_context.execution_attempt,
+         )
+ 
++    def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
++        self.resume_ids.append(run_id)
++        return AgentRunResult(
++            run_id=run_id,
++            status="succeeded",
++            execution_attempt=lease_context.execution_attempt,
++        )
++
+ 
+ def test_worker_once_dispatches_and_claims_run_with_injected_executor() -> None:
+     engine = create_engine("sqlite://")
+@@ -70,3 +92,123 @@ def test_worker_once_dispatches_and_claims_run_with_injected_executor() -> None:
+ 
+     assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
+     assert executor.run_ids == ["worker-run"]
++
++
++def test_worker_resumes_reconciled_waiting_human_run() -> None:
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    factory = sessionmaker(bind=engine)
++    session = factory()
++    session.add(
++        AgentRun(
++            run_id="fallback-run", agent_id="memoir_agent", agent_version="1.0.0",
++            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
++            business_id="archive", status="waiting_human", dispatch_state="queued", input_json={},
++            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
++            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
++            run_deadline_at=datetime.now(UTC) + timedelta(days=1),
++        )
++    )
++    session.add(
++        RuntimeOutboxEvent(
++            outbox_id="fallback-dispatch", event_type="run_dispatch", aggregate_type="agent_run",
++            aggregate_id="fallback-run", payload_json={"run_id": "fallback-run"},
++            status="pending", retention_until=datetime.now(UTC) + timedelta(days=1),
++        )
++    )
++    session.commit()
++    executor = FakeExecutor()
++
++    assert WorkerLoop(factory, executor, worker_id="worker-1").run_once() == 1
++    assert executor.resume_ids == ["fallback-run"]
++    assert executor.run_ids == []
++
++
++def test_worker_completes_template_memoir_workflow_and_publishes_document() -> None:
++    """真实 Worker 路径必须从 outbox、lease 到发布节点一次闭环。"""
++    published: list[tuple[object, ...]] = []
++
++    class Gateway:
++        """模拟受信任业务工具；断言发布载荷不需要日记正文。"""
++
++        def get_snapshot(self, *args: object) -> dict[str, object]:
++            return {"diaries": [{"id": "diary-1"}], "bets": []}
++
++        def publish_playback_document(self, *args: object) -> dict[str, object]:
++            published.append(args)
++            return {"revision": 1, "content_digest": "published-digest"}
++
++    engine = create_engine(
++        "sqlite://",
++        connect_args={"check_same_thread": False},
++        poolclass=StaticPool,
++    )
++    Base.metadata.create_all(engine)
++    factory = sessionmaker(bind=engine)
++    session = factory()
++    session.add(
++        AgentRun(
++            run_id="memoir-worker-run", agent_id="memoir_agent", agent_version="1.0.0",
++            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
++            business_id="archive-1", status="pending", dispatch_state="queued",
++            input_json={"archive_id": "archive-1", "snapshot_id": "snapshot-1", "generation_epoch": 0},
++            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
++            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
++            run_deadline_at=datetime.now(UTC) + timedelta(days=1),
++        )
++    )
++    session.add(
++        AgentPlan(
++            plan_id="memoir-worker-plan", run_id="memoir-worker-run", strategy="static_workflow",
++            steps_json=[
++                {"node_id": node_id, "node_type": "workflow"}
++                for node_id in ("load_snapshot", "compute_stats", "extract_highlights", "plan_chapters", "generate_scenes", "generate_actions", "safety_review", "publish_document")
++            ],
++            stop_conditions_json={}, fallback_policy_json={}, status="planned",
++        )
++    )
++    session.add(
++        RuntimeOutboxEvent(
++            outbox_id="memoir-worker-dispatch", event_type="run_dispatch", aggregate_type="agent_run",
++            aggregate_id="memoir-worker-run", payload_json={"run_id": "memoir-worker-run"},
++            status="pending", retention_until=datetime.now(UTC) + timedelta(days=1),
++        )
++    )
++    session.commit()
++
++    def executor_factory(worker_session):
++        return WorkflowExecutor(
++            worker_session,
++            MemoirNodeRunner(Gateway(), ToolCallAuditService(worker_session)),
++            CheckpointStore(worker_session, FernetCheckpointCipher.generate()),
++            ArtifactStore(worker_session),
++        )
++
++    assert WorkerLoop(factory, executor_factory, worker_id="worker-1").run_once() == 1
++    run = factory().scalar(select(AgentRun).where(AgentRun.run_id == "memoir-worker-run"))
++    assert run is not None and (run.status, run.dispatch_state) == ("succeeded", "finished")
++    assert len(factory().scalars(select(AgentStep).where(AgentStep.run_id == run.run_id)).all()) == 8
++    assert factory().scalar(select(AgentToolCall).where(AgentToolCall.run_id == run.run_id)).output_summary == {"revision": 1, "content_digest": "published-digest"}
++    assert published[0][1:5] == ("archive-1", "memoir-worker-run", "snapshot-1", 0)
++    assert published[0][5] == {"schema_version": "1.0.0", "scenes": [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]}], "actions": [{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}], "media_manifest": []}
++
++
++def test_worker_dispatches_callback_outbox_when_callback_gateway_is_configured() -> None:
++    """Worker 只在明确注入 callback 网关时消费 callback Outbox。"""
++    sent: list[tuple[str, dict[str, object]]] = []
++
++    class Gateway:
++        def send(self, target_id: str, payload: dict[str, object]) -> None:
++            sent.append((target_id, payload))
++
++    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
++    Base.metadata.create_all(engine)
++    factory = sessionmaker(bind=engine)
++    session = factory()
++    payload = {"event": "run_cancelled", "event_id": "event-worker", "event_seq": 1, "run_id": "run-worker", "business_id": "archive-worker"}
++    session.add(CallbackEvent(event_id="event-worker", run_id="run-worker", event_seq=1, status_version=2, event_type="run_cancelled", payload_json=payload, created_at=datetime.now(UTC)))
++    session.add(RuntimeOutboxEvent(outbox_id="callback-worker", event_type="callback", aggregate_type="agent_run", aggregate_id="run-worker", payload_json={"event_id": "event-worker", "target_id": "memory"}, status="pending", retention_until=datetime.now(UTC) + timedelta(days=1)))
++    session.commit()
++
++    assert WorkerLoop(factory, FakeExecutor(), worker_id="worker-1", callback_gateway=Gateway()).run_once() == 0
++    assert sent == [("memory", payload)]
+diff --git a/tests/runtime_test_workflow_executor.py b/tests/runtime_test_workflow_executor.py
+index 566450c..d57fd4d 100644
+--- a/tests/runtime_test_workflow_executor.py
++++ b/tests/runtime_test_workflow_executor.py
+@@ -9,7 +9,16 @@ from sqlalchemy.orm import sessionmaker
+ 
+ import app.models  # noqa: F401
+ from app.db.sqlalchemy_db import Base
+-from app.models import AgentCheckpoint, AgentPlan, AgentRun, AgentStep
++from app.models import (
++    AgentArtifact,
++    AgentCheckpoint,
++    AgentPlan,
++    AgentRun,
++    AgentStep,
++    CallbackEvent,
++)
++from app.runtime.artifact import ArtifactStore
++from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
+ from app.runtime.executor import WorkflowExecutor
+ from app.runtime.interfaces import LeaseContext
+ from app.runtime.state import AgentState
+@@ -18,7 +27,9 @@ from app.runtime.state import AgentState
+ class DeterministicNodeRunner:
+     """不访问网络或业务数据的测试节点执行器。"""
+ 
+-    def run_node(self, node: dict[str, object], run: AgentRun) -> dict[str, object]:
++    def run_node(
++        self, node: dict[str, object], run: AgentRun, state: AgentState
++    ) -> dict[str, object]:
+         return {"node_id": node["node_id"], "result": "ok"}
+ 
+ 
+@@ -26,9 +37,31 @@ class RecordingNodeRunner(DeterministicNodeRunner):
+     def __init__(self) -> None:
+         self.node_ids: list[str] = []
+ 
+-    def run_node(self, node: dict[str, object], run: AgentRun) -> dict[str, object]:
++    def run_node(
++        self, node: dict[str, object], run: AgentRun, state: AgentState
++    ) -> dict[str, object]:
+         self.node_ids.append(str(node["node_id"]))
+-        return super().run_node(node, run)
++        return super().run_node(node, run, state)
++
++
++class SnapshotNodeRunner(DeterministicNodeRunner):
++    """模拟受信任工具返回私密快照，验证其只进入加密状态。"""
++
++    def run_node(
++        self, node: dict[str, object], run: AgentRun, state: AgentState
++    ) -> dict[str, object]:
++        state.snapshot = {"diaries": [{"content": "私密正文"}]}
++        return {"node_id": node["node_id"], "snapshot_loaded": True}
++
++
++def _executor(session, node_runner: DeterministicNodeRunner) -> WorkflowExecutor:
++    """为每个测试注入独立密钥，避免依赖环境中的生产私钥。"""
++    return WorkflowExecutor(
++        session,
++        node_runner,
++        CheckpointStore(session, FernetCheckpointCipher.generate()),
++        ArtifactStore(session),
++    )
+ 
+ 
+ def test_executor_writes_step_and_checkpoint_for_every_static_plan_node() -> None:
+@@ -58,7 +91,7 @@ def test_executor_writes_step_and_checkpoint_for_every_static_plan_node() -> Non
+     )
+     session.commit()
+ 
+-    result = WorkflowExecutor(session, DeterministicNodeRunner()).run(
++    result = _executor(session, DeterministicNodeRunner()).run(
+         "executor-run",
+         LeaseContext(
+             execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+@@ -75,12 +108,26 @@ def test_executor_writes_step_and_checkpoint_for_every_static_plan_node() -> Non
+     ]
+     checkpoints = session.scalars(select(AgentCheckpoint)).all()
+     assert len(checkpoints) == 2
+-    assert all(checkpoint.encrypted_state_blob is None for checkpoint in checkpoints)
++    # 恢复状态必须是密文；安全摘要只保留节点进度，不能暴露运行私密数据。
++    assert all(checkpoint.encrypted_state_blob is not None for checkpoint in checkpoints)
+     assert [checkpoint.state_summary["completed_steps"] for checkpoint in checkpoints] == [1, 2]
+     assert checkpoints[-1].state_summary["completed_node_ids"] == [
+         "compute_stats",
+         "load_snapshot",
+     ]
++    artifacts = session.scalars(select(AgentArtifact)).all()
++    assert len(artifacts) == 2
++    assert artifacts[0].summary_json == {
++        "node_id": "load_snapshot",
++        "result_keys": ["node_id", "result"],
++    }
++    assert artifacts[0].business_resource_ref == "business://couple_memory/archive"
++    callbacks = session.scalars(select(CallbackEvent).order_by(CallbackEvent.event_seq)).all()
++    assert [(event.event_type, event.payload_json["public_trace"]) for event in callbacks] == [
++        ("run_started", []),
++        ("step_changed", [{"step": "load_snapshot", "status": "succeeded"}]),
++        ("step_changed", [{"step": "compute_stats", "status": "succeeded"}]),
++    ]
+ 
+ 
+ def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
+@@ -108,7 +155,7 @@ def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
+     )
+     session.commit()
+ 
+-    result = WorkflowExecutor(session, DeterministicNodeRunner()).run(
++    result = _executor(session, DeterministicNodeRunner()).run(
+         "fenced-run",
+         LeaseContext(
+             execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+@@ -148,30 +195,84 @@ def test_executor_resume_skips_nodes_already_recorded_by_checkpoint() -> None:
+             stop_conditions_json={}, fallback_policy_json={}, status="planned",
+         )
+     )
+-    session.add(
+-        AgentCheckpoint(
+-            checkpoint_id="resume-checkpoint", run_id="resume-run", checkpoint_key="attempt:1:step:1",
+-            state_schema_version="1.0.0", data_classification="runtime_internal", privacy_version=1,
+-            state_summary={"completed_node_ids": ["load_snapshot"]}, content_digest="digest",
+-            expires_at=now + timedelta(days=1), created_at=now,
+-        )
++    session.commit()
++    context = LeaseContext(
++        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
++        lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
++        authorization_version=1,
++    )
++    checkpoint_store = CheckpointStore(session, FernetCheckpointCipher.generate())
++    checkpoint_store.save(
++        "resume-run",
++        "attempt:1:step:1",
++        {"completed_node_ids": ["load_snapshot"]},
++        context,
+     )
+     session.commit()
+     runner = RecordingNodeRunner()
+ 
+-    result = WorkflowExecutor(session, runner).resume(
++    result = WorkflowExecutor(
++        session, runner, checkpoint_store, ArtifactStore(session)
++    ).resume(
+         "resume-run",
+-        LeaseContext(
+-            execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+-            lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
+-            authorization_version=1,
+-        ),
++        context,
+     )
+ 
+     assert result.status == "succeeded"
+     assert runner.node_ids == ["compute_stats"]
+ 
+ 
++def test_executor_resume_from_fallback_checkpoint_starts_at_fallback_node() -> None:
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine)()
++    now = datetime.now(UTC)
++    session.add(
++        AgentRun(
++            run_id="fallback-run", agent_id="memoir_agent", agent_version="1.0.0",
++            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
++            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
++            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
++            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
++            execution_attempt=2, lease_owner="worker-b", fencing_token=2,
++            lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
++        )
++    )
++    session.add(
++        AgentPlan(
++            plan_id="fallback-plan", run_id="fallback-run", strategy="static_workflow",
++            steps_json=[
++                {"node_id": "prepare", "node_type": "tool"},
++                {"node_id": "review", "node_type": "guardrail"},
++                {"node_id": "fallback", "node_type": "deterministic"},
++            ],
++            stop_conditions_json={}, fallback_policy_json={"waiting_human_fallback_node": "fallback"},
++            status="planned",
++        )
++    )
++    session.commit()
++    context = LeaseContext(
++        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
++        lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
++        authorization_version=1,
++    )
++    checkpoint_store = CheckpointStore(session, FernetCheckpointCipher.generate())
++    checkpoint_store.save(
++        "fallback-run", "attempt:1:step:2",
++        {"completed_node_ids": ["prepare", "review"], "resume_from_node_id": "fallback"},
++        context,
++    )
++    session.commit()
++    runner = RecordingNodeRunner()
++
++    result = WorkflowExecutor(
++        session, runner, checkpoint_store, ArtifactStore(session)
++    ).resume("fallback-run", context)
++
++    assert runner.node_ids == ["fallback"]
++    assert result.status == "succeeded"
++
++
+ def test_agent_state_checkpoint_summary_never_contains_private_run_input() -> None:
+     state = AgentState(
+         run_input={"snapshot_id": "snapshot-1", "diary_content": "私密正文"},
+@@ -186,3 +287,73 @@ def test_agent_state_checkpoint_summary_never_contains_private_run_input() -> No
+         "fallback_flags": ["template_highlights"],
+     }
+     assert "diary_content" not in summary
++
++
++def test_executor_encrypts_node_state_without_leaking_snapshot_to_artifact() -> None:
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine)()
++    now = datetime.now(UTC)
++    session.add(AgentRun(run_id="snapshot-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
++    session.add(AgentPlan(plan_id="snapshot-plan", run_id="snapshot-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
++    session.commit()
++    context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
++    store = CheckpointStore(session, FernetCheckpointCipher.generate())
++    assert WorkflowExecutor(session, SnapshotNodeRunner(), store, ArtifactStore(session)).run("snapshot-run", context).status == "succeeded"
++    assert store.load_latest("snapshot-run", context)["snapshot"] == {"diaries": [{"content": "私密正文"}]}
++    assert "私密正文" not in str(session.scalar(select(AgentArtifact)).summary_json)
++
++
++def test_executor_pauses_for_human_after_checkpoint_and_emits_callback() -> None:
++    """人工等待必须先持久化节点 checkpoint，再释放 Worker lease 与 Admission。"""
++    class HumanReviewRunner(DeterministicNodeRunner):
++        def run_node(
++            self, node: dict[str, object], run: AgentRun, state: AgentState
++        ) -> dict[str, object]:
++            return {"node_id": node["node_id"], "waiting_human": True}
++
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine)()
++    now = datetime.now(UTC)
++    session.add(AgentRun(run_id="human-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
++    session.add(AgentPlan(plan_id="human-plan", run_id="human-run", strategy="static_workflow", steps_json=[{"node_id": "review", "node_type": "guardrail"}], stop_conditions_json={"approval_ttl_seconds": 60}, fallback_policy_json={}, status="planned"))
++    session.commit()
++    context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
++    store = CheckpointStore(session, FernetCheckpointCipher.generate())
++
++    result = WorkflowExecutor(session, HumanReviewRunner(), store, ArtifactStore(session)).run("human-run", context)
++
++    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "human-run"))
++    callback = session.scalar(select(CallbackEvent).where(CallbackEvent.run_id == "human-run", CallbackEvent.event_type == "waiting_human"))
++    assert result.status == "waiting_human"
++    assert run is not None and (run.status, run.dispatch_state, run.lease_owner) == ("waiting_human", "finished", None)
++    assert run.waiting_expires_at is not None
++    assert callback is not None
++    checkpoint = session.scalar(select(AgentCheckpoint).where(AgentCheckpoint.run_id == "human-run"))
++    assert checkpoint is not None and checkpoint.state_summary["completed_node_ids"] == ["review"]
++
++
++def test_executor_stops_before_next_node_when_authorization_changes() -> None:
++    """节点一完成即撤销授权时，Executor 不得启动后续节点。"""
++    class RevokingRunner(RecordingNodeRunner):
++        def run_node(
++            self, node: dict[str, object], run: AgentRun, state: AgentState
++        ) -> dict[str, object]:
++            result = super().run_node(node, run, state)
++            if node["node_id"] == "load_snapshot":
++                run.authorization_version += 1
++            return result
++
++    engine = create_engine("sqlite://")
++    Base.metadata.create_all(engine)
++    session = sessionmaker(bind=engine)()
++    now = datetime.now(UTC)
++    session.add(AgentRun(run_id="authorization-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
++    session.add(AgentPlan(plan_id="authorization-plan", run_id="authorization-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
++    session.commit()
++    runner = RevokingRunner()
++    result = _executor(session, runner).run("authorization-run", LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1))
++
++    assert result.error_code == "LEASE_CONTEXT_INVALID"
++    assert runner.node_ids == ["load_snapshot"]

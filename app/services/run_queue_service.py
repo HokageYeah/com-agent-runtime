@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models import AgentRun
 from app.runtime.interfaces import RunExecutor
 from app.services.lease_service import LeaseService
 
@@ -19,6 +21,7 @@ class RunQueueService:
         worker_id: str,
         is_draining: Callable[[], bool] = lambda: False,
     ) -> None:
+        self._session = session
         self._lease = LeaseService(session)
         self._executor, self._worker_id = executor, worker_id
         self._is_draining = is_draining
@@ -28,11 +31,18 @@ class RunQueueService:
         if self._is_draining():
             logging.warning("Worker draining，拒绝新 claim run_id=%s", run_id)
             return False
+        status = self._session.scalar(
+            select(AgentRun.status).where(AgentRun.run_id == run_id)
+        )
         context = self._lease.claim(run_id, self._worker_id)
         if context is None:
             logging.info("Worker 忽略不可认领 Run run_id=%s", run_id)
             return False
-        result = self._executor.run(run_id, context)
+        result = (
+            self._executor.resume(run_id, context)
+            if status == "waiting_human"
+            else self._executor.run(run_id, context)
+        )
         terminal_states = {"succeeded", "partial", "failed", "cancelled"}
         if result.status in terminal_states:
             # Task 6 WorkflowExecutor 返回终态时统一由 lease 服务条件收敛。

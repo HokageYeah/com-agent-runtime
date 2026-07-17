@@ -6,6 +6,9 @@ from app.api.endpoints import (
     demo_api,
     diary_api,
     health_api,
+    memory_callbacks_api,
+    memory_status_api,
+    memory_tools_api,
 )
 
 api_router = APIRouter()
@@ -26,3 +29,6 @@ api_router.include_router(
 api_router.include_router(
     agent_runs_api.router, prefix="/runtime", tags=["AgentRuntime"]
 )
+api_router.include_router(memory_tools_api.router)
+api_router.include_router(memory_callbacks_api.router)
+api_router.include_router(memory_status_api.router)

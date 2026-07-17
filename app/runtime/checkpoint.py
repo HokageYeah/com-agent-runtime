@@ -162,6 +162,10 @@ class CheckpointStore:
             isinstance(item, str) for item in fallback_flags
         ):
             summary["fallback_flags"] = fallback_flags
+        completed_steps = state.get("completed_steps")
+        if isinstance(completed_steps, int) and completed_steps >= 0:
+            # 步数属于运行进度，可安全用于 UI/排障；不携带任何业务正文。
+            summary["completed_steps"] = completed_steps
         return summary
 
     def _append_audit(

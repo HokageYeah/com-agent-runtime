@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentDefinition, AgentRun, RuntimeAuditRecord
+from app.models import AgentDefinition, AgentPlan, AgentRun, RuntimeAuditRecord
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
 
@@ -175,3 +175,33 @@ def test_waiting_human_cancel_is_immediately_terminal() -> None:
 
     assert result.status == "cancelled"
     assert result.dispatch_state == "finished"
+
+
+def test_reject_fallback_marks_only_the_fallback_resume_path() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="reject-fallback-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="waiting_human", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.add(
+        AgentPlan(
+            plan_id="reject-fallback-plan", run_id=run.run_id, strategy="static_workflow",
+            steps_json=[{"node_id": "fallback", "node_type": "deterministic"}],
+            stop_conditions_json={},
+            fallback_policy_json={"reject_action": "fallback", "waiting_human_fallback_node": "fallback"},
+            status="planned",
+        )
+    )
+    session.commit()
+
+    result = AgentRunService(session).approve(run.run_id, "caller", "reject", run.status_version)
+
+    assert (result.status, result.dispatch_state) == ("waiting_human", "queued")
+    assert run.error_code == "WAITING_HUMAN_FALLBACK"
