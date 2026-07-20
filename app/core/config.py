@@ -255,6 +255,13 @@ class Settings(BaseSettings):
     MEMOIR_MODEL_NODE_ROUTES_JSON: str = "{}"
     MEMORY_SNAPSHOT_FERNET_KEY: str = "UIdCWOsJY0GWrMpXlM444_JDKJC-zFwylDAJCymPvPg="
     MEMORY_TOOL_TRUSTED_RUNTIMES_JSON: str = '{"agent-runtime":{"keys":{"dev":"runtime-tool-development-secret"}}}'
+    # 回忆录业务 worker 调用 Runtime 的服务身份；仅允许部署环境注入，绝不回传。
+    MEMORY_RUNTIME_BASE_URL: str = "http://127.0.0.1:8002"
+    MEMORY_RUNTIME_CLIENT_ID: str = "couple-diary"
+    MEMORY_RUNTIME_KEY_ID: str = "dev"
+    MEMORY_RUNTIME_SECRET: str = "development-secret"
+    MEMORY_RUNTIME_TIMEOUT_SECONDS: float = 5.0
+    MEMORY_RUNTIME_CAPABILITY_TTL_SECONDS: int = 60
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,

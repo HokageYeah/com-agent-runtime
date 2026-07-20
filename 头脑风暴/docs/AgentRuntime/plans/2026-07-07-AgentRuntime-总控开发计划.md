@@ -450,8 +450,12 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - Produces: `MemoryArchiveService.create_archives_for_relationship(relationship_id)`、加密 `MemorySnapshot`、revision 0 baseline、`published_revision` 读取边界和 `MemoryAgentRunRef`。
 
 - [✅] 建立 `MemoryArchive/MemorySnapshot/MemoryPlaybackDocument/MemoryScene/MemoryAction/MemoryMediaAsset/MemoryAgentRunRef`、Alembic 迁移和 `MemoryArchiveService` 基础实现；以显式 `FrozenMemoryInput` 接收冻结素材，使用 Fernet 认证加密快照，并在同一事务为双方创建隔离 archive 与 revision 0 baseline。
+- [✅] 归档补偿使用 `(space_id, relationship_segment_no, owner_user_id)` 幂等复用首次冻结的双方 archive；manifest、payload digest、脱敏版本或冻结时间不一致时拒绝覆盖。revision 0 生成封面/统计卡和默认 `show_card` 动作，Runtime 不可用时仍可播放。
 - [✅] 建立 `MemoryPlayerService` 的 `published_revision` 读取边界，以及完整 PlaybackDocument 的原子发布：先校验并落库完整 `scenes/actions/media_manifest`，再在同一事务切换唯一发布指针。
 - [ ] 和平解绑或强制拉黑事务冻结 `space_id + relationship_segment_no + snapshot_cutoff_at + source manifest/version`，为双方创建独立 archive，并写 snapshot/run outbox。
+- [✅] `MemorySnapshotMaterializer` 已按真实 `couple_relationships/diary_entries/bets` 的空间、关系、段号、解绑截止时间与删除状态冻结最小素材 manifest；晚到或跨段素材不进入加密快照。Runtime readiness/capabilities 校验与实际 HTTP adapter 仍待接入。
+- [✅] `RelationshipArchiveService` 在同一业务 Session 锁定 `BOUND` 关系、写入 `UNBOUND_ARCHIVED` 与解绑操作者/原因后，立即按冻结输入创建双方隔离 archive；服务自身不提交事务，调用方可统一 commit 或 rollback。`snapshot/run outbox` 和 Runtime held-run 仍待后续接入。
+- [✅] 解绑归档事务为每个 owner archive 写入 Runtime 自有的 `MemoryRuntimeLaunchEvent(create_held)`；投递消费者成功后才绑定 `MemoryAgentRunRef` 并追加唯一 `start_held` 事件。create/start 均使用 `(archive_id, generation_epoch)` 派生的独立稳定幂等键；Runtime 网络失败只保留标准错误码与 pending 事件，revision 0 baseline 不回滚。
 - [ ] `MemoryArchive` 保存 owner/partner 快照、关系时间、summary、content/enhancement 状态、generation epoch、active run、published revision、pin/delete 字段；`MemoryAgentRunRef` 保存运行摘要、retry、event/status version、row version、各操作幂等键和 purge 对账字段。
 - [ ] 快照 materializer 只按冻结 manifest 读取素材，保存 `source_manifest_hash/privacy_filter_version`，不读取任务执行时新增或变更的数据。
 - [ ] `MemorySnapshot` 保存 `snapshot_version/source_range_json/diary_items_json/bet_items_json/stats_json/privacy_filter_version/snapshot_cutoff_at/source_manifest_hash`；正文使用数据库或应用层静态加密，只允许 memory service 和内部 tool 身份读取，通用后台、debug 日志和导出任务不得展开。
@@ -481,12 +485,15 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - Consumes: Runtime `/health/ready`、`/api/v1/runtime-capabilities` 和 held AgentRun API。
 - Produces: `MemoryAgentAdapter.start_memoir_agent(archive_id: str, snapshot_id: str, generation_epoch: int) -> MemoryAgentRunRef` 及可失效的兼容能力缓存。
 
-- [ ] adapter 在启动、缓存过期或 Runtime 版本变化时使用服务身份检查 readiness/capabilities，校验 Contract major、`memoir_agent@1.0.0`、所需逻辑 model policy 和能力开关。
-- [ ] 能力检查不进入解绑事务同步关键路径；Runtime 不可用、draining、版本不兼容或缺少 policy 时保留 baseline，由业务 outbox/补偿任务等待恢复后重试。
-- [ ] capability 缓存记录 Runtime/contract/package 摘要和过期时间；版本变化立即失效，不缓存密钥、真实 provider/connector endpoint 或租户配额。
-- [ ] 创建 held run 使用稳定 create 幂等键；返回后保存 `contract_version/package_digest/authorization_version`，不支持的 major 拒绝绑定和 start。
-- [ ] archive 在绑定前已删除、epoch 已变化或已有更新 active run 时取消新 run，只保留审计；start 使用独立稳定幂等键。
-- [ ] `pending_start_timeout_seconds=600`；超过 10 分钟仍未绑定 run_id 时由业务补偿任务复用原 create 幂等键修复或明确标记失败，不无限等待。
+- [✅] adapter 在启动、缓存过期或 Runtime 版本变化时使用服务身份检查 readiness/capabilities，校验 Contract major、`memoir_agent@1.0.0`、所需逻辑 model policy 和能力开关。
+- [✅] capabilities 已改为现有 HMAC 服务身份校验；`MemoryAgentAdapter` 使用短 TTL、仅进程内的安全摘要缓存校验 readiness、Contract major、`memoir_agent@1.0.0`、`emotional_writing/strict` policy 和 `workflow_agent`，并以最小 archive/snapshot/epoch 输入创建 held Run、独立键 start。
+- [✅] 能力检查不进入解绑事务同步关键路径；Runtime 不可用、draining、版本不兼容或缺少 policy 时保留 baseline，由业务 outbox/补偿任务等待恢复后重试。
+- [✅] capability 缓存记录 Runtime/contract/package 摘要和过期时间；版本变化立即失效，不缓存密钥、真实 provider/connector endpoint 或租户配额。
+- [✅] 创建 held run 使用稳定 create 幂等键；返回后保存 `contract_version/package_digest/authorization_version`，不支持的 major 拒绝绑定和 start。
+- [✅] archive 在绑定前已删除、epoch 已变化或已有更新 active run 时取消新 run，只保留审计；start 使用独立稳定幂等键。
+- [✅] `pending_start_timeout_seconds=600`；超过 10 分钟仍未绑定 run_id 时由业务补偿任务复用原 create 幂等键修复或明确标记失败，不无限等待。
+- [✅] `MemoryRuntimeLaunchService.deliver_pending()` 可消费既有 pending create/start 意图；`reconcile_pending_start(now)` 对超过 600 秒的已绑定 pending-start 只重放原 start event/key，缺事件时标记对账 needed，绝不新建 Run。
+- [✅] 部署配置已提供 Runtime URL、服务身份、超时与 capability TTL；`python -m app.memory_runtime_launcher` 复用根 Session 工厂单次消费 outbox/补偿，适合由 cron 或独立 worker 调度，不在 Web lifespan 内启动竞争线程。
 
 **Checkpoint:** Runtime 故障或版本漂移不会阻断解绑归档，也不会让不兼容 AgentRun 越过 baseline 降级边界。
 
@@ -496,25 +503,29 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 Runtime 侧：
 
-- [ ] 实现 `ToolGateway.call()`。
+- [✅] 实现 `ToolGateway.call()`。
+- [✅] 实现固定注册表驱动的 `ToolGateway.call()`：manifest 只能匹配 Runtime 内置 connector/method/path/input/side-effect 声明，运行上下文的 archive/snapshot/run/epoch 引用不可由 package 输入覆盖；输出执行 JSON 与敏感标识符扫描。
 - [ ] 实现 JSON repair、摘要压缩、敏感字段扫描等少量 Native Tool，以及 LangChain Tool 基础包装；所有 adapter 最终回到 ToolGateway，不自行请求业务 connector。
-- [ ] 实现 HTTP Business Tool 签名、幂等、超时、重试。
-- [ ] 通过 connector registry 解析固定 endpoint，阻止 SSRF 和重定向。
-- [ ] 使用不含 attempt 的稳定逻辑幂等键，并校验 trusted 参数来源。
-- [ ] side effect 工具先持久化 `AgentToolCall.running + logical_operation_key + idempotency_key + request_digest`，事务提交后再发送请求；每次物理 attempt 独立记录，重试/接管复用同一逻辑键和 digest。
+- [✅] Runtime 固定 `memory.*` HTTP Tool 已使用既有 HMAC、固定 path、10 秒超时、读取单次传输重试与写入零盲重试；写工具使用稳定幂等键并由审计/查询恢复。
+- [ ] 通过 connector registry 解析固定 endpoint，阻止 SSRF 和重定向；当前已拒绝非 HTTP(S) origin、userinfo/path/query/fragment 与所有重定向，DNS/IP 重绑定与内网地址策略仍待部署层完善。
+- [✅] 使用不含 attempt 的稳定逻辑幂等键，并校验 trusted 参数来源；archive/snapshot/run/epoch 只从 Runtime context 读取。
+- [✅] `ToolCallAuditService.begin_side_effect()` 在发送副作用前落 `running + logical_operation_key + idempotency_key + request_digest`；同一逻辑键请求摘要或幂等键漂移返回 `TOOL_CALL_OPERATION_CONFLICT`，重试物理 attempt 复用原键。
+- [✅] side effect 工具先持久化并提交 `AgentToolCall.running + logical_operation_key + idempotency_key + request_digest`，再发送请求；`running/outcome_unknown/succeeded` 接管只按原逻辑键、幂等键和 digest 查询，避免重新发送写请求。
 - [ ] 工具结果经 output schema、敏感扫描和 `output_to` allowlist 写入 AgentState，不能覆盖 identity、authorization、connector 或 generation/version token。
-- [ ] 按工具声明的 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 处理中断；已提交副作用只允许用原逻辑幂等键查询结果，不能因 attempt 变化重放。
+- [✅] `AgentState.apply_tool_output()` 仅接受冻结 `output_to` 白名单并递归拒绝 identity/authorization/connector/generation/version/fencing/run/credential 等控制字段；Package manifest 与语义校验器同步拒绝危险 target，日志不写输出正文。
+- [ ] 按工具声明的 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 处理中断；当前 publish 写工具已实现已提交副作用仅按原逻辑幂等键查询，完整 manifest 行为分级仍待扩展。
 - [ ] ToolCall/AgentState 结果写入继续校验 fencing、privacy 和 authorization；迟到或不确定结果留给对账按原 key 查询。相同 key 不同 digest 的 409 按不可重试冲突终止，禁止更换 key 重放。
 
 情侣日记后端侧：
 
 > 进度说明（2026-07-16）：`memory.publish_playback_document` 已具备 Runtime HMAC、`active_run_id + generation_epoch`、完整 document 容器校验与服务端稳定幂等重放；尚未完成 snapshot/source-ref allowlist、Runtime `AgentToolCall` 审计和写工具接管/对账，因此以下完整验收条目保持未完成。
 
-- [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.get_snapshot`：校验 Runtime HMAC、archive/snapshot 归属并解密冻结快照；正文仅返回给内部 Runtime，不写日志、checkpoint 摘要或 Artifact。
-- [ ] 暴露 `POST /api/v1/internal/agent-tools/memory.publish_playback_document`，单事务发布完整作品。
-- [ ] 发布请求接收完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定幂等键；媒体能力关闭时仍要求空 `media_manifest`，并按 scenes/actions/`media_manifest` 规范化内容计算或复核 digest；成功返回 `revision/content_digest`，供 Runtime 固化 `publish_result`。
+- [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.get_snapshot`：校验 Runtime HMAC、archive/snapshot/run/generation 归属与 active Run 后才解密冻结快照；正文仅返回给内部 Runtime，不写日志、checkpoint 摘要或 Artifact。
+- [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.publish_playback_document`，单事务发布完整作品。
+- [✅] 发布请求接收完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定幂等键；MVP 媒体关闭时强制空 `media_manifest`，按冻结 manifest 校验 source refs，并返回 `revision/content_digest` 供 Runtime 固化 `publish_result`。
 - [ ] 第一版只预留 `memory.enqueue_tts` 契约，不启用媒体任务。
-- [ ] 校验 Runtime 服务身份/key、archive/owner、active_run_id、generation_epoch、素材引用和幂等键。
+- [✅] 校验 Runtime 服务身份/key、archive/owner、active_run_id、generation_epoch、冻结快照素材引用和幂等键。
+- [✅] Runtime `ToolGateway` 的快照读取使用固定 connector endpoint 与 HMAC，并强制传播 `archive_id/snapshot_id/run_id/generation_epoch`；传输失败只对只读读取重试一次，写发布不盲目重试以保留原逻辑键对账语义。
 
 **Checkpoint:** Runtime 能通过 mock 或真实情侣日记后端调用 `memory.*` 工具。
 
@@ -522,20 +533,23 @@ Runtime 侧：
 
 **Plan:** 后端计划 Task 8、Task 9。
 
-- [ ] 实现文件化 PromptRegistry。
-- [ ] PromptRegistry 校验 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，节点精确引用版本且不自动回退 latest，模型调用记录 prompt id/version。
+- [✅] 实现文件化 PromptRegistry。
+- [✅] PromptRegistry 校验 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，不自动回退 latest；ModelGateway 可将已注册 prompt id/version 写入对应 usage attempt，且不保存模板正文。
 - [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate`、Pydantic structured parser 和 ContextManager/usage/安全 middleware hook；第一版不启用 createAgent 动态工具选择。
 - [✅] 实现受信任 HTTP Provider Adapter 与 ModelGateway：Redis 共享 permit、route allowlist、fail-closed、429 共享冷却、usage 安全结算；LiteLLM 适配仍按后续 Provider 扩展处理。
-- [ ] 固化第一版 `model_policy.yaml`，包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 映射。
+- [✅] 固化第一版 `model_policy.yaml`，包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 映射。
 - [ ] 每个可信 route 配置 `rate_limit_key/max_concurrency/rpm/tpm/request_timeout_seconds/permit_ttl_seconds/settle_margin_seconds/circuit_failure_threshold/circuit_open_seconds/pricing_config_version/cost_unit/input_unit_cost/output_unit_cost`；rate_limit_key 由 provider account、model 和部署分区生成，不含 key，价格与流量字段均不接受业务输入覆盖。
 - [ ] route 注册强制 `permit_ttl_seconds >= request_timeout_seconds + settle_margin_seconds`，单次 HTTP timeout 不超过 acquire deadline；配置非法时禁用 route，避免 permit 已释放而请求仍占用上游并发。
 - [ ] Runtime 预算统一使用一种 cost unit；预留和实际估算成本按该物理 attempt 固化的 pricing version 计算。内部/免费模型显式零价，缺失价格、单位不一致或数值非法时禁用 route/capability。
 - [ ] 每个 policy 固定 `max_output_tokens`、能力要求和显式 fallback；ModelGateway 校验 structured output、vision、上下文长度、数据驻留与 thinking 参数，不满足时禁止任意选用默认模型。
 - [ ] provider endpoint 只允许管理员在 registry 配置；校验协议、host、port、DNS/IP、内网地址和每次重定向，AgentPackage、业务请求和 prompt 均不能覆盖 endpoint/key。
 - [ ] `private_first` 没有合规私有 provider 时显式返回 capability disabled 或执行 policy 声明的 fallback，禁止静默改用任意云模型。
-- [ ] 实现 ContextManager 的 token 预算、素材分块、工具结果摘要压缩和敏感字段二次扫描。
-- [ ] 隔离 trusted instructions/untrusted content，并对 material/source ID、数字、Action 和工具参数做确定性语义校验。
-- [ ] 实现结构化输出、JSON repair、schema 校验。
+- [ ] ContextManager 的节点/模型策略预算、分块和工具结果摘要压缩尚待接入；当前仅提供固定预算截断、手机号/数字脱敏和无正文摘要。
+- [✅] MemoirAgent 的高光、章节、场景模型节点现精确加载内置 `prompt_id@v1`，向模型只传 prompt id/version、model policy、ContextManager 的 source-ref/脱敏计数摘要与安全输入；日记正文和模板正文不进入模型请求 DTO、日志或 checkpoint。
+- [✅] MemoirAgent 模型结果的字符串与 Mapping 统一经 StructuredOutputParser、一次无执行 JSON repair、Pydantic schema、SemanticValidator 和 `AgentState.apply_tool_output` 白名单；无效 JSON、未知来源引用或控制字段只触发模板 fallback。
+- [✅] MemoirModelGatewayAdapter 只从权威运行中 Step、有效 Lease、Run 冻结 agent version 与部署 PromptRegistry 构造调用；请求伪造的 prompt 元数据会被覆盖，usage 仅关联 prompt id/version。
+- [ ] 已实现 trusted/untrusted 槽隔离以及 source_ref、时长和禁止控制字段的基础语义校验；owner scope、数量、Action/工具参数的完整领域校验尚待接入。
+- [✅] 实现结构化输出、一次无执行能力的 JSON repair、schema 校验。
 - [✅] 实现 `ProviderTrafficController.acquire/mark_started/settle` 与 route 级连续失败熔断；Redis 原子维护共享并发、RPM/TPM、blocked_until、circuit open 与 `acquired -> started -> settled` permit，重复调用不重复增减计数；半开探测仍待后续策略扩展。
 - [ ] 每次候选请求单独 acquire/finally settle；只有 acquired permit 可按 aborted_before_send 原子释放并发槽、回滚 RPM/TPM 预留，started permit 无 usage 或结果未知时保留预留到窗口过期。acquired TTL 回收时回滚未发送预留，started TTL 回收只释放并发槽；重试等待不持有 permit，上游 429 的 Retry-After 写入共享冷却，fallback route 单独取 permit。
 - [ ] permit 等待受节点 timeout、剩余 active budget 和 run deadline 的最小值约束并计入 active elapsed；共享控制不可用时进入显式 provider fallback、模板 fallback 或安全失败。
@@ -560,11 +574,11 @@ Runtime 侧：
 - [ ] 实现 `sanitize_materials`。
 - [✅] 实现 `compute_stats`：仅计算已加载快照的日记/赌局数量与是否有素材；空快照返回零值 fallback，不保存素材正文。
 - [✅] 实现 `extract_highlights` 的模板高光 fallback：只保留最多 8 个稳定素材 ID，不复制正文；空素材返回空引用。
-- [ ] 接入 ModelGateway 后实现模型版 `extract_highlights`，并继续复用素材引用 allowlist。
+- [✅] 接入 ModelGateway 后实现模型版 `extract_highlights`，复用可信 Run/Step/Lease、冻结 prompt 引用、结构化输出与素材引用 allowlist；失败时保留模板 fallback。
 - [✅] 实现 `plan_chapters` 模板章节：生成 1 个仅含章节 ID、类型和安全素材引用的基础回顾章节。
-- [ ] 接入 ModelGateway 后实现模型版 `plan_chapters`。
+- [✅] 接入 ModelGateway 后实现模型版 `plan_chapters`，仅接受已校验的章节 ID、类型和可信素材引用；失败时保留模板 fallback。
 - [✅] 实现 `generate_scenes` 模板场景：按章节生成最多 3 个 summary Scene，空输入仍保留基础场景。
-- [ ] 接入 ModelGateway 后实现模型版 `generate_scenes`。
+- [✅] 接入 ModelGateway 后实现模型版 `generate_scenes`，仅接受已校验的 summary Scene 与可信素材引用；失败时保留模板 fallback。
 - [✅] 实现规则版 `generate_actions`：每个 Scene 生成 `show_card` 与固定 3000ms 时长，不包含正文。
 - [ ] MemoirAgent MVP 正常生成 3～8 张场景卡，单卡主体文案不超过 80 字；发布契约硬上限 16，越界由 evaluator 裁剪、fallback 或拒绝。
 - [✅] 实现 `safety_review`：校验模板 Scene/Action 的结构、引用和时长；不合法时回退为无素材引用的基础卡片。

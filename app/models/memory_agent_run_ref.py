@@ -14,6 +14,8 @@ class MemoryAgentRunRef(Base):
     id = Column(Integer, primary_key=True)
     run_id = Column(String(80), unique=True, nullable=False, index=True)
     archive_id = Column(String(64), nullable=False, index=True)
+    # Run 创建时冻结的快照标识；工具读取和发布必须命中它，不能仅凭同一 archive 放行。
+    snapshot_id = Column(String(64), nullable=True, index=True)
     generation_epoch = Column(Integer, nullable=False)
     status = Column(String(32), nullable=False, default="pending")
     # 业务侧乐观锁版本；每次 callback/lifecycle 状态变更递增，便于异步对账发现覆盖。

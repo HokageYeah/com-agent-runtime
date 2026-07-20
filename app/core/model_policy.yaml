@@ -1,0 +1,19 @@
+# 逻辑策略仅映射部署可信 route；业务请求、prompt 和模型输出不能覆盖此配置。
+reasoning:
+  max_output_tokens: 2048
+  required_capabilities: [structured_output]
+balanced:
+  max_output_tokens: 1024
+  required_capabilities: [structured_output]
+emotional_writing:
+  max_output_tokens: 1024
+  required_capabilities: [structured_output]
+cheap_structured:
+  max_output_tokens: 512
+  required_capabilities: [structured_output]
+strict:
+  max_output_tokens: 512
+  required_capabilities: [structured_output]
+private_first:
+  max_output_tokens: 512
+  required_capabilities: [structured_output, private_residency]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Column, Date, DateTime, Integer, String, Text
+from sqlalchemy import JSON, Column, Date, DateTime, Integer, String, Text
 from sqlalchemy.sql import func
 
 from app.db.sqlalchemy_db import Base
@@ -29,3 +29,12 @@ class DiaryEntry(Base):
         onupdate=func.now(),
         nullable=True,
     )
+    # 以下字段已存在于正式业务表；模板阶段保持可空以兼容旧演示数据。
+    space_id = Column(Integer, nullable=True, index=True)
+    relationship_id = Column(Integer, nullable=True, index=True)
+    relationship_segment_no = Column(Integer, nullable=True)
+    author_user_id = Column(Integer, nullable=True)
+    images_json = Column(JSON, nullable=True)
+    status = Column(String(32), nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
+    tags = Column(JSON, nullable=True)

@@ -23,6 +23,7 @@ class MemoryAgentBindingService:
         run_id: str,
         generation_epoch: int,
         *,
+        snapshot_id: str | None = None,
         create_idempotency_key: str | None = None,
         start_idempotency_key: str | None = None,
         contract_version: str | None = None,
@@ -46,6 +47,7 @@ class MemoryAgentBindingService:
                 raise ValueError("RUN_BINDING_CONFLICT")
             self._fill_missing_lifecycle_metadata(
                 existing,
+                snapshot_id=snapshot_id,
                 create_idempotency_key=create_idempotency_key,
                 start_idempotency_key=start_idempotency_key,
                 contract_version=contract_version,
@@ -58,6 +60,7 @@ class MemoryAgentBindingService:
         ref = MemoryAgentRunRef(
             run_id=run_id,
             archive_id=archive_id,
+            snapshot_id=snapshot_id,
             generation_epoch=generation_epoch,
             status="pending_start",
             create_idempotency_key=create_idempotency_key,
@@ -75,6 +78,7 @@ class MemoryAgentBindingService:
     def _fill_missing_lifecycle_metadata(
         ref: MemoryAgentRunRef,
         *,
+        snapshot_id: str | None,
         create_idempotency_key: str | None,
         start_idempotency_key: str | None,
         contract_version: str | None,
@@ -83,6 +87,7 @@ class MemoryAgentBindingService:
     ) -> None:
         """幂等重试仅补全首次缺失摘要，禁止用后续请求覆盖已冻结运行身份。"""
         values = {
+            "snapshot_id": snapshot_id,
             "create_idempotency_key": create_idempotency_key,
             "start_idempotency_key": start_idempotency_key,
             "contract_version": contract_version,

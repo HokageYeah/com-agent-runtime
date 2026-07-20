@@ -25,4 +25,5 @@ def test_project_metadata_contains_memory_runtime_foundation_tables() -> None:
         "memory_actions",
         "memory_media_assets",
         "memory_agent_run_refs",
+        "memory_runtime_launch_events",
     }.issubset(metadata.tables)

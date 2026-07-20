@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
 
 from app.core.security import request_hash
 from app.core.tool_security import verify_runtime_tool
-from app.models.memory_snapshot import MemorySnapshot
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
 from app.services.memory_archive_service import MemoryArchiveService
 from app.services.memory_snapshot_service import MemorySnapshotService
@@ -23,7 +21,12 @@ async def get_snapshot(request: Request) -> dict[str, object]:
         input_data = payload["input"]
         session = request.app.state.session_factory()
         try:
-            snapshot = MemorySnapshotService(session, request.app.state.memory_snapshot_cipher).read_for_runtime(input_data["archive_id"], input_data["snapshot_id"])
+            snapshot = MemorySnapshotService(
+                session, request.app.state.memory_snapshot_cipher,
+            ).read_for_runtime(
+                input_data["archive_id"], input_data["snapshot_id"],
+                input_data["run_id"], input_data["generation_epoch"],
+            )
         finally:
             session.close()
         return {"output": snapshot, "schema_version": "1.0.0"}
@@ -49,10 +52,17 @@ async def publish_playback_document(request: Request) -> dict[str, object]:
             replay = idempotency.replay(runtime_id, scope, idempotency_key, digest)
             if replay is not None:
                 return {"output": replay, "schema_version": "1.0.0"}
-            # 发布必须绑定本次冻结快照，避免 active Run 错把其他归档或旧快照的结果发布出去。
-            snapshot = session.scalar(select(MemorySnapshot).where(MemorySnapshot.snapshot_id == input_data["snapshot_id"], MemorySnapshot.archive_id == input_data["archive_id"]))
-            if snapshot is None:
-                raise ValueError("MEMORY_SNAPSHOT_NOT_FOUND")
+            # 发布与读取使用同一四元组授权，避免 active Run 错把其他归档或旧快照结果发布出去。
+            snapshot_service = MemorySnapshotService(
+                session, request.app.state.memory_snapshot_cipher,
+            )
+            snapshot = snapshot_service.authorize_runtime(
+                input_data["archive_id"], input_data["snapshot_id"],
+                input_data["run_id"], input_data["generation_epoch"],
+            )
+            snapshot_service.validate_document_references(
+                input_data["document"], snapshot,
+            )
             document = MemoryArchiveService(session, request.app.state.memory_snapshot_cipher).publish_playback_document(
                 input_data["archive_id"], expected_generation_epoch=input_data["generation_epoch"],
                 expected_run_id=input_data["run_id"], document=input_data["document"],

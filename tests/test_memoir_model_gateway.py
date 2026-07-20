@@ -10,7 +10,7 @@ def _run() -> object:
     return type("Run", (), {"run_id": "run-1"})()
 
 
-def test_model_capability_unavailable_uses_template_without_snapshot_body() -> None:
+def test_model_capability_unavailable_uses_template_without_snapshot_body(caplog: object) -> None:
     class ModelGateway:
         def __init__(self) -> None:
             self.requests: list[dict[str, object]] = []
@@ -31,8 +31,15 @@ def test_model_capability_unavailable_uses_template_without_snapshot_body() -> N
     assert result == {"node_id": "extract_highlights", "fallback": True}
     assert state.highlights == {"source_refs": ["diary:diary-1"], "mode": "template"}
     assert state.fallback_flags == ["model_unavailable_highlights", "template_highlights"]
-    assert gateway.requests == [{"source_refs": ["diary:diary-1"]}]
+    assert gateway.requests == [{
+        "prompt_id": "highlight-extract", "prompt_version": "v1",
+        "model_policy": "strict",
+        "context": {"token_budget": 256, "source_ref_count": 1,
+                    "redaction_summary": {"redacted_fields": 0, "item_count": 1}},
+        "input": {"source_refs": ["diary:diary-1"]},
+    }]
     assert "绝不能泄露的日记正文" not in str(gateway.requests)
+    assert "绝不能泄露的日记正文" not in caplog.text  # type: ignore[attr-defined]
 
 
 def test_invalid_model_structure_uses_safe_scene_template() -> None:
@@ -158,3 +165,90 @@ def test_missing_model_chapter_list_uses_template() -> None:
             }
         ]
     }
+
+
+def test_repaired_json_model_highlights_are_accepted_without_exposing_raw_text(caplog: object) -> None:
+    class ModelGateway:
+        def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+            assert node_id == "extract_highlights"
+            return type(
+                "Result",
+                (),
+                {"status": "succeeded", "data": "```json\n{'source_refs': ['diary:diary-1']}\n```"},
+            )()
+
+    state = AgentState(snapshot={"diaries": [{"id": "diary-1", "content": "私密正文"}]})
+
+    result = MemoirNodeRunner(object(), model_gateway=ModelGateway()).run_node(
+        {"node_id": "extract_highlights"}, _run(), state
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": False}
+    assert state.highlights == {"source_refs": ["diary:diary-1"], "mode": "model"}
+    assert "私密正文" not in str(result)
+    assert "私密正文" not in caplog.text  # type: ignore[attr-defined]
+
+
+def test_model_chapters_with_control_field_fall_back_without_writing_model_data() -> None:
+    class ModelGateway:
+        def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+            assert node_id == "plan_chapters"
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "succeeded",
+                    "data": {
+                        "chapters": [
+                            {
+                                "chapter_id": "chapter-unsafe",
+                                "source_refs": ["diary:diary-1"],
+                                "connector_id": "untrusted-connector",
+                            }
+                        ]
+                    },
+                },
+            )()
+
+    state = AgentState(highlights={"source_refs": ["diary:diary-1"]})
+
+    result = MemoirNodeRunner(object(), model_gateway=ModelGateway()).run_node(
+        {"node_id": "plan_chapters"}, _run(), state
+    )
+
+    assert result == {"node_id": "plan_chapters", "fallback": True}
+    assert state.chapter_plan == {
+        "chapters": [
+            {"chapter_id": "chapter-1", "source_refs": ["diary:diary-1"], "kind": "memory_overview"}
+        ]
+    }
+    assert state.fallback_flags == ["model_invalid_chapters", "template_chapters"]
+
+
+def test_json_string_model_scenes_are_parsed_before_state_write() -> None:
+    class ModelGateway:
+        def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+            assert node_id == "generate_scenes"
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "succeeded",
+                    "data": '{"scenes":[{"scene_id":"scene-1","scene_type":"summary","source_refs":["diary:diary-1"]}]}',
+                },
+            )()
+
+    state = AgentState(
+        chapter_plan={
+            "chapters": [
+                {"chapter_id": "chapter-1", "source_refs": ["diary:diary-1"], "kind": "memory_overview"}
+            ]
+        }
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=ModelGateway()).run_node(
+        {"node_id": "generate_scenes"}, _run(), state
+    )
+
+    assert result == {"node_id": "generate_scenes", "fallback": False}
+    assert state.scenes == [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]}]

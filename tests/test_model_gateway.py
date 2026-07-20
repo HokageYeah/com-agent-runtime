@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from app.db.sqlalchemy_db import Base
 from app.models import AgentDefinition, AgentModelUsage, AgentRun, AgentStep
 from app.runtime.interfaces import LeaseContext
+from app.runtime.memoir_model_gateway import MemoirModelGatewayAdapter
 from app.runtime.model_gateway import (
     ModelCallContext,
     ModelGateway,
@@ -21,6 +22,7 @@ from app.runtime.model_gateway import (
     ProviderTrafficController,
 )
 from app.runtime.policy_engine import PolicyEngine
+from app.runtime.prompt_registry import PromptDefinition
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
 from app.services.lease_service import LeaseService
@@ -99,6 +101,92 @@ def _gateway(session: object, lease: object, provider: RecordingProvider) -> Mod
 
 def _context(session: object, lease: LeaseContext) -> ModelCallContext:
     return ModelCallContext.from_authoritative(session, "run-1", "step-1", lease)
+
+
+def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary() -> None:
+    """适配器必须从部署内注册表获取 Prompt，不信任 request 自报的版本。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None
+    assert step is not None
+    run.agent_id = "memoir_agent"
+    run.agent_version = "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.prompt: PromptDefinition | None = None
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            assert context.run_id == "run-1"
+            assert context.step_id == "step-1"
+            assert route_id == "summary"
+            assert request == {
+                "prompt_id": "highlight-extract",
+                "prompt_version": "v1",
+                "model_policy": "strict",
+            }
+            self.prompt = prompt
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"extract_highlights": "summary"}, lease,  # type: ignore[arg-type]
+    ).call(
+        "run-1", "extract_highlights",
+        {"prompt_id": "forged", "prompt_version": "latest"},
+    )
+
+    assert result.status == "succeeded"
+    assert gateway.prompt is not None
+    assert (gateway.prompt.prompt_id, gateway.prompt.version) == ("highlight-extract", "v1")
+    assert gateway.prompt.template not in str({
+        "prompt_id": gateway.prompt.prompt_id,
+        "prompt_version": gateway.prompt.version,
+        "model_policy": gateway.prompt.model_policy,
+    })
+
+
+def test_memoir_adapter_rejects_ambiguous_authoritative_step() -> None:
+    """同一执行边界内 Step 不唯一时必须 fail-closed，不能任意选一条。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    first = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None
+    assert first is not None
+    run.agent_id = "memoir_agent"
+    run.agent_version = "1.0.0"
+    first.step_name = "extract_highlights"
+    session.add(AgentStep(
+        step_id="step-2", run_id="run-1", step_name="extract_highlights",
+        step_type="model", status="running", execution_attempt=1, step_attempt=2,
+        input_summary={"estimated_input_tokens": 20},
+    ))
+    session.commit()
+
+    class RecordingGateway:
+        calls = 0
+
+        def call(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"extract_highlights": "summary"}, lease,  # type: ignore[arg-type]
+    ).call("run-1", "extract_highlights", {})
+
+    assert result.status == "aborted_before_send"
+    assert gateway.calls == 0
 
 
 def test_cancellation_after_acquire_does_not_call_provider() -> None:
@@ -902,6 +990,26 @@ def test_step_revoked_after_reservation_cannot_reach_provider() -> None:
 
     assert result.status == "aborted_before_send"
     assert provider.calls == 0
+
+
+def test_gateway_records_registered_prompt_reference_without_template_body() -> None:
+    session, lease = _run_session()
+    provider = RecordingProvider()
+
+    result = _gateway(session, RevokingLease([True]), provider).call(
+        _context(session, lease), "summary", {"request": "private"},
+        prompt=PromptDefinition(
+            prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+            input_schema="input", output_schema="output", model_policy="strict",
+            guardrail_policy="private_first", status="active", template="private template",
+        ),
+    )
+
+    usage = session.scalar(select(AgentModelUsage))
+    assert result.status == "succeeded"
+    assert usage is not None
+    assert usage.prompt_id == "highlight-extract"
+    assert usage.prompt_version == "v1"
 
 
 def test_model_governance_denial_logs_exclude_request_body(caplog: pytest.LogCaptureFixture) -> None:

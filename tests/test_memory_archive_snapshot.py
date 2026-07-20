@@ -10,8 +10,10 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
+from app.models.memory_action import MemoryAction
 from app.models.memory_archive import MemoryArchive
 from app.models.memory_playback_document import MemoryPlaybackDocument
+from app.models.memory_scene import MemoryScene
 from app.models.memory_snapshot import MemorySnapshot
 from app.services.memory_agent_binding_service import MemoryAgentBindingService
 from app.services.memory_archive_service import (
@@ -132,9 +134,17 @@ def test_snapshot_service_only_reads_snapshot_bound_to_archive() -> None:
     session.commit()
     snapshot = session.scalar(select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id))
     assert snapshot is not None
-    assert MemorySnapshotService(session, cipher).read_for_runtime(archive.archive_id, snapshot.snapshot_id) == {"diaries": ["私密正文"]}
+    ref = MemoryAgentBindingService(session).bind(
+        archive.archive_id, "snapshot-read-run", 0, snapshot_id=snapshot.snapshot_id,
+    )
+    ref.status = "pending"
+    assert MemorySnapshotService(session, cipher).read_for_runtime(
+        archive.archive_id, snapshot.snapshot_id, "snapshot-read-run", 0,
+    ) == {"diaries": ["私密正文"]}
     try:
-        MemorySnapshotService(session, cipher).read_for_runtime("other", snapshot.snapshot_id)
+        MemorySnapshotService(session, cipher).read_for_runtime(
+            "other", snapshot.snapshot_id, "snapshot-read-run", 0,
+        )
     except ValueError as exc:
         assert str(exc) == "MEMORY_SNAPSHOT_UNAVAILABLE"
     else:
@@ -169,3 +179,61 @@ def test_binding_rejects_second_run_and_old_epoch_publish() -> None:
         assert str(exc) == "MEMORY_RUN_NOT_ACTIVE"
     else:
         raise AssertionError("旧 Run 发布必须拒绝")
+
+
+def test_repeat_archive_returns_existing_isolated_archives_and_playable_baseline() -> None:
+    """解绑补偿重放不能复制 archive；即使 Runtime 不可用，revision 0 也能播放。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    frozen = FrozenMemoryInput(
+        relationship_id=99,
+        space_id="space-99",
+        relationship_segment_no=2,
+        owner_user_ids=(1001, 1002),
+        partner_names={1001: "小林", 1002: "小周"},
+        snapshot_cutoff_at=datetime(2026, 7, 20, tzinfo=UTC),
+        source_manifest={"diary_ids": [1], "bet_ids": [2]},
+        snapshot_payload={"diaries": [], "bets": []},
+        privacy_filter_version="v1",
+    )
+    service = MemoryArchiveService(session, cipher)
+    first = service.create_archives_for_relationship(frozen)
+    session.commit()
+    second = service.create_archives_for_relationship(frozen)
+
+    assert {archive.archive_id for archive in second} == {
+        archive.archive_id for archive in first
+    }
+    assert len(session.scalars(select(MemoryArchive)).all()) == 2
+    for archive in first:
+        document = MemoryPlayerService(session).get_published_document(archive.archive_id)
+        assert document.document_json["scenes"]
+        assert document.document_json["actions"]
+        assert session.scalars(
+            select(MemoryScene).where(MemoryScene.document_id == document.document_id)
+        ).all()
+        assert session.scalars(
+            select(MemoryAction).where(MemoryAction.scene_id.is_not(None))
+        ).all()
+
+
+def test_repeat_archive_with_changed_frozen_manifest_is_rejected() -> None:
+    """同一关系段只能绑定首次冻结的素材版本，补偿不得悄悄改写历史范围。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    service = MemoryArchiveService(session, cipher)
+    original = FrozenMemoryInput(7, "space-7", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {"diary_ids": [1]}, {}, "v1")
+    service.create_archives_for_relationship(original)
+    session.commit()
+
+    changed = FrozenMemoryInput(7, "space-7", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {"diary_ids": [1, 2]}, {}, "v1")
+    try:
+        service.create_archives_for_relationship(changed)
+    except ValueError as exc:
+        assert str(exc) == "MEMORY_ARCHIVE_FROZEN_INPUT_CONFLICT"
+    else:
+        raise AssertionError("同一关系段的冻结素材变化必须被拒绝")

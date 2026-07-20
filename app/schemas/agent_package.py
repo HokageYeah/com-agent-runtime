@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.runtime.state import SAFE_TOOL_OUTPUT_FIELDS
+
 
 class PackageSchema(BaseModel):
     """文件包的严格 schema 基类，拒绝未知配置以避免隐式行为漂移。"""
@@ -50,9 +52,8 @@ class ToolManifest(PackageSchema):
             not self.relative_path.startswith("/") or "://" in self.relative_path
         ):
             raise ValueError("relative_path 只能是以 / 开头的相对路径")
-        trusted_prefixes = ("identity.", "authorization.", "connector.", "generation.")
-        if self.output_to and self.output_to.startswith(trusted_prefixes):
-            raise ValueError("output_to 不得覆盖 trusted 控制字段")
+        if self.output_to and self.output_to not in SAFE_TOOL_OUTPUT_FIELDS:
+            raise ValueError("output_to 必须是受控的 AgentState 业务字段")
         return self
 
 

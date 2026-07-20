@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.runtime.interfaces import LeaseContext
 from app.runtime.policy_engine import PolicyEngine
+from app.runtime.prompt_registry import PromptDefinition
 
 _CONTEXT_FACTORY = object()
 
@@ -283,7 +284,12 @@ class ModelGateway:
         self._call_guard = call_guard or _AllowModelCalls()
 
     def call(
-        self, context: ModelCallContext, route_id: str, request: object
+        self,
+        context: ModelCallContext,
+        route_id: str,
+        request: object,
+        *,
+        prompt: PromptDefinition | None = None,
     ) -> ModelGatewayResult:
         route = self._routes.get(route_id)
         if route_id not in context.allowed_route_ids:
@@ -312,6 +318,14 @@ class ModelGateway:
                 context.run_id, context.step_id, route_id, decision.code,
             )
             return ModelGatewayResult("policy_denied", error_code=decision.code)
+        # 仅把受注册表校验过的 id/version 关联到预留 usage；禁止写入模板正文。
+        if prompt is not None:
+            attach_prompt_ref = getattr(self._usage, "attach_prompt_ref", None)
+            if not callable(attach_prompt_ref) or not attach_prompt_ref(
+                usage_id, prompt.prompt_id, prompt.version
+            ):
+                self._usage.cancel_reservation(usage_id)
+                return ModelGatewayResult("aborted_before_send")
         permit_id = str(uuid4())
         acquired = self._traffic.acquire(
             route, permit_id, estimated_tokens=context.estimated_input_tokens

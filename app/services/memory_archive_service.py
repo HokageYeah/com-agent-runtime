@@ -14,8 +14,10 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.memory_action import MemoryAction
 from app.models.memory_archive import MemoryArchive
 from app.models.memory_playback_document import MemoryPlaybackDocument
+from app.models.memory_scene import MemoryScene
 from app.models.memory_snapshot import MemorySnapshot
 
 
@@ -68,6 +70,14 @@ class MemoryArchiveService:
             raise ValueError("回忆录归档必须属于两个不同用户")
         manifest_hash = _digest_json(frozen.source_manifest)
         payload_digest = _digest_json(frozen.snapshot_payload)
+        existing = self._existing_archives(frozen, manifest_hash, payload_digest)
+        if existing is not None:
+            logger.info(
+                "复用已冻结的双方回忆录归档 relationship_id={} segment={}",
+                frozen.relationship_id,
+                frozen.relationship_segment_no,
+            )
+            return existing
         encrypted_payload = self._cipher.encrypt_json(frozen.snapshot_payload)
         archives: list[MemoryArchive] = []
         for owner_user_id, partner_user_id in ((owner_a, owner_b), (owner_b, owner_a)):
@@ -99,26 +109,28 @@ class MemoryArchiveService:
                     content_digest=payload_digest,
                 )
             )
-            baseline = {
-                "schema_version": "1.0.0",
-                "title": "我们的回忆录",
-                "owner_user_id": owner_user_id,
-                "partner_name": frozen.partner_names.get(partner_user_id, "")[:100],
-                "scenes": [],
-                "actions": [],
-                "media_manifest": [],
-            }
-            self._session.add(
-                MemoryPlaybackDocument(
-                    document_id=str(uuid4()),
-                    archive_id=archive_id,
-                    revision=0,
-                    document_json=baseline,
-                    content_digest=_digest_json(baseline),
-                    is_published=True,
-                    published_at=frozen.snapshot_cutoff_at,
-                )
+            baseline, scenes, actions = _baseline_document(
+                frozen, owner_user_id, partner_user_id
             )
+            document_id = str(uuid4())
+            self._session.add(MemoryPlaybackDocument(
+                document_id=document_id, archive_id=archive_id, revision=0,
+                document_json=baseline, content_digest=_digest_json(baseline),
+                is_published=True, published_at=frozen.snapshot_cutoff_at,
+            ))
+            for scene in scenes:
+                self._session.add(MemoryScene(
+                    scene_id=scene["scene_id"], document_id=document_id,
+                    scene_order=scene["order"], scene_type=scene["scene_type"],
+                    safety_level="fallback", payload_json=scene["payload"],
+                    source_refs_json=[],
+                ))
+            for action in actions:
+                self._session.add(MemoryAction(
+                    action_id=action["action_id"], scene_id=action["scene_id"],
+                    action_order=action["order"], action_type=action["action_type"],
+                    duration_ms=action["duration_ms"], payload_json={},
+                ))
             archives.append(archive)
         logger.info(
             "创建双方回忆录基础归档 relationship_id={} segment={} archive_count={}",
@@ -127,6 +139,54 @@ class MemoryArchiveService:
             len(archives),
         )
         return archives
+
+    def create_archives_for_unbound_relationship(
+        self, relationship_id: int,
+    ) -> list[MemoryArchive]:
+        """从真实业务表冻结已解绑关系段，再复用唯一归档写入路径。"""
+        # 延迟导入避免冻结 DTO 与 materializer 的模块循环依赖。
+        from app.services.memory_snapshot_materializer import MemorySnapshotMaterializer
+
+        frozen = MemorySnapshotMaterializer(self._session).freeze_relationship(
+            relationship_id
+        )
+        logger.info("开始从解绑关系冻结回忆录 relationship_id={}", relationship_id)
+        return self.create_archives_for_relationship(frozen)
+
+    def _existing_archives(
+        self, frozen: FrozenMemoryInput, manifest_hash: str, payload_digest: str,
+    ) -> list[MemoryArchive] | None:
+        """以关系段为幂等边界；已冻结素材一旦不同必须停止而非覆盖历史。"""
+        records = self._session.scalars(select(MemoryArchive).where(
+            MemoryArchive.space_id == frozen.space_id,
+            MemoryArchive.relationship_segment_no == frozen.relationship_segment_no,
+        )).all()
+        if not records:
+            return None
+        expected_owners = set(frozen.owner_user_ids)
+        if (
+            len(records) != 2
+            or {record.owner_user_id for record in records} != expected_owners
+            or any(record.relationship_id != frozen.relationship_id for record in records)
+        ):
+            raise ValueError("MEMORY_ARCHIVE_FROZEN_INPUT_CONFLICT")
+        snapshots = self._session.scalars(select(MemorySnapshot).where(
+            MemorySnapshot.archive_id.in_([record.archive_id for record in records]),
+        )).all()
+        if (
+            len(snapshots) != 2
+            or any(
+                snapshot.source_manifest_hash != manifest_hash
+                or snapshot.content_digest != payload_digest
+                or snapshot.privacy_filter_version != frozen.privacy_filter_version
+                # SQLite 测试库会丢失 tzinfo；按 UTC 瞬间比较，生产 MySQL 同样安全。
+                or _as_utc(snapshot.snapshot_cutoff_at) != _as_utc(frozen.snapshot_cutoff_at)
+                for snapshot in snapshots
+            )
+        ):
+            raise ValueError("MEMORY_ARCHIVE_FROZEN_INPUT_CONFLICT")
+        by_owner = {record.owner_user_id: record for record in records}
+        return [by_owner[owner] for owner in frozen.owner_user_ids]
 
     def publish_playback_document(
         self,
@@ -190,6 +250,11 @@ def _canonical_json(payload: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _as_utc(value: datetime) -> datetime:
+    """统一比较冻结边界，避免数据库方言的时区表示差异改变归档幂等语义。"""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def _digest_json(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload)).hexdigest()
 
@@ -201,3 +266,31 @@ def _validate_complete_document(document: dict[str, Any]) -> None:
         not isinstance(document.get(field), list) for field in required_lists
     ):
         raise ValueError("播放文档不是完整的可发布版本")
+
+
+def _baseline_document(
+    frozen: FrozenMemoryInput, owner_user_id: int, partner_user_id: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """生成不含日记/赌局正文的基础作品，保证 AI 故障时仍有安全播放器入口。"""
+    partner_name = frozen.partner_names.get(partner_user_id, "")[:100]
+    cover_id, stats_id = str(uuid4()), str(uuid4())
+    scenes = [
+        {"scene_id": cover_id, "order": 1, "scene_type": "cover", "payload": {
+            "title": "我们的回忆录", "partner_name": partner_name,
+        }},
+        {"scene_id": stats_id, "order": 2, "scene_type": "stats", "payload": {
+            "diary_count": len(frozen.source_manifest.get("diary_ids", [])),
+            "bet_count": len(frozen.source_manifest.get("bet_ids", [])),
+        }},
+    ]
+    actions = [
+        {"action_id": str(uuid4()), "scene_id": cover_id, "order": 1,
+         "action_type": "show_card", "duration_ms": 3000},
+        {"action_id": str(uuid4()), "scene_id": stats_id, "order": 2,
+         "action_type": "show_card", "duration_ms": 3000},
+    ]
+    return {
+        "schema_version": "1.0.0", "title": "我们的回忆录",
+        "owner_user_id": owner_user_id, "partner_name": partner_name,
+        "scenes": scenes, "actions": actions, "media_manifest": [],
+    }, scenes, actions

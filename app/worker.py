@@ -206,6 +206,7 @@ def configured_executor(
                 MemoirNodeRunner(tool_gateway, ToolCallAuditService(session), model_gateway),
                 CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())),
                 ArtifactStore(session),
+                is_draining=is_draining,
             )
 
         def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:

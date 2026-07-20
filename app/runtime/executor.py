@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Protocol
 from uuid import uuid4
@@ -37,11 +37,14 @@ class WorkflowExecutor:
         node_runner: WorkflowNodeRunner,
         checkpoint_store: CheckpointStore,
         artifact_store: ArtifactStore,
+        *,
+        is_draining: Callable[[], bool] = lambda: False,
     ) -> None:
         self._session = session
         self._node_runner = node_runner
         self._checkpoint_store = checkpoint_store
         self._artifact_store = artifact_store
+        self._is_draining = is_draining
         self._lease = LeaseService(session)
         self._outbox = OutboxService(session)
 
@@ -137,6 +140,9 @@ class WorkflowExecutor:
                 execution_attempt=lease_context.execution_attempt,
                 error_code="LEASE_CONTEXT_INVALID",
             )
+        # draining 不接管 Run 状态；RunQueueService 会在这个安全边界释放 lease。
+        if self._is_draining():
+            return self._draining_result(run_id, lease_context, len(completed_node_ids))
         if run.status != "running":
             run.status = "running"
             run.status_version += 1
@@ -169,6 +175,8 @@ class WorkflowExecutor:
                 continue
             if not self._lease.can_write(run_id, lease_context):
                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
+            if self._is_draining():
+                return self._draining_result(run_id, lease_context, completed_steps)
             step = AgentStep(
                 step_id=str(uuid4()),
                 run_id=run_id,
@@ -191,6 +199,9 @@ class WorkflowExecutor:
                 return self._fail(run, lease_context, "WORKFLOW_NODE_FAILED")
             if not self._lease.can_write(run_id, lease_context):
                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
+            # 工具/模型副作用返回后已到节点安全边界：仍须完成脱敏 Artifact
+            # 与加密 checkpoint，随后不再启动下一节点。
+            draining_after_node = self._is_draining()
             try:
                 self._artifact_store.save_node_result(
                     run, node_id, node_result, lease_context
@@ -233,6 +244,8 @@ class WorkflowExecutor:
                 checkpoint_state,
                 lease_context,
             )
+            if draining_after_node or self._is_draining():
+                return self._draining_result(run_id, lease_context, completed_steps)
             if node_result.get("waiting_human") is True:
                 timeout = plan.stop_conditions_json.get("approval_ttl_seconds", 86400)
                 if not isinstance(timeout, int) or timeout <= 0:
@@ -261,6 +274,24 @@ class WorkflowExecutor:
             run_id=run_id,
             status="succeeded",
             execution_attempt=lease_context.execution_attempt,
+            output_summary={"completed_steps": completed_steps},
+        )
+
+    @staticmethod
+    def _draining_result(
+        run_id: str, lease_context: LeaseContext, completed_steps: int
+    ) -> AgentRunResult:
+        """只返回可接管的非终态，不记录正文、prompt 或节点原始结果。"""
+        logging.warning(
+            "Workflow draining 到达安全边界 run_id=%s completed_steps=%s",
+            run_id,
+            completed_steps,
+        )
+        return AgentRunResult(
+            run_id=run_id,
+            status="pending",
+            execution_attempt=lease_context.execution_attempt,
+            error_code="WORKFLOW_DRAINING",
             output_summary={"completed_steps": completed_steps},
         )
 

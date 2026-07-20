@@ -4,9 +4,9 @@ from app.runtime.state import AgentState
 
 def test_load_snapshot_writes_only_runtime_memory_state():
     class Gateway:
-        def get_snapshot(self, connector_id, archive_id, snapshot_id):
+        def get_snapshot(self, connector_id, archive_id, snapshot_id, run_id, generation_epoch):
             return {"diaries": ["私密正文"]}
-    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s"}, "business_connector_id": "c", "run_id": "r"})()
+    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 0}, "business_connector_id": "c", "run_id": "r"})()
     state = AgentState()
     assert MemoirNodeRunner(Gateway()).run_node({"node_id": "load_snapshot"}, run, state) == {"node_id": "load_snapshot", "snapshot_loaded": True}
     assert state.snapshot == {"diaries": ["私密正文"]}

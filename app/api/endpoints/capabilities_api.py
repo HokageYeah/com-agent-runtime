@@ -1,29 +1,51 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.contracts.api import CONTRACT_VERSION
+from app.core.security import SignatureError, verify_signature
+from app.services.agent_package_service import (
+    AgentPackageService,
+    AgentPackageValidationError,
+)
 
 router = APIRouter(tags=["runtime"])
 
 
 @router.get("/capabilities")
 async def runtime_capabilities(request: Request) -> dict[str, object]:
-    client_id = request.headers.get("X-Agent-Client-Id")
-    # 这里只做骨架阶段的服务身份识别；Task 5 会补齐时间戳、HMAC 与可见性校验。
-    if client_id not in request.app.state.settings.trusted_clients:
-        logging.warning("Runtime capability 查询被拒绝：未知 client_id=%s", client_id)
+    """只向已验签业务服务提供 Runtime 的安全能力摘要。"""
+    body = await request.body()
+    try:
+        client_id = verify_signature(
+            {key.lower(): value for key, value in request.headers.items()},
+            request.method, request.url.path, body,
+            request.app.state.settings.trusted_clients,
+            request.app.state.settings.signature_tolerance_seconds,
+        )
+    except SignatureError as exc:
+        logging.warning("Runtime capability 查询验签失败")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="unknown client",
-        )
+            detail="invalid service signature",
+        ) from exc
     # 不记录请求头中可能出现的签名、Key ID 或其它凭据，只保留客户端标识。
+    try:
+        # capabilities 必须暴露实际不可变 package digest，供业务侧立刻发现版本漂移。
+        package = AgentPackageService(Path(__file__).parents[2] / "agents").load(
+            "memoir_agent", "1.0.0"
+        )
+    except AgentPackageValidationError as exc:
+        logging.error("Runtime capabilities 无法加载 MemoirAgent 摘要")
+        raise HTTPException(status_code=503, detail="agent package unavailable") from exc
     logging.info("Runtime capability 查询通过 client_id=%s", client_id)
     return {
         "contract_version": CONTRACT_VERSION,
-        "agents": [{"agent_id": "memoir_agent", "version": "1.0.0"}],
+        "package_digest": package.package_digest,
+        "agents": [{"agent_id": package.agent_id, "version": package.version}],
         "model_policies": [
             "reasoning",
             "balanced",

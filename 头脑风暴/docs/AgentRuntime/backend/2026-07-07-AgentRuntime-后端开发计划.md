@@ -925,9 +925,9 @@ unique(client_id, idempotency_key, scope)
 - Produces: `ContextManager.build_node_context(run, state, node) -> NodeContext`；上下文固定包含 `trusted_instructions/untrusted_items/token_budget/source_refs/redaction_summary`，信任域不可由模型输出覆盖。
 - Produces: `SemanticValidator.validate(value, schema, trusted_refs, policy) -> SemanticValidationResult`；结果固定包含 `valid/error_codes/safe_summary/normalized_value`，不能返回未经验证的控制字段。
 
-- [ ] PromptRegistry 根据 `prompt_id@version` 加载 prompt 文件。
-- [ ] 校验 prompt manifest 的 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`；节点必须精确引用版本，不自动回退 latest，每次调用把 prompt id/version 写入 `AgentModelUsage`。
-- [ ] 创建 `model_policy.yaml`，至少包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 六类策略。
+- [✅] PromptRegistry 根据 `prompt_id@version` 加载 prompt 文件。
+- [✅] 校验 prompt manifest 的 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，不自动回退 latest；调用链可将 prompt id/version 写入 `AgentModelUsage`。
+- [✅] 创建 `model_policy.yaml`，至少包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 六类策略。
 - [ ] 每个部署 route 配置可信 `rate_limit_key/max_concurrency/rpm/tpm/request_timeout_seconds/permit_ttl_seconds/settle_margin_seconds/circuit_failure_threshold/circuit_open_seconds/pricing_config_version/cost_unit/input_unit_cost/output_unit_cost`；rate_limit_key 由 provider account、model 和限流分区组成，不含密钥，价格与流量字段都不接受业务输入覆盖。
 - [ ] route 注册校验 `permit_ttl_seconds >= request_timeout_seconds + settle_margin_seconds`，并把单次 HTTP 硬超时截断到当前 acquire deadline；配置非法时禁用 route，禁止 permit 过期后仍保留在途上游请求。
 - [ ] Runtime 只配置一种预算 cost unit；ModelGateway 按 route 固化的 pricing version 计算预留和实际估算成本。内部/免费模型显式配置零价；缺失价格、单位不一致或数值非法时禁用 route/capability，未知价格不能默认为零。
@@ -950,13 +950,13 @@ unique(client_id, idempotency_key, scope)
 - [ ] 调用前校验 structured output、vision、上下文长度、数据驻留和 thinking 参数；能力不满足时只走当前 policy 明示 fallback，无匹配路由时返回配置错误。
 - [ ] 调 LiteLLM 或 Provider Adapter。
 - [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate` 拼装受信任模板变量，使用 Pydantic/structured output parser，并以 middleware/hook 接入 ContextManager 脱敏、usage 和安全摘要；不启用动态 createAgent。
-- [ ] ContextManager 根据节点类型和模型策略计算 token 预算。
-- [ ] ContextManager 对素材分块、长日记摘录、工具结果摘要压缩和敏感字段二次扫描。
-- [ ] ContextManager 把 Runtime/Package 规则标为 trusted instructions，把日记、赌局、RAG/Web Search 和工具结果放入 untrusted 数据槽。
-- [ ] ContextManager 只保存上下文摘要，不保存完整私密原文。
-- [ ] 解析 JSON 输出并用 Pydantic schema 校验。
-- [ ] schema 后校验 material/source ID、owner scope、scene/action 引用、数量、时长、统计和工具参数；模型输出 URL/connector/permission/callback target 不进入执行。
-- [ ] 解析失败时执行 JSON repair，再失败时执行 one-shot repair prompt。
+- [ ] ContextManager 按节点类型和模型策略计算 token 预算尚待接入；当前仅支持调用方提供的固定 token budget。
+- [ ] ContextManager 对素材分块、长日记摘录与工具结果摘要压缩尚待接入；当前对长文本截断并二次脱敏。
+- [✅] ContextManager 把 Runtime/Package 规则标为 trusted instructions，把日记、赌局、RAG/Web Search 和工具结果放入 untrusted 数据槽。
+- [✅] ContextManager 只保存上下文摘要，不保存完整私密原文。
+- [✅] 解析 JSON 输出并用 Pydantic schema 校验。
+- [ ] schema 后完整校验 material/source ID、owner scope、scene/action 引用、数量、时长、统计和工具参数尚待接入；当前拒绝未知 source_ref、非法时长及 URL/connector/permission/callback 等控制字段。
+- [✅] 解析失败时执行一次无执行能力的 JSON repair；one-shot repair prompt 尚待接入受控模型调用链。
 - [ ] `AgentModelUsage` 不保存 prompt 或模型原文；privacy purge 后只可按治理保留 status、route、token、成本、provider request ID 和时间等无内容字段。
 - [ ] `thinking_summary` 只记录能力开关、预算和归一化参数，不保存隐藏推理内容。
 - [ ] 禁止日志记录完整 prompt 和私密素材。

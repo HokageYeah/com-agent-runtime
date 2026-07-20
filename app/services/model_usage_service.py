@@ -109,6 +109,19 @@ class ModelUsageService:
         self._session.flush()
         return transitioned.rowcount == 1  # type: ignore[attr-defined]
 
+    def attach_prompt_ref(self, usage_id: str, prompt_id: str, prompt_version: str) -> bool:
+        """只给尚未发送的预留 attempt 写入版本引用，绝不保存模板正文。"""
+        if not prompt_id or not prompt_version:
+            raise ValueError("prompt_id 与 prompt_version 不能为空")
+        updated = self._session.execute(
+            update(AgentModelUsage)
+            .where(AgentModelUsage.usage_id == usage_id, AgentModelUsage.status == "reserved")
+            .values(prompt_id=prompt_id, prompt_version=prompt_version)
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return updated.rowcount == 1  # type: ignore[attr-defined]
+
     def cancel_reservation(self, usage_id: str) -> bool:
         """未获 permit 的预留没有物理调用，安全删除以释放预算。"""
         deleted = self._session.execute(

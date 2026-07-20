@@ -379,3 +379,118 @@ def test_executor_stops_before_next_node_when_authorization_changes() -> None:
 
     assert result.error_code == "LEASE_CONTEXT_INVALID"
     assert runner.node_ids == ["load_snapshot"]
+    assert session.scalars(select(AgentArtifact)).all() == []
+    assert session.scalars(select(AgentCheckpoint)).all() == []
+
+
+def test_executor_draining_before_first_node_returns_safe_nonterminal_result() -> None:
+    """draining 已开始时不得启动首个节点或工具调用。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(
+        AgentRun(
+            run_id="draining-before-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+        )
+    )
+    session.add(
+        AgentPlan(
+            plan_id="draining-before-plan", run_id="draining-before-run", strategy="static_workflow",
+            steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}],
+            stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        )
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = WorkflowExecutor(
+        session,
+        runner,
+        CheckpointStore(session, FernetCheckpointCipher.generate()),
+        ArtifactStore(session),
+        is_draining=lambda: True,
+    ).run(
+        "draining-before-run",
+        LeaseContext(
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
+            authorization_version=1,
+        ),
+    )
+
+    assert (result.status, result.error_code) == ("pending", "WORKFLOW_DRAINING")
+    assert runner.node_ids == []
+    assert session.scalars(select(AgentStep)).all() == []
+    assert session.scalars(select(AgentArtifact)).all() == []
+    assert session.scalars(select(AgentCheckpoint)).all() == []
+
+
+def test_executor_draining_after_checkpoint_does_not_start_next_node() -> None:
+    """已完成节点安全 checkpoint 后，draining 不得继续启动下一工具节点。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(
+        AgentRun(
+            run_id="draining-after-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+        )
+    )
+    session.add(
+        AgentPlan(
+            plan_id="draining-after-plan", run_id="draining-after-run", strategy="static_workflow",
+            steps_json=[
+                {"node_id": "load_snapshot", "node_type": "tool"},
+                {"node_id": "compute_stats", "node_type": "deterministic"},
+            ],
+            stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        )
+    )
+    session.commit()
+    draining = {"value": False}
+
+    class DrainingRunner(RecordingNodeRunner):
+        def run_node(
+            self, node: dict[str, object], run: AgentRun, state: AgentState
+        ) -> dict[str, object]:
+            result = super().run_node(node, run, state)
+            draining["value"] = True
+            return result
+
+    runner = DrainingRunner()
+    result = WorkflowExecutor(
+        session,
+        runner,
+        CheckpointStore(session, FernetCheckpointCipher.generate()),
+        ArtifactStore(session),
+        is_draining=lambda: draining["value"],
+    ).run(
+        "draining-after-run",
+        LeaseContext(
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
+            authorization_version=1,
+        ),
+    )
+
+    assert (result.status, result.error_code) == ("pending", "WORKFLOW_DRAINING")
+    assert runner.node_ids == ["load_snapshot"]
+    checkpoint = session.scalar(
+        select(AgentCheckpoint).where(AgentCheckpoint.run_id == "draining-after-run")
+    )
+    assert checkpoint is not None
+    assert checkpoint.state_summary["completed_node_ids"] == ["load_snapshot"]
+    assert len(session.scalars(select(AgentArtifact)).all()) == 1
