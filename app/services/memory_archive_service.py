@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +20,21 @@ from app.models.memory_archive import MemoryArchive
 from app.models.memory_playback_document import MemoryPlaybackDocument
 from app.models.memory_scene import MemoryScene
 from app.models.memory_snapshot import MemorySnapshot
+from app.models.memory_source_reference import MemorySourceReference
+
+# 回忆录第一版只允许这些已冻结的作品类型，避免模型或业务输入扩展播放器语义。
+_SCENE_TYPES = frozenset({
+    "cover", "stats", "diary_highlight", "bet_highlight", "image", "milestone", "summary",
+})
+_ACTION_TYPES = frozenset({
+    "show_card", "focus_image", "type_text", "hold", "play_tts", "transition",
+})
+# 安全等级属于固定播放器契约，未知等级必须拒绝而非按 normal 猜测。
+_SAFETY_LEVELS = frozenset({"normal", "sensitive", "fallback"})
+# 当前服务只写入该 major；未来版本必须由升级后的服务显式迁移后再发布。
+_MEMORY_SCHEMA_MAJOR = 1
+# 普通替代版本保留七天，隐私删除不走此路径，交由 Task 10.5 立即撤权。
+_SUPERSEDED_REVISION_RETENTION = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -100,6 +116,7 @@ class MemoryArchiveService:
                     snapshot_id=str(uuid4()),
                     archive_id=archive_id,
                     snapshot_version=1,
+                    schema_major=_MEMORY_SCHEMA_MAJOR,
                     source_manifest_json=frozen.source_manifest,
                     source_manifest_hash=manifest_hash,
                     privacy_filter_version=frozen.privacy_filter_version,
@@ -116,12 +133,14 @@ class MemoryArchiveService:
             self._session.add(MemoryPlaybackDocument(
                 document_id=document_id, archive_id=archive_id, revision=0,
                 document_json=baseline, content_digest=_digest_json(baseline),
+                schema_major=_MEMORY_SCHEMA_MAJOR,
                 is_published=True, published_at=frozen.snapshot_cutoff_at,
             ))
             for scene in scenes:
                 self._session.add(MemoryScene(
                     scene_id=scene["scene_id"], document_id=document_id,
                     scene_order=scene["order"], scene_type=scene["scene_type"],
+                    schema_major=_MEMORY_SCHEMA_MAJOR,
                     safety_level="fallback", payload_json=scene["payload"],
                     source_refs_json=[],
                 ))
@@ -129,6 +148,7 @@ class MemoryArchiveService:
                 self._session.add(MemoryAction(
                     action_id=action["action_id"], scene_id=action["scene_id"],
                     action_order=action["order"], action_type=action["action_type"],
+                    schema_major=_MEMORY_SCHEMA_MAJOR,
                     duration_ms=action["duration_ms"], payload_json={},
                 ))
             archives.append(archive)
@@ -194,6 +214,7 @@ class MemoryArchiveService:
         *,
         expected_generation_epoch: int,
         expected_run_id: str | None = None,
+        snapshot: MemorySnapshot | None = None,
         document: dict[str, Any],
     ) -> MemoryPlaybackDocument:
         """完整文档先落库，再在同一事务切换 archive 的唯一发布指针。"""
@@ -212,6 +233,7 @@ class MemoryArchiveService:
             raise ValueError("GENERATION_SUPERSEDED")
         if expected_run_id is not None and archive.active_run_id != expected_run_id:
             raise ValueError("MEMORY_RUN_NOT_ACTIVE")
+        source_references = _validate_document_source_references(document, archive, snapshot)
         next_revision = archive.published_revision + 1
         previous = self._session.scalar(
             select(MemoryPlaybackDocument).where(
@@ -221,16 +243,47 @@ class MemoryArchiveService:
         )
         if previous is not None:
             previous.is_published = False
+            previous.retain_until = datetime.now(UTC) + _SUPERSEDED_REVISION_RETENTION
         published = MemoryPlaybackDocument(
             document_id=str(uuid4()),
             archive_id=archive_id,
             revision=next_revision,
             document_json=document,
+            schema_major=_document_schema_major(document),
             content_digest=_digest_json(document),
             is_published=True,
             published_at=datetime.now(UTC),
         )
         self._session.add(published)
+        for scene in document["scenes"]:
+            self._session.add(MemoryScene(
+                scene_id=scene["scene_id"],
+                document_id=published.document_id,
+                scene_order=scene.get("order", len(scene.get("source_refs", [])) + 1),
+                schema_major=_MEMORY_SCHEMA_MAJOR,
+                scene_type=scene["scene_type"],
+                safety_level=scene.get("safety_level", "normal"),
+                payload_json=scene.get("payload", {}),
+                source_refs_json=scene.get("source_refs", []),
+            ))
+        for action in document["actions"]:
+            self._session.add(MemoryAction(
+                action_id=action["action_id"],
+                scene_id=action["scene_id"],
+                action_order=action.get("order", 1),
+                schema_major=_MEMORY_SCHEMA_MAJOR,
+                action_type=action["action_type"],
+                duration_ms=action["duration_ms"],
+                payload_json=action.get("payload", {}),
+            ))
+        for source_type, source_id in source_references:
+            self._session.add(MemorySourceReference(
+                archive_id=archive.archive_id,
+                document_id=published.document_id,
+                revision=next_revision,
+                source_type=source_type,
+                source_id=source_id,
+            ))
         archive.published_revision = next_revision
         # 原子提交完整 revision 后，只有这里可将内容切换为成功。
         archive.content_status = "succeeded"
@@ -266,6 +319,90 @@ def _validate_complete_document(document: dict[str, Any]) -> None:
         not isinstance(document.get(field), list) for field in required_lists
     ):
         raise ValueError("播放文档不是完整的可发布版本")
+    # schema major 不兼容时禁止旧服务发布，避免播放器解释未知动作。
+    if _document_schema_major(document) != _MEMORY_SCHEMA_MAJOR:
+        raise ValueError("MEMORY_DOCUMENT_SCHEMA_UNSUPPORTED")
+    # MVP 媒体能力关闭；非空清单不得形成“文档声明了但未持久化资产”的半成品。
+    if document["media_manifest"] != []:
+        raise ValueError("MEMORY_DOCUMENT_MEDIA_INVALID")
+    scene_ids: set[str] = set()
+    for scene in document["scenes"]:
+        if (
+            not isinstance(scene, dict)
+            or not isinstance(scene.get("scene_id"), str)
+            or not scene["scene_id"]
+            or scene.get("scene_type") not in _SCENE_TYPES
+            or scene.get("safety_level", "normal") not in _SAFETY_LEVELS
+            or scene["scene_id"] in scene_ids
+        ):
+            error_code = (
+                "MEMORY_SCENE_SAFETY_INVALID"
+                if isinstance(scene, dict) and scene.get("safety_level", "normal") not in _SAFETY_LEVELS
+                else "MEMORY_SCENE_TYPE_INVALID"
+            )
+            raise ValueError(error_code)
+        scene_ids.add(scene["scene_id"])
+    action_orders: set[tuple[str, int]] = set()
+    for action in document["actions"]:
+        if (
+            not isinstance(action, dict)
+            or not isinstance(action.get("action_id"), str)
+            or action.get("scene_id") not in scene_ids
+            or action.get("action_type") not in _ACTION_TYPES
+            or isinstance(action.get("duration_ms"), bool)
+            or not isinstance(action.get("duration_ms"), int)
+            or action["duration_ms"] <= 0
+        ):
+            raise ValueError("MEMORY_ACTION_INVALID")
+        order = action.get("order")
+        if order is not None and (
+            isinstance(order, bool)
+            or not isinstance(order, int)
+            or order <= 0
+            or (action["scene_id"], order) in action_orders
+        ):
+            raise ValueError("MEMORY_ACTION_INVALID")
+        if isinstance(order, int):
+            action_orders.add((action["scene_id"], order))
+
+
+def _document_schema_major(document: dict[str, Any]) -> int:
+    """解析严格的 semver 主号；模糊版本不能进入持久化作品契约。"""
+    version = document.get("schema_version")
+    if not isinstance(version, str) or not re.fullmatch(r"[1-9]\d*\.\d+\.\d+", version):
+        raise ValueError("MEMORY_DOCUMENT_SCHEMA_UNSUPPORTED")
+    return int(version.split(".", 1)[0])
+
+
+def _validate_document_source_references(
+    document: dict[str, Any], archive: MemoryArchive, snapshot: MemorySnapshot | None,
+) -> set[tuple[str, str]]:
+    """校验发布引用来自当前 archive 的冻结快照，返回去重后的最小反查键。"""
+    references: set[tuple[str, str]] = set()
+    for scene in document["scenes"]:
+        for reference in scene.get("source_refs", []):
+            if not isinstance(reference, str) or ":" not in reference:
+                raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
+            source_type, source_id = reference.split(":", 1)
+            if source_type not in {"diary", "bet"} or not source_id:
+                raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
+            references.add((source_type, source_id))
+    if not references:
+        return references
+    if snapshot is None or snapshot.archive_id != archive.archive_id:
+        raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
+    manifest = snapshot.source_manifest_json
+    if not isinstance(manifest, dict):
+        raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
+    allowed = {
+        (source_type, str(source_id))
+        for manifest_key, source_type in (("diary_ids", "diary"), ("bet_ids", "bet"))
+        for source_id in manifest.get(manifest_key, [])
+        if isinstance(source_id, (str, int)) and not isinstance(source_id, bool)
+    }
+    if not references <= allowed:
+        raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
+    return references
 
 
 def _baseline_document(

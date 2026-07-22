@@ -6,7 +6,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models import AgentPlan
-from app.schemas.agent_package import AgentPackage
+from app.schemas.agent_package import AgentPackage, WorkflowNodeDefinition
 from app.schemas.plan import AgentPlanDTO
 
 DEFAULT_STOP_CONDITIONS: dict[str, int | float] = {
@@ -25,6 +25,10 @@ DEFAULT_FALLBACK_POLICY: dict[str, str] = {
     "default": "failed",
     "media": "skipped(capability_disabled)",
 }
+
+
+class StaticPlanValidationError(ValueError):
+    """注册定义未提供可信静态工作流时拒绝创建可执行计划。"""
 
 
 class StaticPlanner:
@@ -48,7 +52,7 @@ class StaticPlanner:
     ) -> AgentPlanDTO:
         """从已注册的受信任定义生成计划，避免 API 层再读取业务文件。"""
         raw_nodes = definition.get("workflow_nodes", [])
-        steps = raw_nodes if isinstance(raw_nodes, list) else []
+        steps = self._freeze_definition_steps(run_id, raw_nodes)
         if not steps:
             # 旧注册记录尚未写入节点摘要时保留明确的空计划，Worker 会安全失败，
             # 绝不凭 agent_id 猜测或执行任意工作流。
@@ -86,6 +90,20 @@ class StaticPlanner:
             fallback_policy=fallback_policy,
             status="planned",
         )
+
+    @staticmethod
+    def _freeze_definition_steps(run_id: str, raw_nodes: object) -> list[dict[str, object]]:
+        """仅冻结已注册的静态节点；拒绝原样透传畸形定义。"""
+        if not isinstance(raw_nodes, list):
+            logging.warning("AgentDefinition workflow_nodes 格式无效 run_id=%s", run_id)
+            return []
+        try:
+            # 复用 Package loader 相同的节点 schema，不解释字符串、更不执行 Python。
+            nodes = [WorkflowNodeDefinition.model_validate(item) for item in raw_nodes]
+        except (TypeError, ValueError):
+            logging.warning("拒绝非静态 workflow_nodes run_id=%s", run_id)
+            raise StaticPlanValidationError("workflow_nodes 必须是静态节点定义") from None
+        return [node.model_dump(mode="json") for node in nodes]
 
     def persist(self, session: Session, plan: AgentPlanDTO) -> AgentPlan:
         """Plan 与 Run 同属权威运行库；只保存节点摘要，不保存任何私密执行 state。"""

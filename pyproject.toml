@@ -17,6 +17,8 @@ dependencies = [
     "pydantic>=2.3.0",
     "pydantic-settings>=2.0.3",
     "httpx>=0.25.0",
+    # 私有回忆录媒体使用 S3 兼容对象存储的短期 get_object 签名 URL。
+    "boto3>=1.35.0",
     "redis>=5.0.0",
     "cachetools>=5.3.0",
     "loguru>=0.7.0",

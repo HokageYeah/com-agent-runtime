@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentRuntime 下一阶段规划"
+  short_description: "基于项目计划和真实代码状态精准推荐下一大块开发任务"
+  default_prompt: "使用 $agent-runtime-next-plan 根据当前计划和代码状态给出下一阶段开发建议。"

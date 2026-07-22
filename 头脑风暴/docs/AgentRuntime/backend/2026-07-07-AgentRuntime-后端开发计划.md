@@ -928,15 +928,16 @@ unique(client_id, idempotency_key, scope)
 - [✅] PromptRegistry 根据 `prompt_id@version` 加载 prompt 文件。
 - [✅] 校验 prompt manifest 的 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，不自动回退 latest；调用链可将 prompt id/version 写入 `AgentModelUsage`。
 - [✅] 创建 `model_policy.yaml`，至少包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 六类策略。
-- [ ] 每个部署 route 配置可信 `rate_limit_key/max_concurrency/rpm/tpm/request_timeout_seconds/permit_ttl_seconds/settle_margin_seconds/circuit_failure_threshold/circuit_open_seconds/pricing_config_version/cost_unit/input_unit_cost/output_unit_cost`；rate_limit_key 由 provider account、model 和限流分区组成，不含密钥，价格与流量字段都不接受业务输入覆盖。
-- [ ] route 注册校验 `permit_ttl_seconds >= request_timeout_seconds + settle_margin_seconds`，并把单次 HTTP 硬超时截断到当前 acquire deadline；配置非法时禁用 route，禁止 permit 过期后仍保留在途上游请求。
-- [ ] Runtime 只配置一种预算 cost unit；ModelGateway 按 route 固化的 pricing version 计算预留和实际估算成本。内部/免费模型显式配置零价；缺失价格、单位不一致或数值非法时禁用 route/capability，未知价格不能默认为零。
-- [ ] ModelGateway 根据 `model_policy.yaml` 解析 provider/model/temperature/max_output_tokens、capability requirements 和显式 fallback。
+- [✅] 每个部署 route 强制配置流控、permit、circuit、`route_config_version/pricing_config_version`、统一价格单位、能力、驻留和 token 窗口；业务请求不得覆盖。
+- [✅] route 注册校验 `permit_ttl_seconds >= timeout_seconds + settle_margin_seconds`，HTTP timeout 截断到 route、Run deadline、lease 的最小窗口；非法配置拒绝加载。
+- [✅] Runtime 使用 `usd_per_1k_tokens`，并将 route 的 `pricing_config_version`、价格和 cost unit 冻结至每个 usage attempt；缺少部署治理字段的 route 不可用。
+- [ ] ModelGateway 根据 `model_policy.yaml` 解析 `max_output_tokens`、capability requirements 和显式 template fallback；provider/model/temperature 参数治理仍待后续 Provider 扩展。
 - [ ] 路由顺序固定为 Runtime 紧急禁用/驻留/租户策略 -> Agent logical policy -> 部署映射 -> 显式 fallback；业务请求不能覆盖 provider/model/base URL/key。
 - [ ] ProviderTrafficController 使用 Redis 原子操作检查共享 blocked_until、熔断、并发 semaphore、RPM 和 TPM；按输入估算加 max_output_tokens 预留 token。拒绝时不调用上游，返回 retry_after 供 policy 在剩余 deadline 内等待或 fallback。
 - [ ] permit 在 Redis 中使用 `acquired -> started -> settled` 状态机；发送边界复核后先以 CAS 执行 `mark_started`，成功后才能开始 HTTP。settle 使用 CAS 且幂等，重复/非法转换不重复增减计数。
 - [ ] 每次候选模型请求独立 acquire，并在 finally settle。只有 acquired permit 可用 `aborted_before_send` 回滚并发槽与 RPM/TPM 预留；started permit 用实际 usage 结算 TPM，无 usage 或结果未知时保留 RPM/TPM 预留到窗口过期。acquired permit TTL 回收时回滚未发送预留，started permit TTL 回收只释放并发槽；重试等待期间不持有 permit。
 - [ ] 上游 429 的 Retry-After 写共享 blocked_until，其他 Worker 随后 acquire 时同步退避；fallback route 使用独立 permit。共享流量控制不可用时 fail closed，按 policy provider fallback、模板 fallback 或安全失败，不得降级为单进程 limiter。
+- [✅] Gateway 对 429 只在 Retry-After 未超过 route/Run/lease 最小窗口时等待一次，等待期间不持有 permit；重试和 fallback 都重新 acquire 独立 permit。fallback 只认部署 route 的 `fallback_route_id` 与 Run 快照 allowlist，不能从请求选择 Provider。
 - [ ] permit 等待计入 active elapsed，acquire deadline 取节点 timeout、剩余 max_run_seconds 和 run_deadline_at 的最小值；超出 deadline 不继续睡眠或请求上游。
 - [ ] `ModelCallContext` 固定包含 `run_id/step_id/execution_attempt/lease_owner_id/fencing_token/privacy_version/authorization_version/deadline_at`，只由 Executor 从有效 LeaseContext 构造，禁止从 prompt、业务 input、AgentState 或模型输出覆盖。
 - [ ] `acquire` 返回后重新校验 lease/fencing、cancel、package、privacy、authorization、route/capability 和 deadline；等待期间失效时 settle permit 为 `aborted_before_send`，不写 usage、不请求 provider。
@@ -946,7 +947,8 @@ unique(client_id, idempotency_key, scope)
 - [ ] 记录 route config version、capability snapshot，以及 permit wait/reject/TTL recovery/shared cooldown/circuit 指标；普通日志不写 route secret 或 prompt。
 - [ ] capabilities 只在 ProviderTrafficController 可用且 route policy 完整时宣告对应模型增强可用；共享控制异常时返回 capability disabled，业务 baseline 和模板能力保持可用。
 - [ ] provider endpoint 只从管理员注册表解析；自定义 base URL 执行协议/host/port allowlist、DNS/IP 校验、私网阻断和逐跳重定向复检。
-- [ ] `private_first` 未配置合规私有 provider 时返回 capability disabled 或使用 policy 明确 fallback，不静默切换任意云模型。
+- [✅] Provider Adapter 每次 HTTP 发送前重新 DNS 预检，使用无代理、无 keep-alive 的受控 Transport 读取真实 TCP 对端；响应解析前仅接受本轮公网解析集合中的 peer，缺失/非法/不匹配均 fail-closed，且拒绝重定向。
+- [✅] `private_first` 未配置合规私有 provider 时返回 `capability_disabled`，Memoir 节点仅执行 policy 明确的模板 fallback，不静默切换任意云 provider。
 - [ ] 调用前校验 structured output、vision、上下文长度、数据驻留和 thinking 参数；能力不满足时只走当前 policy 明示 fallback，无匹配路由时返回配置错误。
 - [ ] 调 LiteLLM 或 Provider Adapter。
 - [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate` 拼装受信任模板变量，使用 Pydantic/structured output parser，并以 middleware/hook 接入 ContextManager 脱敏、usage 和安全摘要；不启用动态 createAgent。
@@ -980,16 +982,16 @@ unique(client_id, idempotency_key, scope)
 - Produces: `PolicyEngine.assert_can_continue(run, counters) -> None`，违反硬限制时抛出版本化安全错误，不返回可被忽略的布尔值。
 - Consumes: Task 4 的 AdmissionService 管理 run 占用，Task 8 的 ProviderTrafficController 管理实际 provider/model 流量；本任务只组合执行期预算和评价策略，不重新实现两套限流器。
 
-- [ ] 实现 schema evaluator。
-- [ ] 实现素材引用 grounding evaluator。
-- [ ] 实现场景长度和空作品 completeness evaluator。
-- [ ] 校验 MemoirAgent MVP 正常场景数 3～8、契约硬上限 16 和单卡主体文案 80 字上限；越界进入裁剪、fallback 或拒绝发布。
-- [ ] 校验 Scene type/safety level 和完整 Action enum、order/duration/reference；MVP 只允许四种已启用动作进入执行队列，`focus_image/play_tts` 在 capability 关闭时 skipped。
-- [ ] 实现敏感字段和情绪安全 guardrails。
+- [✅] 实现 schema evaluator。
+- [✅] 实现素材引用 grounding evaluator。
+- [✅] 实现场景长度和空作品 completeness evaluator。
+- [✅] 校验 MemoirAgent MVP 正常场景数 3～8、契约硬上限 16 和单卡主体文案 80 字上限；越界进入裁剪、fallback 或拒绝发布。
+- [✅] 校验 Scene type/safety level 和完整 Action enum、order/duration/reference；当前 `focus_image/play_tts` 在 capability 关闭时进入安全 fallback。
+- [✅] 实现敏感字段和情绪安全 guardrails。
 - [ ] 实现 step/tool/model/token/cost/time/retry 硬限制；`max_model_calls/max_estimated_cost` 按实际或可能已发出的物理 attempt 统计，aborted_before_send 不计，已观察 usage 使用实际估算成本，running/outcome_unknown 使用预留成本，同一行不重复相加。
 - [ ] 区分 active elapsed、held、queue、approval 和 wall clock 时钟，禁止用 `created_at + max_run_seconds` 判断执行超时。
 - [ ] AdmissionController 使用 AdmissionBucket 限制全局/caller/tenant/agent 的 held/queued/running；PolicyEngine 把剩余 active/deadline 传给 ProviderTrafficController，不能把未选路由的 run 预记到 provider，也不能绕过 Task 8 的共享 permit。
-- [ ] 每次评价写入 `AgentEvaluation`。
+- [✅] 每次发布前评价写入 `AgentEvaluation`，仅持久化受控错误码与计数摘要。
 - [ ] 测试超 step/工具/活跃时间、排队不消耗执行预算、Admission 过载、未引用真实素材和刺激性表达的决策。
 
 ### Task 10: Checkpoint、Resume、Fallback

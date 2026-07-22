@@ -262,6 +262,17 @@ class Settings(BaseSettings):
     MEMORY_RUNTIME_SECRET: str = "development-secret"
     MEMORY_RUNTIME_TIMEOUT_SECONDS: float = 5.0
     MEMORY_RUNTIME_CAPABILITY_TTL_SECONDS: int = 60
+    # S3 兼容私有桶配置；五项全空表示媒体能力未接入，任一项缺失则启动拒绝。
+    MEMORY_MEDIA_S3_ENDPOINT_URL: str = ""
+    MEMORY_MEDIA_S3_BUCKET: str = ""
+    MEMORY_MEDIA_S3_REGION: str = ""
+    MEMORY_MEDIA_S3_ACCESS_KEY_ID: str = ""
+    MEMORY_MEDIA_S3_SECRET_ACCESS_KEY: str = ""
+    # 媒体签名地址最长五分钟，默认一分钟；该值不得由用户请求覆盖。
+    MEMORY_MEDIA_SIGNED_URL_TTL_SECONDS: int = 60
+    # 微信登录模块签发用户 JWT 后，本服务只验签并提取数字 sub；空值 fail-closed。
+    USER_AUTH_JWT_SECRET: str = ""
+    USER_AUTH_JWT_ISSUER: str = "couple-diary"
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,

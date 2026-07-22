@@ -94,6 +94,59 @@ def test_old_lease_context_cannot_write_after_reaper_fences_it() -> None:
     assert lease.can_write("run_fenced", new_context) is True
 
 
+def test_heartbeat_refreshes_the_same_mutable_lease_context() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="heartbeat-context-run",
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        package_digest="sha256:test",
+        contract_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive",
+        status="pending",
+        dispatch_state="claimed",
+        input_json={},
+        authorization_version=1,
+        caller_id="caller",
+        tenant_id="tenant",
+        create_idempotency_key="key",
+        callback_target_id="callback",
+        business_connector_id="connector",
+        trace_id="trace",
+        execution_attempt=1,
+        lease_owner="worker-a",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=30),
+        run_deadline_at=now + timedelta(days=1),
+    )
+    session.add(run)
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1,
+        lease_owner="worker-a",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=30),
+        privacy_version=1,
+        authorization_version=1,
+    )
+    original_context_id = id(context)
+    original_expiry = context.lease_expires_at
+
+    assert LeaseService(session, lease_seconds=120).heartbeat(
+        "heartbeat-context-run", context
+    )
+
+    session.refresh(run)
+    assert id(context) == original_context_id
+    assert context.lease_expires_at > original_expiry
+    assert run.lease_expires_at is not None
+    assert run.lease_expires_at.replace(tzinfo=UTC) == context.lease_expires_at
+
+
 def test_draining_release_expires_current_lease_without_releasing_admission_early() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

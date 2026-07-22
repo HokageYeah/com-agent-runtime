@@ -113,6 +113,46 @@ class MemoryAgentAdapter:
             {"reason_code": "MEMORY_BINDING_SUPERSEDED"}, idempotency_key,
         )
 
+    def retry_run(self, run_id: str, idempotency_key: str) -> None:
+        """请求 Runtime 按原 Run 的 checkpoint 执行人工重试。
+
+        Runtime 是 checkpoint、Package 撤销状态和三次人工重试额度的权威来源；
+        业务侧只传递已持久化的稳定幂等键，绝不复制 checkpoint 或私密状态。
+        """
+        data = self._request(
+            "POST", f"/api/v1/runtime/agent-runs/{run_id}/retry", {}, idempotency_key,
+        )
+        if data.get("run_id") != run_id:
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_RETRY_RESPONSE_INVALID")
+
+    def request_private_purge(self, run_id: str, idempotency_key: str) -> None:
+        """请求 Runtime 建立 privacy tombstone；完成状态必须另行查询确认。"""
+        data = self._request(
+            "POST",
+            f"/api/v1/runtime/agent-runs/{run_id}/purge-private-data",
+            {},
+            idempotency_key,
+        )
+        if (
+            data.get("run_id") != run_id
+            or data.get("privacy_state") not in {"purge_requested", "purged"}
+        ):
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_PURGE_RESPONSE_INVALID")
+
+    def get_privacy_state(self, run_id: str) -> str | None:
+        """读取 purge 对账所需的唯一状态字段，不带回 Runtime 输入或步骤内容。"""
+        data = self._request(
+            "GET", f"/api/v1/runtime/agent-runs/{run_id}", allow_not_found=True,
+        )
+        if data is None:
+            return None
+        privacy_state = data.get("privacy_state")
+        if data.get("run_id") != run_id or privacy_state not in {
+            "active", "purge_requested", "purged",
+        }:
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_PRIVACY_QUERY_INVALID")
+        return privacy_state
+
     def close(self) -> None:
         """释放注入的 HTTP 连接，供单次 launcher 结束时调用。"""
         self._client.close()

@@ -37,12 +37,14 @@ from app.runtime.model_gateway import (
     ModelRouteRegistry,
     ProviderTrafficController,
 )
+from app.runtime.peer_tracking_transport import PeerTrackingHTTPTransport
 from app.runtime.policy_engine import PolicyEngine
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.services.callback_delivery_service import (
     CallbackDeliveryService,
     CallbackSender,
 )
+from app.services.evaluation_service import EvaluationService
 from app.services.lease_service import LeaseService
 from app.services.model_usage_service import ModelUsageService
 from app.services.run_queue_service import RunQueueService
@@ -169,12 +171,18 @@ def configured_model_gateway(
         def permits_new_call(self, context: ModelCallContext) -> bool:
             return not is_draining()
 
+    # Provider 每次请求都使用无 keep-alive 的真实 socket 对端追踪，防止 DNS rebinding。
+    provider_peer_transport = PeerTrackingHTTPTransport()
     gateway = ModelGateway(
         ModelRouteRegistry(routes),
         ProviderTrafficController(redis),
         ModelUsageService(session),
         LeaseService(session),
-        HttpProviderAdapter(httpx.Client()),
+        HttpProviderAdapter(
+            httpx.Client(transport=provider_peer_transport, trust_env=False),
+            peer_ip_provider=provider_peer_transport.peer_ip,
+            reset_peer_ip=provider_peer_transport.reset_peer_ip,
+        ),
         PolicyEngine(session),
         call_guard=_WorkerDrainingGuard(),
     )
@@ -197,13 +205,28 @@ def configured_executor(
                 logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
                 return None
             connector = BusinessConnector(**{key: config[key] for key in required})
-            tool_gateway = ToolGateway({agent_run.business_connector_id: connector}, httpx.Client())
+            # ToolGateway 每次发送前读取同一实时 draining 回调，不能在装配时冻结状态。
+            peer_transport = PeerTrackingHTTPTransport()
+            tool_gateway = ToolGateway(
+                {agent_run.business_connector_id: connector},
+                httpx.Client(transport=peer_transport, trust_env=False),
+                is_draining=is_draining,
+                deadline_at=lambda: agent_run.run_deadline_at,
+                lease_expires_at=lambda: lease_context.lease_expires_at,
+                peer_ip_provider=peer_transport.peer_ip,
+                reset_peer_ip=peer_transport.reset_peer_ip,
+            )
             model_gateway = configured_model_gateway(session, is_draining=is_draining)
             if model_gateway is not None:
                 model_gateway.bind_lease(lease_context)
             return WorkflowExecutor(
                 session,
-                MemoirNodeRunner(tool_gateway, ToolCallAuditService(session), model_gateway),
+                MemoirNodeRunner(
+                    tool_gateway,
+                    ToolCallAuditService(session),
+                    model_gateway,
+                    EvaluationService(session),
+                ),
                 CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())),
                 ArtifactStore(session),
                 is_draining=is_draining,

@@ -49,7 +49,8 @@ class ModelUsageService:
             expected_tokens = 0
         if (
             context.estimated_input_tokens != expected_tokens
-            or context.request_deadline_at != run.run_deadline_at
+            or context.request_deadline_at is None
+            or self._as_utc(context.request_deadline_at) > self._as_utc(run.run_deadline_at)
             or context.allowed_route_ids
             != ModelCallContext.allowed_routes_from_snapshot(run.capability_snapshot_json)
             or route.route_id not in context.allowed_route_ids
@@ -67,14 +68,20 @@ class ModelUsageService:
             model_attempt=context.model_attempt,
             status="running",
             permit_id=permit_id,
-            # 调用上下文可能携带运行期私密素材；usage 账本只保存可审计的
-            # 路由与计量事实，绝不能把 capability/prompt 元数据当作可信输入落库。
-            capability_snapshot_json=None,
+            # 调用上下文可能携带运行期私密素材；usage 账本只冻结 route 的
+            # 非内容治理事实，绝不能写入 prompt、业务输入或完整能力快照。
+            capability_snapshot_json={
+                "route_config_version": route.route_config_version,
+                "capabilities": sorted(route.capabilities),
+                "data_residency": route.data_residency,
+                "max_context_tokens": route.max_context_tokens,
+                "max_output_tokens": route.max_output_tokens,
+            },
             prompt_id=None,
             prompt_version=None,
             provider=route.provider,
             model=route.model,
-            pricing_config_version=None,
+            pricing_config_version=route.pricing_config_version,
             cost_unit=route.price_unit,
             reserved_estimated_cost=reserved,
             input_tokens=None,
@@ -201,3 +208,8 @@ class ModelUsageService:
         if usage is None:
             raise ValueError("MODEL_USAGE_NOT_FOUND")
         return usage
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        """SQLite 可能返回无时区时间，比较可信 deadline 时统一为 UTC。"""
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

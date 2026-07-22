@@ -1,7 +1,12 @@
 # 这是受信任的静态工作流声明，真正的 LangGraph 执行器将在后续任务读取它。
 # 禁止在此文件访问网络、文件系统或业务数据库；这里只描述节点边界。
 WORKFLOW_NODES = [
-    {"node_id": "load_snapshot", "node_type": "tool", "next_nodes": ["compute_stats"]},
+    {"node_id": "load_snapshot", "node_type": "tool", "next_nodes": ["sanitize_materials"]},
+    {
+        "node_id": "sanitize_materials",
+        "node_type": "deterministic",
+        "next_nodes": ["compute_stats"],
+    },
     {
         "node_id": "compute_stats",
         "node_type": "deterministic",

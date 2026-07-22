@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import IdempotencyRecord
+from app.models import AgentRun, IdempotencyRecord
 
 
 class IdempotencyConflict(ValueError):
@@ -37,7 +37,7 @@ class IdempotencyService:
             if record.expires_at.tzinfo is None
             else record.expires_at
         )
-        if expires < datetime.now(UTC):
+        if expires < datetime.now(UTC) and not self._retain_expired_purge(record):
             self._session.delete(record)
             self._session.flush()
             return None
@@ -72,15 +72,40 @@ class IdempotencyService:
         )
 
     def cleanup_expired(self, now: datetime | None = None) -> int:
-        """维护任务删除可安全过期的幂等记录；purge 由上层在完成前延长 TTL。"""
+        """维护任务删除可安全过期的幂等记录；未确认 purge 永远保留原键。"""
         cutoff = now or datetime.now(UTC)
         records = self._session.scalars(
             select(IdempotencyRecord).where(IdempotencyRecord.expires_at < cutoff)
         ).all()
+        deleted = 0
+        retained_purges = 0
         for record in records:
+            if self._retain_expired_purge(record):
+                retained_purges += 1
+                continue
             self._session.delete(record)
-        logging.info("清理过期幂等记录 count=%s", len(records))
-        return len(records)
+            deleted += 1
+        logging.info(
+            "清理过期幂等记录 deleted=%s retained_purges=%s",
+            deleted,
+            retained_purges,
+        )
+        return deleted
+
+    def _retain_expired_purge(self, record: IdempotencyRecord) -> bool:
+        """仅在关联 Run 明确 purged 后才允许删除 purge 的原幂等记录。
+
+        缺失资源或查询异常时保守保留，避免清除重放身份后再次发送删除副作用。
+        本方法只读取 Run 状态，不接触任何私密输入、checkpoint 或业务正文。
+        """
+        if record.scope != "purge":
+            return False
+        if not record.resource_id:
+            return True
+        run = self._session.scalar(
+            select(AgentRun.privacy_state).where(AgentRun.run_id == record.resource_id)
+        )
+        return run != "purged"
 
     def lookup_result(
         self, client_id: str, scope: str, key: str, resource_id: str

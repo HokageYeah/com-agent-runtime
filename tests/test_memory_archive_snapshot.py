@@ -4,17 +4,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
 from app.models.memory_action import MemoryAction
 from app.models.memory_archive import MemoryArchive
+from app.models.memory_media_asset import MemoryMediaAsset
 from app.models.memory_playback_document import MemoryPlaybackDocument
 from app.models.memory_scene import MemoryScene
 from app.models.memory_snapshot import MemorySnapshot
+from app.models.memory_source_reference import MemorySourceReference
 from app.services.memory_agent_binding_service import MemoryAgentBindingService
 from app.services.memory_archive_service import (
     FernetSnapshotCipher,
@@ -23,6 +27,7 @@ from app.services.memory_archive_service import (
 )
 from app.services.memory_player_service import MemoryPlayerService
 from app.services.memory_snapshot_service import MemorySnapshotService
+from app.services.memory_source_reference_service import MemorySourceReferenceService
 
 
 def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> None:
@@ -105,8 +110,11 @@ def test_atomic_publish_advances_only_archive_published_revision() -> None:
         expected_generation_epoch=0,
         document={
             "schema_version": "1.0.0",
-            "scenes": [{"scene_id": "scene-1"}],
-            "actions": [{"action_id": "action-1"}],
+            "scenes": [{"scene_id": "scene-1", "scene_type": "summary"}],
+            "actions": [{
+                "action_id": "action-1", "scene_id": "scene-1",
+                "action_type": "show_card", "duration_ms": 3000,
+            }],
             "media_manifest": [],
         },
     )
@@ -237,3 +245,212 @@ def test_repeat_archive_with_changed_frozen_manifest_is_rejected() -> None:
         assert str(exc) == "MEMORY_ARCHIVE_FROZEN_INPUT_CONFLICT"
     else:
         raise AssertionError("同一关系段的冻结素材变化必须被拒绝")
+
+
+def test_publish_rejects_unknown_scene_type_without_switching_revision() -> None:
+    """未知场景类型不能写入版本，更不能切换播放器发布指针。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(8, "space-8", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {}, {}, "v1")
+    )[0]
+    session.commit()
+
+    with pytest.raises(ValueError, match="MEMORY_SCENE_TYPE_INVALID"):
+        MemoryArchiveService(session, cipher).publish_playback_document(
+            archive.archive_id,
+            expected_generation_epoch=0,
+            document={
+                "schema_version": "1.0.0",
+                "scenes": [{"scene_id": "scene-invalid", "scene_type": "unknown"}],
+                "actions": [],
+                "media_manifest": [],
+            },
+        )
+
+    assert MemoryPlayerService(session).get_published_document(archive.archive_id).revision == 0
+
+
+def test_publish_persists_frozen_source_reference_with_scene_and_action() -> None:
+    """作品发布必须与素材反查映射、场景和动作在同一事务持久化。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(
+            9, "space-9", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC),
+            {"diary_ids": [101], "bet_ids": []}, {}, "v1",
+        )
+    )[0]
+    session.commit()
+    snapshot = session.scalar(select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id))
+    assert snapshot is not None
+
+    published = MemoryArchiveService(session, cipher).publish_playback_document(
+        archive.archive_id,
+        expected_generation_epoch=0,
+        snapshot=snapshot,
+        document={
+            "schema_version": "1.0.0",
+            "scenes": [{
+                "scene_id": "scene-101", "scene_type": "diary_highlight",
+                "source_refs": ["diary:101"],
+            }],
+            "actions": [{
+                "action_id": "action-101", "scene_id": "scene-101",
+                "action_type": "show_card", "duration_ms": 3000,
+            }],
+            "media_manifest": [],
+        },
+    )
+    session.commit()
+
+    assert session.scalar(select(MemoryScene).where(MemoryScene.document_id == published.document_id)) is not None
+    assert session.scalar(select(MemoryAction).where(MemoryAction.scene_id == "scene-101")) is not None
+    reference = session.scalar(select(MemorySourceReference).where(
+        MemorySourceReference.source_type == "diary", MemorySourceReference.source_id == "101",
+    ))
+    assert reference is not None
+    assert (reference.archive_id, reference.revision, reference.document_id) == (
+        archive.archive_id, 1, published.document_id,
+    )
+
+
+def test_memory_contract_versions_are_persisted_for_baseline_and_publication() -> None:
+    """快照、文档、场景和动作必须各自持久化当前 major，供旧服务拒绝未来版本。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(10, "space-10", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {}, {}, "v1")
+    )[0]
+    session.commit()
+
+    snapshot = session.scalar(select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id))
+    baseline = MemoryPlayerService(session).get_published_document(archive.archive_id)
+
+    assert snapshot is not None and snapshot.snapshot_version == 1
+    assert snapshot.schema_major == 1
+    assert baseline.schema_major == 1
+    assert session.scalar(select(MemoryScene).where(MemoryScene.document_id == baseline.document_id)).schema_major == 1
+    assert session.scalar(select(MemoryAction).where(MemoryAction.scene_id.is_not(None))).schema_major == 1
+
+
+def test_published_playback_dto_keeps_one_revision_together() -> None:
+    """播放器 DTO 只能返回 published_revision 下的文档、场景、动作和媒体。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(11, "space-11", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {}, {}, "v1")
+    )[0]
+    MemoryArchiveService(session, cipher).publish_playback_document(
+        archive.archive_id,
+        expected_generation_epoch=0,
+        document={
+            "schema_version": "1.0.0",
+            "scenes": [{"scene_id": "revision-1-scene", "scene_type": "summary"}],
+            "actions": [{"action_id": "revision-1-action", "scene_id": "revision-1-scene", "action_type": "show_card", "duration_ms": 3000}],
+            "media_manifest": [],
+        },
+    )
+    session.commit()
+
+    playback = MemoryPlayerService(session).get_published_playback(archive.archive_id)
+
+    assert playback.document.revision == 1
+    assert [scene.scene_id for scene in playback.scenes] == ["revision-1-scene"]
+    assert [action.action_id for action in playback.actions] == ["revision-1-action"]
+    assert playback.media_assets == []
+
+
+def test_source_reference_service_finds_only_published_revisions() -> None:
+    """素材反查仅返回仍是 archive 当前发布指针的 archive/revision 安全摘要。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(12, "space-12", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {"diary_ids": [120]}, {}, "v1")
+    )[0]
+    snapshot = session.scalar(select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id))
+    assert snapshot is not None
+    MemoryArchiveService(session, cipher).publish_playback_document(
+        archive.archive_id,
+        expected_generation_epoch=0,
+        snapshot=snapshot,
+        document={
+            "schema_version": "1.0.0",
+            "scenes": [{"scene_id": "source-scene", "scene_type": "diary_highlight", "source_refs": ["diary:120"]}],
+            "actions": [{"action_id": "source-action", "scene_id": "source-scene", "action_type": "show_card", "duration_ms": 3000}],
+            "media_manifest": [],
+        },
+    )
+    session.commit()
+
+    matches = MemorySourceReferenceService(session).find_published_revisions_by_source("diary", 120)
+
+    assert [(match.archive_id, match.revision) for match in matches] == [(archive.archive_id, 1)]
+    assert MemorySourceReferenceService(session).find_published_revisions_by_source("diary", 999) == []
+
+
+def test_publish_rejects_unknown_safety_level_or_enabled_media_without_switching_revision() -> None:
+    """MVP 媒体关闭时，未知安全等级或非空媒体清单均不得发布。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(13, "space-13", 1, (1, 2), {}, datetime(2026, 7, 20, tzinfo=UTC), {}, {}, "v1")
+    )[0]
+    session.commit()
+    service = MemoryArchiveService(session, cipher)
+
+    with pytest.raises(ValueError, match="MEMORY_SCENE_SAFETY_INVALID"):
+        service.publish_playback_document(
+            archive.archive_id,
+            expected_generation_epoch=0,
+            document={
+                "schema_version": "1.0.0",
+                "scenes": [{"scene_id": "unsafe-scene", "scene_type": "summary", "safety_level": "unknown"}],
+                "actions": [],
+                "media_manifest": [],
+            },
+        )
+    with pytest.raises(ValueError, match="MEMORY_DOCUMENT_MEDIA_INVALID"):
+        service.publish_playback_document(
+            archive.archive_id,
+            expected_generation_epoch=0,
+            document={
+                "schema_version": "1.0.0",
+                "scenes": [],
+                "actions": [],
+                "media_manifest": [{"asset_id": "not-enabled"}],
+            },
+        )
+
+    assert MemoryPlayerService(session).get_published_document(archive.archive_id).revision == 0
+
+
+def test_memory_media_asset_database_contract_rejects_unknown_enums() -> None:
+    """媒体资产即使绕开服务层直写，也必须由数据库拒绝未知领域枚举。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(MemoryMediaAsset(
+        asset_id="invalid-media",
+        archive_id="archive-id",
+        document_id="document-id",
+        media_type="unknown",
+        source_type="ai_generated",
+        status="ready",
+        storage_key="private/media",
+    ))
+
+    with pytest.raises(IntegrityError):
+        session.flush()

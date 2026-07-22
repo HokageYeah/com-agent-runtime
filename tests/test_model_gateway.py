@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import socket
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, Thread
@@ -28,6 +30,19 @@ from app.services.agent_run_service import AgentRunService
 from app.services.lease_service import LeaseService
 from app.services.model_usage_service import ModelUsageService
 from tests.test_provider_traffic_controller import FakeRedis
+
+
+@pytest.fixture(autouse=True)
+def _resolve_mock_provider_to_public_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock Provider 使用虚拟域名；测试中显式模拟其部署 DNS 的公网结果。"""
+    original_getaddrinfo = socket.getaddrinfo
+
+    def resolve(host: object, port: object, *args: object, **kwargs: object) -> object:
+        if host == "provider.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
 
 
 class RecordingProvider:
@@ -65,6 +80,112 @@ def _route() -> ModelRoute:
     )
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://127.0.0.1/v1/chat",
+        "https://10.0.0.8/v1/chat",
+        "https://169.254.169.254/v1/chat",
+        "https://[fd00::8]/v1/chat",
+        "https://localhost/v1/chat",
+    ],
+    ids=("loopback", "private", "link_local", "ipv6_private", "localhost"),
+)
+def test_model_route_rejects_unsafe_endpoint_at_construction(endpoint: str) -> None:
+    """模型路由配置不得指向本机、私网或链路本地地址。"""
+    with pytest.raises(ValueError, match="MODEL_ENDPOINT_UNSAFE"):
+        ModelRoute(**{**_route().__dict__, "endpoint": endpoint})
+
+
+def test_model_gateway_rejects_domain_resolved_to_private_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """域名注册后解析到私网时，不得创建 usage、permit 或调用 Provider。"""
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443))
+        ],
+    )
+    session, lease = _run_session()
+    provider = RecordingProvider()
+
+    private_route = ModelRoute(**{
+        **_route().__dict__,
+        "capabilities": frozenset({"structured_output", "private_residency"}),
+        "data_residency": "private",
+    })
+    result = _gateway(session, RevokingLease([True]), provider, route=private_route).call(
+        _context(session, lease), "summary", {"message": "private"}
+    )
+
+    assert (result.status, result.error_code) == ("endpoint_rejected", "MODEL_ENDPOINT_UNSAFE")
+    assert provider.calls == 0
+    assert session.scalar(select(AgentModelUsage)) is None
+
+
+def test_http_provider_adapter_rejects_connected_peer_not_in_preflight_dns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真实 Provider 的 TCP 对端与发送前 DNS 结果不一致时拒绝响应。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+        ],
+    )
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True}, request=request),
+    ))
+    adapter = HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: "8.8.4.4",
+        reset_peer_ip=lambda: None,
+    )
+
+    with pytest.raises(ValueError, match="MODEL_PROVIDER_PEER_MISMATCH"):
+        adapter.call(_route(), {"message": "private"}, timeout_seconds=1)
+
+
+def test_http_provider_adapter_fails_closed_without_peer_capture() -> None:
+    """未注入真实 socket 对端读取器时，不得把 Provider 响应交给 Runtime。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True}, request=request),
+    ))
+
+    with pytest.raises(ValueError, match="MODEL_PROVIDER_PEER_UNVERIFIABLE"):
+        HttpProviderAdapter(client).call(_route(), {"message": "private"}, timeout_seconds=1)
+
+
+def test_http_provider_adapter_accepts_matching_peer_and_resets_previous_value() -> None:
+    """仅本轮预检 DNS 中的公网对端可通过，发送前必须清除旧连接记录。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    reset_calls = 0
+
+    def reset_peer_ip() -> None:
+        nonlocal reset_calls
+        reset_calls += 1
+
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True}, request=request),
+    ))
+    result = HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: "8.8.8.8",
+        reset_peer_ip=reset_peer_ip,
+    ).call(_route(), {"message": "private"}, timeout_seconds=1)
+
+    assert result == {"ok": True}
+    assert reset_calls == 1
+
+
 def _run_session() -> tuple[object, LeaseContext]:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -92,9 +213,14 @@ def _run_session() -> tuple[object, LeaseContext]:
     )
 
 
-def _gateway(session: object, lease: object, provider: RecordingProvider) -> ModelGateway:
+def _gateway(
+    session: object,
+    lease: object,
+    provider: RecordingProvider,
+    route: ModelRoute | None = None,
+) -> ModelGateway:
     return ModelGateway(
-        ModelRouteRegistry([_route()]), ProviderTrafficController(FakeRedis()),
+        ModelRouteRegistry([route or _route()]), ProviderTrafficController(FakeRedis()),
         ModelUsageService(session), lease, provider, PolicyEngine(session),
     )
 
@@ -461,6 +587,54 @@ def test_expired_request_deadline_does_not_acquire_or_call_provider() -> None:
     assert session.scalar(select(AgentModelUsage)) is None
 
 
+def test_model_context_clamps_provider_window_to_remaining_active_budget() -> None:
+    """活跃预算而非 created_at 必须成为 Provider permit/HTTP 的共同 deadline。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    run.capability_snapshot_json = {
+        "allowed_model_route_ids": ["summary"],
+        "execution_policy": {"max_run_seconds": 5},
+    }
+    run.active_elapsed_ms = 3_000
+    session.commit()
+
+    context = _context(session, lease)
+
+    assert context.request_deadline_at is not None
+    deadline = context.request_deadline_at.replace(tzinfo=UTC) if context.request_deadline_at.tzinfo is None else context.request_deadline_at
+    assert 0 < (deadline - datetime.now(UTC)).total_seconds() <= 2
+
+
+def test_provider_timeout_is_clamped_to_trusted_deadline_and_lease_window() -> None:
+    """Provider 只能获得 route、Run deadline 和 lease 中最短的同步窗口。"""
+    class TimeoutRecordingProvider(RecordingProvider):
+        timeout_seconds: float | None = None
+
+        def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
+            self.timeout_seconds = timeout_seconds
+            return super().call(route, request, timeout_seconds=timeout_seconds)
+
+    session, lease = _run_session()
+    now = datetime.now(UTC)
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    # Run deadline 比 route 的 5 秒短，lease 又更短；两者均来自可信执行上下文。
+    run.run_deadline_at = now + timedelta(seconds=2)
+    lease.lease_expires_at = now + timedelta(seconds=1)
+    session.commit()
+    provider = TimeoutRecordingProvider()
+
+    result = _gateway(session, RevokingLease([True, True, True]), provider).call(
+        _context(session, lease), "summary", {"message": "private"}
+    )
+
+    assert result.status == "succeeded"
+    assert provider.timeout_seconds is not None
+    assert 0 < provider.timeout_seconds < _route().timeout_seconds
+    assert provider.timeout_seconds <= 1
+
+
 def test_success_settles_provider_tokens_with_frozen_route_prices() -> None:
     session, lease = _run_session()
     provider = RecordingProvider({"ok": True, "usage": {"input_tokens": 100, "output_tokens": 50}})
@@ -486,7 +660,14 @@ def test_private_context_metadata_is_not_persisted() -> None:
 
     usage = session.scalar(select(AgentModelUsage))
     assert usage is not None
-    assert usage.capability_snapshot_json is None
+    assert usage.capability_snapshot_json == {
+        "route_config_version": "v1",
+        "capabilities": ["structured_output"],
+        "data_residency": "public",
+        "max_context_tokens": 8192,
+        "max_output_tokens": 4096,
+    }
+    assert usage.pricing_config_version == "v1"
     assert usage.prompt_id is None
     assert usage.prompt_version is None
 
@@ -995,8 +1176,13 @@ def test_step_revoked_after_reservation_cannot_reach_provider() -> None:
 def test_gateway_records_registered_prompt_reference_without_template_body() -> None:
     session, lease = _run_session()
     provider = RecordingProvider()
+    private_route = ModelRoute(**{
+        **_route().__dict__,
+        "capabilities": frozenset({"structured_output", "private_residency"}),
+        "data_residency": "private",
+    })
 
-    result = _gateway(session, RevokingLease([True]), provider).call(
+    result = _gateway(session, RevokingLease([True]), provider, route=private_route).call(
         _context(session, lease), "summary", {"request": "private"},
         prompt=PromptDefinition(
             prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
@@ -1010,6 +1196,143 @@ def test_gateway_records_registered_prompt_reference_without_template_body() -> 
     assert usage is not None
     assert usage.prompt_id == "highlight-extract"
     assert usage.prompt_version == "v1"
+
+
+def test_gateway_disables_private_first_prompt_without_private_route_capability() -> None:
+    """私有优先 Prompt 不得静默路由到未声明私有驻留的 Provider。"""
+    session, lease = _run_session()
+    provider = RecordingProvider()
+
+    result = _gateway(session, RevokingLease([True]), provider).call(
+        _context(session, lease),
+        "summary",
+        {"request": "private"},
+        prompt=PromptDefinition(
+            prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+            input_schema="input", output_schema="output", model_policy="strict",
+            guardrail_policy="private_first", status="active", template="private template",
+        ),
+    )
+
+    assert (result.status, result.error_code) == ("capability_disabled", "MODEL_CAPABILITY_UNAVAILABLE")
+    assert provider.calls == 0
+    assert session.scalar(select(AgentModelUsage)) is None
+
+
+def test_gateway_disables_prompt_when_trusted_context_exceeds_route_window() -> None:
+    """即使能力合规，可信输入预算加策略输出上限超过 route 窗口也不得发送。"""
+    session, lease = _run_session()
+    provider = RecordingProvider()
+    narrow_private_route = ModelRoute(**{
+        **_route().__dict__,
+        "capabilities": frozenset({"structured_output", "private_residency"}),
+        "data_residency": "private",
+        "max_context_tokens": 520,
+        "max_output_tokens": 512,
+    })
+
+    result = _gateway(session, RevokingLease([True]), provider, route=narrow_private_route).call(
+        _context(session, lease),
+        "summary",
+        {"request": "private"},
+        prompt=PromptDefinition(
+            prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+            input_schema="input", output_schema="output", model_policy="strict",
+            guardrail_policy="private_first", status="active", template="private template",
+        ),
+    )
+
+    assert (result.status, result.error_code) == ("capability_disabled", "MODEL_CAPABILITY_UNAVAILABLE")
+    assert provider.calls == 0
+
+
+def test_gateway_returns_capability_disabled_when_shared_traffic_control_is_unavailable() -> None:
+    """Redis 失效不得暴露为可重试 Provider 调用，Runner 应直接走模板 fallback。"""
+    class BrokenRedis:
+        def eval(self, *args: object) -> object:
+            raise ConnectionError("unavailable")
+
+    session, lease = _run_session()
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]),
+        ProviderTrafficController(BrokenRedis()),
+        ModelUsageService(session),
+        RevokingLease([True]),
+        RecordingProvider(),
+        PolicyEngine(session),
+    ).call(_context(session, lease), "summary", {"request": "private"})
+
+    assert (result.status, result.error_code) == ("capability_disabled", "MODEL_TRAFFIC_UNAVAILABLE")
+    assert session.scalar(select(AgentModelUsage)) is None
+
+
+def test_gateway_uses_allowed_fallback_route_with_a_separate_permit_after_429() -> None:
+    """主 route 429 后只能使用部署声明且 Run 快照允许的 fallback route。"""
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.route_ids: list[str] = []
+
+        def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
+            self.route_ids.append(route.route_id)
+            if route.route_id == "primary":
+                request_obj = httpx.Request("POST", "https://provider.example/v1/chat")
+                # 超出当前可信窗口时不得等待主 route，应直接尝试部署 fallback。
+                response = httpx.Response(429, headers={"Retry-After": "999"}, request=request_obj)
+                raise httpx.HTTPStatusError("rate limited", request=request_obj, response=response)
+            return {"ok": True}
+
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    run.capability_snapshot_json = {"allowed_model_route_ids": ["primary", "fallback"]}
+    session.commit()
+    primary = ModelRoute(**{**_route().__dict__, "route_id": "primary", "fallback_route_id": "fallback"})
+    fallback = ModelRoute(**{**_route().__dict__, "route_id": "fallback", "rate_limit_key": "provider:fallback"})
+    provider = FallbackProvider()
+    redis = FakeRedis()
+
+    result = ModelGateway(
+        ModelRouteRegistry([primary, fallback]), ProviderTrafficController(redis),
+        ModelUsageService(session), RevokingLease([True] * 8), provider, PolicyEngine(session),
+    ).call(_context(session, lease), "primary", {"request": "private"})
+
+    assert result.status == "succeeded"
+    assert provider.route_ids == ["primary", "fallback"]
+    assert len(redis.permits) == 2
+
+
+def test_gateway_waits_once_within_deadline_then_reacquires_a_new_permit() -> None:
+    """429 冷却未超过可信窗口时只等待一次，重试必须使用新的 permit。"""
+    class RetryProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                request_obj = httpx.Request("POST", "https://provider.example/v1/chat")
+                response = httpx.Response(429, headers={"Retry-After": "0.1"}, request=request_obj)
+                raise httpx.HTTPStatusError("rate limited", request=request_obj, response=response)
+            return {"ok": True}
+
+    session, lease = _run_session()
+    slept: list[float] = []
+    redis = FakeRedis()
+    provider = RetryProvider()
+    def wait(seconds: float) -> None:
+        slept.append(seconds)
+        time.sleep(seconds)
+
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]), ProviderTrafficController(redis),
+        ModelUsageService(session), RevokingLease([True] * 8), provider, PolicyEngine(session),
+        sleep=wait,
+    ).call(_context(session, lease), "summary", {"request": "private"})
+
+    assert result.status == "succeeded"
+    assert provider.calls == 2
+    assert slept == [0.1]
+    assert len(redis.permits) == 2
 
 
 def test_model_governance_denial_logs_exclude_request_body(caplog: pytest.LogCaptureFixture) -> None:

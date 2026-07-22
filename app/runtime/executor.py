@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Protocol
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from app.models import AgentPlan, AgentRun, AgentStep
 from app.runtime.artifact import ArtifactError, ArtifactStore
 from app.runtime.checkpoint import CheckpointError, CheckpointStore
 from app.runtime.interfaces import AgentRunResult, LeaseContext
+from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
 from app.runtime.state import AgentState
 from app.services.lease_service import LeaseService
 from app.services.outbox_service import OutboxService
@@ -47,6 +49,7 @@ class WorkflowExecutor:
         self._is_draining = is_draining
         self._lease = LeaseService(session)
         self._outbox = OutboxService(session)
+        self._policy = PolicyEngine(session)
 
     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
         """执行当前 execution attempt；所有状态写入前均复核 lease/fencing 边界。"""
@@ -162,6 +165,9 @@ class WorkflowExecutor:
             )
             state.completed_node_ids = sorted(completed_node_ids)
         skipping = resume_from_node_id is not None
+        # 只在本次实际执行范围计时；held/queued/waiting_human 从未进入此循环，
+        # 不会被误算为活跃预算。历史累计值存放在 Run 的 active_elapsed_ms。
+        active_started_at = monotonic()
         for raw_node in plan.steps_json:
             node = self._validated_node(raw_node)
             if node is None:
@@ -173,10 +179,25 @@ class WorkflowExecutor:
                     continue
             if node_id in completed_node_ids:
                 continue
+            try:
+                self._policy.assert_can_continue(
+                    run,
+                    {
+                        "steps": completed_steps + 1,
+                        "active_elapsed_ms": int((monotonic() - active_started_at) * 1000),
+                    },
+                )
+            except ExecutionBudgetExceeded as exc:
+                logging.warning("Workflow 执行预算已耗尽 run_id=%s code=%s", run_id, exc.code)
+                return self._fail(run, lease_context, exc.code)
             if not self._lease.can_write(run_id, lease_context):
                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
             if self._is_draining():
                 return self._draining_result(run_id, lease_context, completed_steps)
+            if not self._lease.heartbeat(run_id, lease_context):
+                return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
+            if not self._lease.can_write(run_id, lease_context):
+                return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
             step = AgentStep(
                 step_id=str(uuid4()),
                 run_id=run_id,
@@ -197,7 +218,9 @@ class WorkflowExecutor:
                 step.error_code = "WORKFLOW_NODE_FAILED"
                 step.finished_at = datetime.now(UTC)
                 return self._fail(run, lease_context, "WORKFLOW_NODE_FAILED")
-            if not self._lease.can_write(run_id, lease_context):
+            if not self._lease.heartbeat(
+                run_id, lease_context
+            ) or not self._lease.can_write(run_id, lease_context):
                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
             # 工具/模型副作用返回后已到节点安全边界：仍须完成脱敏 Artifact
             # 与加密 checkpoint，随后不再启动下一节点。
@@ -218,6 +241,10 @@ class WorkflowExecutor:
             step.status = "succeeded"
             step.output_summary = {"node_id": node_id, "status": "ok"}
             step.finished_at = datetime.now(UTC)
+            # 每个安全节点边界刷新累计活跃时间；不能用 Run.created_at，避免排队
+            # 或人工审批时间错误消耗执行额度。
+            run.active_elapsed_ms += int((monotonic() - active_started_at) * 1000)
+            active_started_at = monotonic()
             checkpoint_state = {
                 "completed_steps": completed_steps,
                 **state.model_dump(mode="json"),

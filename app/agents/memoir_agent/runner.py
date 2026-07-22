@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, Protocol
@@ -14,13 +15,26 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import AgentRun
 from app.runtime.context_manager import ContextManager
+from app.runtime.evaluator import MemoirPlaybackEvaluator
+from app.runtime.guardrails import MemoirGuardrails
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
 from app.runtime.tool_gateway import ToolGateway
+from app.services.evaluation_service import EvaluationService
 from app.services.tool_call_audit_service import ToolCallAuditService
 
-
+# 回忆录摘要中的身份标识必须替换为固定占位符，避免原始值进入模型上下文。
+_MATERIAL_SENSITIVE_TEXT = re.compile(
+    r"(?<!\d)(?:1[3-9]\d{9}|\d{17}[\dXx])(?!\d)"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    r"|https?://[^\s,，;；]+|www\.[^\s,，;；]+"
+    r"|(?i:access[_-]?token|api[_-]?key|token|openid)\s*[:=]\s*[^\s,，;；]+"
+)
+# 仅归一化可明确识别的常用昵称，避免把普通中文句子误改为人名。
+_MATERIAL_SELF_NICKNAME = re.compile(
+    r"^(?:小|阿)[\u4e00-\u9fff](?=(?:电话|手机|邮箱|说|在|去|来|：|:|，|。|！|？|；|、|\s|$))"
+)
 class MemoirModelGateway(Protocol):
     """Memoir 模型节点到受信任 Gateway 的最小适配边界。
 
@@ -72,6 +86,8 @@ class _SceneOutput(BaseModel):
     scene_id: str
     scene_type: Literal["summary"]
     source_refs: list[str]
+    # 正文为可选字段，最终仍由 safety_review 统一限制长度与情绪风险表达。
+    body: str | None = None
 
 
 class _ScenePlanOutput(BaseModel):
@@ -97,9 +113,13 @@ class MemoirNodeRunner:
         gateway: ToolGateway,
         audit: ToolCallAuditService | None = None,
         model_gateway: MemoirModelGateway | None = None,
+        evaluation_service: EvaluationService | None = None,
     ) -> None:
         self._gateway, self._audit = gateway, audit
         self._model_gateway = model_gateway
+        # 审计服务由 Worker 注入同一事务 Session；单元测试可省略持久化依赖。
+        self._evaluation_service = evaluation_service
+        self._playback_evaluator = MemoirPlaybackEvaluator()
         # Prompt 只从内置 package 精确读取；调用方无法指定 latest 或模板路径。
         self._prompts = PromptRegistry(Path(__file__).parents[1])
         self._contexts = ContextManager()
@@ -107,15 +127,32 @@ class MemoirNodeRunner:
 
     def run_node(self, node: dict[str, object], run: AgentRun, state: AgentState) -> dict[str, object]:
         if node.get("node_id") == "safety_review":
-            # 审核只接受第一版规则节点生产的最小结构，避免未校验字段进入发布载荷。
-            if self._is_safe_playback(state.scenes, state.actions):
+            # 使用脱敏节点冻结的引用集合做 grounding；兼容独立节点单测时，
+            # 仅把已在内存中的引用视为测试夹具，正式工作流一定会带 sanitized_material。
+            trusted_refs = set(self._safe_material_refs(state.sanitized_material))
+            if not isinstance(state.sanitized_material, Mapping):
+                trusted_refs = self._playback_source_refs(state.scenes)
+            evaluation = self._playback_evaluator.evaluate(
+                state.scenes, state.actions,
+                trusted_source_refs=trusted_refs,
+                enabled_capabilities=set(),
+            )
+            if evaluation.decision == "pass" and self._is_safe_playback(state.scenes, state.actions):
                 decision = "passed"
             else:
                 # 不安全或不完整时回退到无素材引用的基础卡片，保证发布端不会收到畸形文档。
-                state.scenes = [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": []}]
-                state.actions = [{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}]
+                state.scenes, state.actions = self._base_scenes_actions()
                 state.fallback_flags.append("safety_fallback")
                 decision = "fallback"
+            if self._evaluation_service is not None:
+                self._evaluation_service.record(
+                    run_id=run.run_id,
+                    step_id="safety_review",
+                    target_type="playback_document",
+                    target_id=None,
+                    evaluator_type="memoir_playback",
+                    evaluation=evaluation,
+                )
             state.safety_report = {"decision": decision} if decision == "passed" else {"decision": decision, "reason": "INVALID_PLAYBACK_STRUCTURE"}
             # 媒体能力尚未启用，仍显式提交空清单以固定发布文档与摘要的契约。
             state.playback_document = {"schema_version": "1.0.0", "scenes": state.scenes, "actions": state.actions, "media_manifest": []}
@@ -153,7 +190,11 @@ class MemoirNodeRunner:
             for index, chapter in enumerate(safe_chapters[:3], start=1):
                 refs = chapter["source_refs"]
                 scenes.append({"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": refs})
-            state.apply_tool_output("scenes", scenes or [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": []}])
+            # 素材不足时仅补无引用基础卡，避免为凑数量重复引用用户素材。
+            while len(scenes) < 3:
+                scene_index = len(scenes) + 1
+                scenes.append({"scene_id": f"scene-{scene_index}", "scene_type": "summary", "source_refs": []})
+            state.apply_tool_output("scenes", scenes)
             state.fallback_flags.append("template_scenes")
             logging.info("MemoirAgent 模板场景完成 run_id=%s scene_count=%s", run.run_id, len(state.scenes))
             return {"node_id": "generate_scenes", "fallback": True}
@@ -164,15 +205,8 @@ class MemoirNodeRunner:
             logging.info("MemoirAgent 规则动作完成 run_id=%s action_count=%s", run.run_id, len(state.actions))
             return {"node_id": "generate_actions", "fallback": True}
         if node.get("node_id") == "extract_highlights":
-            # 第一版模型能力未接入，模板 fallback 只能保留素材稳定 ID，不能复制正文。
-            snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
-            refs: list[str] = []
-            for field, prefix in (("diaries", "diary"), ("bets", "bet")):
-                items = snapshot.get(field, [])
-                if isinstance(items, list):
-                    for item in items[:8]:
-                        if isinstance(item, dict) and isinstance(item.get("id"), str):
-                            refs.append(f"{prefix}:{item['id']}")
+            # 原始 snapshot 不得在此节点回读，高光只可消费脱敏视图中的非敏感引用。
+            refs = self._safe_material_refs(state.sanitized_material)
             model_data = self._model_data(run.run_id, "extract_highlights", {"source_refs": refs})
             highlights = self._valid_highlights(model_data, refs)
             if highlights is not None:
@@ -195,6 +229,26 @@ class MemoirNodeRunner:
             state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
             logging.info("MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s", run.run_id, diary_count, bet_count)
             return {"node_id": "compute_stats", "stats_ready": True}
+        if node.get("node_id") == "sanitize_materials":
+            # 原始快照只允许在该节点读取；下游仅能获得最小脱敏视图。
+            materials, sensitive_count, invalid_count = self._sanitize_materials(state.snapshot)
+            state.apply_tool_output("sanitized_material", {"materials": materials})
+            if invalid_count:
+                logging.warning(
+                    "MemoirAgent 素材脱敏发现异常 run_id=%s material_count=%s sensitive_count=%s error_code=%s",
+                    run.run_id,
+                    len(materials),
+                    sensitive_count,
+                    "MATERIAL_INVALID",
+                )
+            else:
+                logging.info(
+                    "MemoirAgent 素材脱敏完成 run_id=%s material_count=%s sensitive_count=%s",
+                    run.run_id,
+                    len(materials),
+                    sensitive_count,
+                )
+            return {"node_id": "sanitize_materials", "sanitized": True}
         if node.get("node_id") == "publish_document":
             if not isinstance(state.playback_document, dict):
                 raise ValueError("PLAYBACK_DOCUMENT_MISSING")
@@ -266,16 +320,121 @@ class MemoirNodeRunner:
         return {"node_id": "load_snapshot", "snapshot_loaded": True}
 
     @staticmethod
+    def _sanitize_materials(snapshot: object) -> tuple[list[dict[str, object]], int, int]:
+        """将快照转换为无正文泄漏的最小素材列表，并返回安全计数。"""
+        if not isinstance(snapshot, Mapping):
+            return [], 0, 0
+        materials: list[dict[str, object]] = []
+        sensitive_count = invalid_count = 0
+        for field, material_type in (("diaries", "diary"), ("bets", "bet")):
+            raw_items = snapshot.get(field)
+            if not isinstance(raw_items, list):
+                continue
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    invalid_count += 1
+                    continue
+                material_id = item.get("id")
+                if not isinstance(material_id, str) or not material_id:
+                    invalid_count += 1
+                    continue
+                source_ref = f"{material_type}:{material_id}"
+                # 显式敏感、无正文或非字符串正文都只能保留引用，不复制任何内容。
+                if item.get("sensitive") is True or not isinstance(item.get("content"), str):
+                    materials.append({"source_ref": source_ref, "type": material_type, "sensitive": True})
+                    sensitive_count += 1
+                    continue
+                summary = MemoirNodeRunner._sanitize_material_summary(item["content"])
+                materials.append(
+                    {
+                        "source_ref": source_ref,
+                        "type": material_type,
+                        "sensitive": False,
+                        "summary": summary,
+                    }
+                )
+        return materials, sensitive_count, invalid_count
+
+    @staticmethod
+    def _sanitize_material_summary(content: str) -> str:
+        """替换敏感标识与可识别昵称，并将普通素材摘要限制在 80 字内。"""
+        redacted = _MATERIAL_SENSITIVE_TEXT.sub("[REDACTED]", content)
+        return _MATERIAL_SELF_NICKNAME.sub("我", redacted).strip()[:80]
+
+    @staticmethod
+    def _safe_material_refs(sanitized_material: object) -> list[str]:
+        """返回脱敏材料中可供模型使用的非敏感稳定引用，最多八条。"""
+        if not isinstance(sanitized_material, Mapping):
+            return []
+        materials = sanitized_material.get("materials")
+        if not isinstance(materials, list):
+            return []
+        return list(dict.fromkeys(
+            item["source_ref"]
+            for item in materials
+            if isinstance(item, Mapping)
+            and item.get("sensitive") is False
+            and isinstance(item.get("source_ref"), str)
+        ))[:8]
+
+    @staticmethod
+    def _playback_source_refs(scenes: object) -> set[str]:
+        """仅供无脱敏状态的独立节点测试使用；生产发布总是采用冻结素材引用。"""
+        if not isinstance(scenes, list):
+            return set()
+        return {
+            ref for scene in scenes if isinstance(scene, Mapping)
+            for ref in scene.get("source_refs", [])
+            if isinstance(ref, str)
+        }
+
+    @staticmethod
+    def _base_scenes_actions() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        """生成三张无素材引用的基础卡，作为唯一发布前安全回退文档。"""
+        scenes = [
+            {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": []}
+            for index in range(1, 4)
+        ]
+        actions = [
+            {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
+            for index in range(1, 4)
+        ]
+        return scenes, actions
+
+    @staticmethod
     def _is_safe_playback(scenes: object, actions: object) -> bool:
         """校验播放结构及动作引用；只允许当前模板链定义的安全字段组合。"""
-        if not isinstance(scenes, list) or not 1 <= len(scenes) <= 16:
+        if not isinstance(scenes, list) or not 3 <= len(scenes) <= 16:
             return False
-        if not all(isinstance(scene, dict) and isinstance(scene.get("scene_id"), str) and scene.get("scene_type") == "summary" and isinstance(scene.get("source_refs"), list) and all(isinstance(ref, str) for ref in scene["source_refs"]) for scene in scenes):
+        if not all(
+            isinstance(scene, dict)
+            and isinstance(scene.get("scene_id"), str)
+            and scene.get("scene_type") == "summary"
+            and isinstance(scene.get("source_refs"), list)
+            and all(isinstance(ref, str) for ref in scene["source_refs"])
+            and ("body" not in scene or isinstance(scene["body"], str))
+            and (not isinstance(scene.get("body"), str) or len(scene["body"]) <= 80)
+            and not MemoirGuardrails.violations(scene.get("body"))
+            for scene in scenes
+        ):
             return False
         scene_ids = {scene["scene_id"] for scene in scenes}
         if len(scene_ids) != len(scenes):
             return False
-        return isinstance(actions, list) and bool(actions) and all(isinstance(action, dict) and isinstance(action.get("action_id"), str) and action.get("scene_id") in scene_ids and action.get("action_type") == "show_card" and isinstance(action.get("duration_ms"), int) and 1 <= action["duration_ms"] <= 30000 for action in actions)
+        return (
+            isinstance(actions, list)
+            and len(actions) == len(scenes)
+            and all(
+                isinstance(action, dict)
+                and isinstance(action.get("action_id"), str)
+                and action.get("scene_id") in scene_ids
+                and action.get("action_type") == "show_card"
+                and isinstance(action.get("duration_ms"), int)
+                and 1 <= action["duration_ms"] <= 30000
+                for action in actions
+            )
+            and {action["scene_id"] for action in actions if isinstance(action, dict)} == scene_ids
+        )
 
     def _model_data(self, run_id: str, node_id: str, request: dict[str, object]) -> object | None:
         """只接受成功 Gateway 的 data；状态和异常一律由确定性模板安全降级。"""
@@ -371,13 +530,21 @@ class MemoirNodeRunner:
         if not isinstance(output, _ScenePlanOutput):
             return None
         scenes = output.model_dump()["scenes"]
-        if not 1 <= len(scenes) <= 3:
+        if not 3 <= len(scenes) <= 8:
             return None
         if not all(isinstance(scene, Mapping) and isinstance(scene.get("scene_id"), str) and scene.get("scene_type") == "summary" and isinstance(scene.get("source_refs"), list) and all(isinstance(ref, str) and ref in allowed_refs for ref in scene["source_refs"]) for scene in scenes):
             return None
         if len({scene["scene_id"] for scene in scenes}) != len(scenes):
             return None
-        return [{"scene_id": scene["scene_id"], "scene_type": "summary", "source_refs": list(dict.fromkeys(scene["source_refs"]))} for scene in scenes]
+        return [
+            {
+                "scene_id": scene["scene_id"],
+                "scene_type": "summary",
+                "source_refs": list(dict.fromkeys(scene["source_refs"])),
+                **({"body": scene["body"]} if isinstance(scene.get("body"), str) else {}),
+            }
+            for scene in scenes
+        ]
 
     def _parse_structured_output(
         self,

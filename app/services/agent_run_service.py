@@ -5,15 +5,17 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
+    AgentArtifact,
     AgentCheckpoint,
     AgentDefinition,
     AgentPlan,
     AgentRun,
     AgentStep,
+    AgentToolCall,
     RuntimeOutboxEvent,
 )
 from app.runtime.planner import StaticPlanner
@@ -86,6 +88,16 @@ class AgentRunService:
             }.items()
             if value is not None
         }
+        execution_policy = {
+            key: value
+            for key, value in {
+                "max_steps": policy.max_steps,
+                "max_tool_calls": policy.max_tool_calls,
+                "max_run_seconds": policy.max_run_seconds,
+                "max_auto_retry_per_step": policy.max_auto_retry_per_step,
+            }.items()
+            if value is not None
+        }
         run = AgentRun(
             run_id=run_id,
             agent_id=command.agent_id,
@@ -106,6 +118,7 @@ class AgentRunService:
                 "business_connector_id": command.business_connector_id,
                 "allowed_model_route_ids": list(self._trusted_model_route_ids),
                 "model_policy": model_policy,
+                "execution_policy": execution_policy,
             },
             authorization_version=1,
             caller_id=caller_id,
@@ -241,7 +254,12 @@ class AgentRunService:
         return self.get(run_id, caller_id)
 
     def complete_purge(self, run_id: str) -> bool:
-        """供清理 Worker 幂等调用：移除私密输入并保持 privacy 写屏障。"""
+        """供清理 Worker 幂等调用：删除私密载荷并保持 privacy 写屏障。
+
+        Runtime 只保留 Run/成本等无内容元数据；Checkpoint 直接删除，可能携带
+        私密摘要的 Artifact、Step、ToolCall 和 Run 字段统一置空。调用方必须在
+        同一事务提交，防止 tombstone 已完成但载荷仍残留。
+        """
         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
         if run is None:
             raise AgentRunServiceError("Run 不存在")
@@ -249,7 +267,26 @@ class AgentRunService:
             return False
         if run.privacy_state != "purge_requested":
             raise AgentRunServiceError("Run 未请求私密数据清理")
+        deleted_checkpoints = self._session.execute(
+            delete(AgentCheckpoint).where(AgentCheckpoint.run_id == run_id)
+        ).rowcount
+        self._session.execute(
+            update(AgentArtifact)
+            .where(AgentArtifact.run_id == run_id)
+            .values(summary_json=None)
+        )
+        self._session.execute(
+            update(AgentStep)
+            .where(AgentStep.run_id == run_id)
+            .values(input_summary=None, output_summary=None)
+        )
+        self._session.execute(
+            update(AgentToolCall)
+            .where(AgentToolCall.run_id == run_id)
+            .values(input_summary=None, output_summary=None)
+        )
         run.input_json = {}
+        run.output_summary_json = None
         run.privacy_state = "purged"
         run.private_data_purged_at = datetime.now(UTC)
         self._append_audit(
@@ -259,7 +296,11 @@ class AgentRunService:
             {"privacy_version": str(run.privacy_version)},
             actor_type="system",
         )
-        logging.warning("完成私密数据清理 run_id=%s", run_id)
+        logging.warning(
+            "完成私密数据清理 run_id=%s deleted_checkpoints=%s code=PRIVATE_DATA_PURGED",
+            run_id,
+            deleted_checkpoints,
+        )
         return True
 
     def retry(
@@ -296,11 +337,31 @@ class AgentRunService:
         )
         return self._summary(run)
 
-    def record_auto_retry(self, run_id: str, max_retries: int = 2) -> None:
-        """供后续 Executor 的节点级重试调用，不消耗人工 Run 重试额度。"""
+    def record_auto_retry(self, run_id: str, step_id: str | None = None) -> None:
+        """记录节点级自动重试；传入 step 时按该物理节点单独限额。"""
         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
-        if run is None or run.auto_retry_count >= max_retries:
+        snapshot = run.capability_snapshot_json if run is not None else None
+        policy = snapshot.get("execution_policy") if isinstance(snapshot, dict) else None
+        frozen_limit = policy.get("max_auto_retry_per_step") if isinstance(policy, dict) else None
+        max_retries = frozen_limit if isinstance(frozen_limit, int) and not isinstance(frozen_limit, bool) else 2
+        if run is None:
             raise AgentRunServiceError("自动重试次数已耗尽")
+        step = None
+        if step_id is not None:
+            step = self._session.scalar(
+                select(AgentStep).where(
+                    AgentStep.run_id == run_id,
+                    AgentStep.step_id == step_id,
+                    AgentStep.status == "running",
+                )
+            )
+            if step is None or step.step_attempt - 1 >= max_retries:
+                raise AgentRunServiceError("自动重试次数已耗尽")
+        elif run.auto_retry_count >= max_retries:
+            # 兼容尚未传入节点身份的旧调用；新 Executor 调用必须带 step_id。
+            raise AgentRunServiceError("自动重试次数已耗尽")
+        if step is not None:
+            step.step_attempt += 1
         run.auto_retry_count += 1
         logging.info(
             "记录 Runtime 自动重试 run_id=%s auto_retry_count=%s",

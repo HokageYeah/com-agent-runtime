@@ -7,13 +7,28 @@ import logging
 import os
 import socket
 from collections.abc import Callable
+from datetime import UTC, datetime
 from time import sleep as default_sleep
 from typing import Any
 
+import httpx
+
+from app.core.config import settings
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
+from app.services.memory_agent_adapter import (
+    MemoryAgentAdapter,
+    MemoryRuntimeClientConfig,
+)
+from app.services.memory_deletion_compensation_service import (
+    MemoryDeletionCompensationService,
+    MemoryDeletionMaintenanceReport,
+)
 from app.services.reconciliation_lease_service import ReconciliationLeaseService
-from app.services.reconciliation_service import ReconciliationService
+from app.services.reconciliation_service import (
+    ReconciliationReport,
+    ReconciliationService,
+)
 
 
 class ReconcilerRunner:
@@ -25,6 +40,7 @@ class ReconcilerRunner:
         owner_id: str,
         *,
         reconciler_factory: Callable[[Any], Any] = ReconciliationService,
+        maintenance_runner: Callable[..., MemoryDeletionMaintenanceReport] | None = None,
         interval_seconds: int = 300,
         lease_ttl_seconds: int = 300,
         clock: Callable[[], Any] | None = None,
@@ -35,6 +51,8 @@ class ReconcilerRunner:
         self._session_factory = session_factory
         self._owner_id = owner_id
         self._reconciler_factory = reconciler_factory
+        # 删除补偿使用同一 database lease，不能由无 fencing 的独立 cron 执行。
+        self._maintenance_runner = maintenance_runner
         self._interval_seconds = interval_seconds
         self._lease_ttl_seconds = lease_ttl_seconds
         self._clock = clock
@@ -78,7 +96,31 @@ class ReconcilerRunner:
                 set_failure_streaks = getattr(reconciler, "set_failure_streaks", None)
                 if callable(set_failure_streaks):
                     set_failure_streaks(self._failure_streaks)
-                return reconciler.run_once(lease_guard=lease_guard)
+                report = reconciler.run_once(lease_guard=lease_guard)
+                if self._maintenance_runner is None or not isinstance(report, ReconciliationReport):
+                    return report
+                if not lease_guard():
+                    return report
+                try:
+                    maintenance = self._maintenance_runner(
+                        scan_session,
+                        now if now is not None else self._utc_now(),
+                        lease_guard=lease_guard,
+                    )
+                except Exception:
+                    # 维护失败不能输出上游正文；回滚未提交的补偿状态，下一轮用原键重试。
+                    scan_session.rollback()
+                    logging.exception("回忆录删除维护失败 code=MEMORY_DELETION_MAINTENANCE_FAILED")
+                    return report.with_memory_deletion_maintenance(
+                        MemoryDeletionMaintenanceReport(0, 0, 0, aborted=True)
+                    )
+                if maintenance.aborted or not lease_guard():
+                    scan_session.rollback()
+                    return report.with_memory_deletion_maintenance(
+                        MemoryDeletionMaintenanceReport(0, 0, 0, aborted=True)
+                    )
+                scan_session.commit()
+                return report.with_memory_deletion_maintenance(maintenance)
             finally:
                 scan_session.close()
                 release_session = self._session_factory()
@@ -104,6 +146,38 @@ class ReconcilerRunner:
             if max_cycles is None or cycles < max_cycles:
                 self._sleep(self._interval_seconds)
 
+    @staticmethod
+    def _utc_now() -> datetime:
+        """为未注入 clock 的生产入口提供统一 UTC 时间，便于测试注入。"""
+        return datetime.now(UTC)
+
+
+def _run_memory_deletion_maintenance(
+    session: Any,
+    now: datetime,
+    *,
+    lease_guard: Callable[[], bool],
+) -> MemoryDeletionMaintenanceReport:
+    """为常驻对账器装配业务侧 Runtime 适配器，并在本轮后释放 HTTP 连接。"""
+    adapter = MemoryAgentAdapter(
+        MemoryRuntimeClientConfig(
+            settings.MEMORY_RUNTIME_BASE_URL,
+            settings.MEMORY_RUNTIME_CLIENT_ID,
+            settings.MEMORY_RUNTIME_KEY_ID,
+            settings.MEMORY_RUNTIME_SECRET,
+            settings.MEMORY_RUNTIME_TIMEOUT_SECONDS,
+            settings.MEMORY_RUNTIME_CAPABILITY_TTL_SECONDS,
+        ),
+        httpx.Client(),
+    )
+    try:
+        return MemoryDeletionCompensationService(session, adapter).run_maintenance(
+            now,
+            lease_guard=lease_guard,
+        )
+    finally:
+        adapter.close()
+
 
 def main() -> None:
     """运行安全对账器：--once 单轮，默认每 300 秒一轮。"""
@@ -116,7 +190,10 @@ def main() -> None:
     try:
         owner_id = f"{socket.gethostname()}:{os.getpid()}"
         runner = ReconcilerRunner(
-            database.get_session_factory(), owner_id, interval_seconds=args.interval_seconds
+            database.get_session_factory(),
+            owner_id,
+            interval_seconds=args.interval_seconds,
+            maintenance_runner=_run_memory_deletion_maintenance,
         )
         if args.once:
             runner.run_once()

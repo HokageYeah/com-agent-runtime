@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, status
 from fastapi.exceptions import (
     HTTPException,
@@ -23,7 +24,12 @@ from app.middleware.exception_handlers import (
     response_validation_error_handler,
 )
 from app.middleware.request_logging import request_logging_middleware
+from app.services.memory_agent_adapter import (
+    MemoryAgentAdapter,
+    MemoryRuntimeClientConfig,
+)
 from app.services.memory_archive_service import FernetSnapshotCipher
+from app.services.memory_s3_media_proxy import MemoryS3MediaProxy
 
 application_config = settings.application
 server_config = settings.server
@@ -38,9 +44,27 @@ async def lifespan(_: FastAPI):
     # Runtime API 与 Worker 共享根工程唯一 Session 工厂；每次请求/任务仍各自创建事务。
     app.state.session_factory = database.get_session_factory()
     logging.info("已向 Runtime 注入根数据库 Session 工厂")
+    # 用户侧 retry 与对账任务共用服务身份；连接仅在生命周期结束时关闭。
+    app.state.memory_runtime_gateway = MemoryAgentAdapter(
+        MemoryRuntimeClientConfig(
+            settings.MEMORY_RUNTIME_BASE_URL,
+            settings.MEMORY_RUNTIME_CLIENT_ID,
+            settings.MEMORY_RUNTIME_KEY_ID,
+            settings.MEMORY_RUNTIME_SECRET,
+            settings.MEMORY_RUNTIME_TIMEOUT_SECONDS,
+            settings.MEMORY_RUNTIME_CAPABILITY_TTL_SECONDS,
+        ),
+        httpx.Client(),
+    )
     try:
+        # S3/MinIO/COS 等兼容桶仅在完整配置时启用；未配置保持媒体 API fail-closed。
+        # 放在 finally 覆盖范围内，半配置启动失败时也释放已创建的 Runtime HTTP client。
+        app.state.memory_media_proxy = MemoryS3MediaProxy.from_settings(settings)
         yield
     finally:
+        gateway = getattr(app.state, "memory_runtime_gateway", None)
+        if gateway is not None:
+            gateway.close()
         logging.info("应用生命周期结束，准备关闭数据库连接")
         database.close()
 

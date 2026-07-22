@@ -33,6 +33,10 @@ class ToolManifest(PackageSchema):
     input_from: str | None = None
     output_to: str | None = None
     side_effect: bool = False
+    # 取消语义是 Runtime 固定工具契约的一部分，Package 不能借此改变调用时机。
+    cancellation_behavior: Literal[
+        "cancellable", "non_cancellable", "query_after_commit"
+    ] = "cancellable"
     mcp_server_id: str | None = None
     mcp_tool_name: str | None = None
     mcp_resource_uri: str | None = None
@@ -76,6 +80,11 @@ class PackagePolicy(PackageSchema):
     # 缺失表示不设额度，不能被解释为零额度。
     max_model_calls: int | None = None
     max_model_cost: float | None = None
+    # 以下额度由 Runtime 在创建 Run 时冻结，避免请求方在执行期扩大资源权限。
+    max_steps: int | None = None
+    max_tool_calls: int | None = None
+    max_run_seconds: int | None = None
+    max_auto_retry_per_step: int | None = None
 
     @field_validator("max_model_calls", mode="before")
     @classmethod
@@ -84,6 +93,16 @@ class PackagePolicy(PackageSchema):
             return value
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("max_model_calls 必须为非负整数")
+        return value
+
+    @field_validator("max_steps", "max_tool_calls", "max_run_seconds", "max_auto_retry_per_step", mode="before")
+    @classmethod
+    def validate_execution_limits(cls, value: object) -> object:
+        """执行期次数与秒数只能是非负整数，布尔值不能伪装为额度。"""
+        if value is None:
+            return value
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("执行期额度必须为非负整数")
         return value
 
     @field_validator("max_model_cost", mode="before")

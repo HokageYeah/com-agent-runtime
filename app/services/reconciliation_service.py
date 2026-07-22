@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
@@ -20,6 +20,9 @@ from app.models import (
 )
 from app.services.admission_service import AdmissionService
 from app.services.lease_service import LeaseService
+from app.services.memory_deletion_compensation_service import (
+    MemoryDeletionMaintenanceReport,
+)
 from app.services.model_usage_service import ModelUsageService
 from app.services.outbox_service import OutboxService
 
@@ -34,6 +37,23 @@ class ReconciliationReport:
     failures: int
     action_counts: dict[str, int] = field(default_factory=dict)
     alerts: int = 0
+    # 回忆录删除补偿只返回安全聚合数，不暴露 archive、Run 输入或播放内容。
+    memory_deletion_delivered_events: int = 0
+    memory_deletion_confirmed_purges: int = 0
+    memory_deletion_deleted_revisions: int = 0
+    memory_deletion_aborted: bool = False
+
+    def with_memory_deletion_maintenance(
+        self, maintenance: MemoryDeletionMaintenanceReport
+    ) -> ReconciliationReport:
+        """合并同一租约窗口的回忆录删除维护安全计数。"""
+        return replace(
+            self,
+            memory_deletion_delivered_events=maintenance.delivered_events,
+            memory_deletion_confirmed_purges=maintenance.confirmed_purges,
+            memory_deletion_deleted_revisions=maintenance.deleted_revisions,
+            memory_deletion_aborted=maintenance.aborted,
+        )
 
 
 class ReconciliationService:

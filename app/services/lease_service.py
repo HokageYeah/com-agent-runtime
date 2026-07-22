@@ -74,10 +74,12 @@ class LeaseService:
         ):
             logging.warning("Worker heartbeat 被 fencing 拒绝 run_id=%s", run_id)
             return False
-        run.lease_expires_at = datetime.now(UTC) + timedelta(
+        renewed_until = datetime.now(UTC) + timedelta(
             seconds=self._lease_seconds
         )
+        run.lease_expires_at = renewed_until
         self._session.commit()
+        context.lease_expires_at = renewed_until
         return True
 
     def can_write(self, run_id: str, context: LeaseContext) -> bool:

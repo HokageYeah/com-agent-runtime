@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentToolCall
+from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
 
 
 class ToolCallAuditService:
@@ -18,6 +19,7 @@ class ToolCallAuditService:
 
     def __init__(self, session: Session) -> None:
         self._session = session
+        self._policy = PolicyEngine(session)
 
     def begin_side_effect(
         self,
@@ -39,6 +41,11 @@ class ToolCallAuditService:
         幂等键必须完全一致。这里提前拒绝漂移，避免重试意外执行另一项业务操作。
         调用方只能传入已脱敏的摘要，正文、prompt 和完整播放文档均不应进入本表。
         """
+        try:
+            self._policy.assert_tool_call_allowed(run_id, step_id)
+        except ExecutionBudgetExceeded as exc:
+            logging.warning("拒绝超出工具预算的调用 run_id=%s code=%s", run_id, exc.code)
+            raise ValueError(exc.code) from None
         existing = self._session.scalars(
             select(AgentToolCall).where(
                 AgentToolCall.run_id == run_id,

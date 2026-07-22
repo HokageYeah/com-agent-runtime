@@ -65,7 +65,7 @@ async def publish_playback_document(request: Request) -> dict[str, object]:
             )
             document = MemoryArchiveService(session, request.app.state.memory_snapshot_cipher).publish_playback_document(
                 input_data["archive_id"], expected_generation_epoch=input_data["generation_epoch"],
-                expected_run_id=input_data["run_id"], document=input_data["document"],
+                expected_run_id=input_data["run_id"], snapshot=snapshot, document=input_data["document"],
             )
             output = {"revision": document.revision, "content_digest": document.content_digest}
             idempotency.store(runtime_id, scope, idempotency_key, digest, output, input_data["archive_id"])

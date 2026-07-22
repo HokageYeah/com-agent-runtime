@@ -8,7 +8,13 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentDefinition, AgentPlan, AgentRun, RuntimeAuditRecord
+from app.models import (
+    AgentDefinition,
+    AgentPlan,
+    AgentRun,
+    AgentStep,
+    RuntimeAuditRecord,
+)
 from app.schemas.agent_package import PackagePolicy
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
@@ -22,7 +28,10 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
     session.add(AgentDefinition(
         agent_id="governed-agent", version="1", runtime_type="workflow",
         definition_json={
-            "policy": {"max_model_calls": 2, "max_model_cost": 1.5},
+            "policy": {
+                "max_model_calls": 2, "max_model_cost": 1.5,
+                "max_steps": 16, "max_tool_calls": 20, "max_run_seconds": 300,
+            },
             "workflow_nodes": [],
         },
         package_digest="sha256:test", contract_version="1", status="active",
@@ -44,6 +53,9 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
     assert run is not None and run.capability_snapshot_json is not None
     assert run.capability_snapshot_json["model_policy"] == {
         "max_model_calls": 2, "max_model_cost": 1.5,
+    }
+    assert run.capability_snapshot_json["execution_policy"] == {
+        "max_steps": 16, "max_tool_calls": 20, "max_run_seconds": 300,
     }
 
 
@@ -135,6 +147,54 @@ def test_auto_retry_counter_is_independent_from_manual_retry_counter() -> None:
     AgentRunService(session).record_auto_retry("auto-retry-run")
     assert run.auto_retry_count == 1
     assert run.manual_retry_count == 0
+
+
+def test_auto_retry_uses_frozen_policy_instead_of_caller_supplied_limit() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="frozen-retry-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="running", dispatch_state="claimed", input_json={},
+        capability_snapshot_json={"execution_policy": {"max_auto_retry_per_step": 1}},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.commit()
+
+    service = AgentRunService(session)
+    service.record_auto_retry("frozen-retry-run")
+    with pytest.raises(Exception, match="自动重试次数已耗尽"):
+        service.record_auto_retry("frozen-retry-run")
+
+
+def test_auto_retry_budget_is_scoped_to_the_current_step() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = AgentRun(
+        run_id="step-retry-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="running", dispatch_state="claimed", input_json={},
+        capability_snapshot_json={"execution_policy": {"max_auto_retry_per_step": 1}},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace", run_deadline_at=datetime.now(UTC),
+    )
+    session.add(run)
+    session.add_all([
+        AgentStep(step_id="step-a", run_id=run.run_id, step_name="a", step_type="tool", status="running", execution_attempt=1),
+        AgentStep(step_id="step-b", run_id=run.run_id, step_name="b", step_type="tool", status="running", execution_attempt=1),
+    ])
+    session.commit()
+    service = AgentRunService(session)
+
+    service.record_auto_retry("step-retry-run", "step-a")
+    service.record_auto_retry("step-retry-run", "step-b")
+    with pytest.raises(Exception, match="自动重试次数已耗尽"):
+        service.record_auto_retry("step-retry-run", "step-a")
 
 
 def test_cancel_persists_desensitized_runtime_audit_record() -> None:

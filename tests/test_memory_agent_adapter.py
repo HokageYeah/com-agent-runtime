@@ -151,3 +151,59 @@ def test_adapter_queries_or_cancels_held_run_without_reading_error_body() -> Non
         ("GET", "/api/v1/runtime/agent-runs/missing", None),
         ("POST", "/api/v1/runtime/agent-runs/run-1/cancel", "cancel:a:2"),
     ]
+
+
+def test_adapter_requests_private_purge_and_reads_only_privacy_state() -> None:
+    """隐私删除使用调用方给定稳定键，查询只接收 Runtime 的安全状态摘要。"""
+    calls: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("Idempotency-Key")))
+        if request.method == "POST":
+            assert json.loads(bytes(request.content)) == {}
+            return httpx.Response(
+                202,
+                json={"run_id": "run-1", "privacy_state": "purge_requested"},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={"run_id": "run-1", "privacy_state": "purged"},
+            request=request,
+        )
+
+    adapter = MemoryAgentAdapter(
+        MemoryRuntimeClientConfig("http://runtime.local", "couple-diary", "dev", "secret"),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    adapter.request_private_purge("run-1", "memory:purge:a:run-1:3")
+    assert adapter.get_privacy_state("run-1") == "purged"
+    assert calls == [
+        ("POST", "/api/v1/runtime/agent-runs/run-1/purge-private-data", "memory:purge:a:run-1:3"),
+        ("GET", "/api/v1/runtime/agent-runs/run-1", None),
+    ]
+
+
+def test_adapter_retries_run_with_caller_stable_key() -> None:
+    """用户侧 retry 只转交既有 Run 与稳定键，不传 checkpoint 或业务正文。"""
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["path"] = request.url.path
+        observed["key"] = request.headers.get("Idempotency-Key")
+        observed["body"] = bytes(request.content)
+        return httpx.Response(200, json={"run_id": "run-1"}, request=request)
+
+    adapter = MemoryAgentAdapter(
+        MemoryRuntimeClientConfig("http://runtime.local", "couple-diary", "dev", "secret"),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    adapter.retry_run("run-1", "memory-retry:archive-1:run-1")
+
+    assert observed == {
+        "path": "/api/v1/runtime/agent-runs/run-1/retry",
+        "key": "memory-retry:archive-1:run-1",
+        "body": b"{}",
+    }

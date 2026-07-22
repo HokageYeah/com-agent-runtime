@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import create_engine, select
@@ -69,9 +70,11 @@ def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> Non
         "MODEL_ROUTES_JSON",
         '[{"route_id":"memoir","provider":"provider","model":"model",'
         '"endpoint":"https://model.example.test/v1","rate_limit_key":"memoir",'
-        '"max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,'
-        '"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens",'
-        '"input_price":0,"output_price":0}]',
+            '"max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,'
+            '"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens",'
+            '"input_price":0,"output_price":0,"route_config_version":"v1",'
+            '"pricing_config_version":"v1","capabilities":["structured_output","private_residency"],'
+            '"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512}]',
     )
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(
@@ -107,8 +110,8 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     class RecordingProvider:
         calls = 0
 
-        def __init__(self, client: object) -> None:
-            pass
+        def __init__(self, client: object, **kwargs: object) -> None:
+            """测试替身接受生产装配注入的 TCP 对端校验回调。"""
 
         def call(self, *args: object, **kwargs: object) -> object:
             type(self).calls += 1
@@ -116,9 +119,18 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
     import app.worker as worker
 
+    # 该用例只验证 draining；Provider 虚拟域名按部署公网地址解析。
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+        ],
+    )
+
     monkeypatch.setattr(worker, "Redis", FakeRedis)
     monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
-    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0}]')
+    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512}]')
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
 
@@ -348,7 +360,17 @@ def test_worker_completes_template_memoir_workflow_and_publishes_document() -> N
         """模拟受信任业务工具；断言发布载荷不需要日记正文。"""
 
         def get_snapshot(self, *args: object) -> dict[str, object]:
-            return {"diaries": [{"id": "diary-1"}], "bets": []}
+            return {
+                "diaries": [
+                    {"id": "diary-1", "content": "这是可公开的回忆摘要。"},
+                    {
+                        "id": "diary-private",
+                        "content": "绝不能发布的私密日记正文",
+                        "sensitive": True,
+                    },
+                ],
+                "bets": [],
+            }
 
         def publish_playback_document(self, *args: object) -> dict[str, object]:
             published.append(args)
@@ -378,7 +400,7 @@ def test_worker_completes_template_memoir_workflow_and_publishes_document() -> N
             plan_id="memoir-worker-plan", run_id="memoir-worker-run", strategy="static_workflow",
             steps_json=[
                 {"node_id": node_id, "node_type": "workflow"}
-                for node_id in ("load_snapshot", "compute_stats", "extract_highlights", "plan_chapters", "generate_scenes", "generate_actions", "safety_review", "publish_document")
+                for node_id in ("load_snapshot", "sanitize_materials", "compute_stats", "extract_highlights", "plan_chapters", "generate_scenes", "generate_actions", "safety_review", "publish_document")
             ],
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
@@ -403,10 +425,16 @@ def test_worker_completes_template_memoir_workflow_and_publishes_document() -> N
     assert WorkerLoop(factory, executor_factory, worker_id="worker-1").run_once() == 1
     run = factory().scalar(select(AgentRun).where(AgentRun.run_id == "memoir-worker-run"))
     assert run is not None and (run.status, run.dispatch_state) == ("succeeded", "finished")
-    assert len(factory().scalars(select(AgentStep).where(AgentStep.run_id == run.run_id)).all()) == 8
+    assert len(factory().scalars(select(AgentStep).where(AgentStep.run_id == run.run_id)).all()) == 9
     assert factory().scalar(select(AgentToolCall).where(AgentToolCall.run_id == run.run_id)).output_summary == {"revision": 1, "content_digest": "published-digest"}
     assert published[0][1:5] == ("archive-1", "memoir-worker-run", "snapshot-1", 0)
-    assert published[0][5] == {"schema_version": "1.0.0", "scenes": [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]}], "actions": [{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}], "media_manifest": []}
+    document = published[0][5]
+    assert isinstance(document, dict)
+    scenes = document["scenes"]
+    assert isinstance(scenes, list) and 3 <= len(scenes) <= 8
+    assert document["media_manifest"] == []
+    assert "绝不能发布的私密日记正文" not in str(document)
+    assert all("diary:diary-private" not in scene["source_refs"] for scene in scenes)
 
 
 def test_worker_dispatches_callback_outbox_when_callback_gateway_is_configured() -> None:

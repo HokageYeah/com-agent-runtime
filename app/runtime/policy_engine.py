@@ -25,11 +25,61 @@ class PolicyDecision:
     code: str | None = None
 
 
+class ExecutionBudgetExceeded(RuntimeError):
+    """执行期硬预算超限；调用方必须按受控 code 停止或走冻结 fallback。"""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class PolicyEngine:
     """仅依据权威 Run 快照和同 Run 的 usage 账本判断模型调用。"""
 
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def assert_can_continue(self, run: object, counters: Mapping[str, object]) -> None:
+        """校验冻结的非模型执行预算，绝不使用 created_at 推断活跃执行时间。
+
+        `counters` 是调用方将要消耗后的累计值；模型成本与 provider permit 仍由
+        `reserve()` 管理，避免两条路径对同一物理调用重复计费。
+        """
+        snapshot = getattr(run, "capability_snapshot_json", None)
+        policy = snapshot.get("execution_policy") if isinstance(snapshot, Mapping) else None
+        if not isinstance(policy, Mapping):
+            return
+        limits = (
+            ("steps", "max_steps", "STEP_LIMIT_EXCEEDED"),
+            ("tool_calls", "max_tool_calls", "TOOL_CALL_LIMIT_EXCEEDED"),
+            ("auto_retries", "max_auto_retry_per_step", "AUTO_RETRY_LIMIT_EXCEEDED"),
+        )
+        for counter_key, limit_key, code in limits:
+            limit = self._nonnegative_int(policy.get(limit_key))
+            value = self._nonnegative_int(counters.get(counter_key, 0))
+            if limit is not None and value is not None and value > limit:
+                raise ExecutionBudgetExceeded(code)
+        max_seconds = self._nonnegative_int(policy.get("max_run_seconds"))
+        delta_ms = self._nonnegative_int(counters.get("active_elapsed_ms", 0))
+        prior_ms = self._nonnegative_int(getattr(run, "active_elapsed_ms", 0)) or 0
+        if max_seconds is not None and delta_ms is not None and prior_ms + delta_ms > max_seconds * 1000:
+            raise ExecutionBudgetExceeded("ACTIVE_TIME_LIMIT_EXCEEDED")
+
+    def assert_tool_call_allowed(self, run_id: str, step_id: str) -> None:
+        """在副作用工具审计落库前按物理 attempt 计数，重试同样消耗冻结额度。"""
+        from app.models import AgentRun, AgentToolCall
+
+        run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+        if run is None:
+            # 历史单元测试可在没有 Run 的情况下测试纯审计契约；真实 Worker 一定有权威 Run。
+            return
+        existing_calls = self._session.scalars(
+            select(AgentToolCall.id).where(
+                AgentToolCall.run_id == run_id,
+                AgentToolCall.step_id == step_id,
+            )
+        ).all()
+        self.assert_can_continue(run, {"tool_calls": len(existing_calls) + 1})
 
     def evaluate(self, context: ModelCallContext, route: ModelRoute) -> PolicyDecision:
         # Settings 初始化会先加载 ModelRoute；ORM 必须延迟到真正评估时再导入。
@@ -115,12 +165,19 @@ class PolicyEngine:
                 model_attempt=context.model_attempt,
                 status="reserved",
                 permit_id=None,
-                capability_snapshot_json=None,
+                # 仅冻结 route 的无内容治理配置，不保存业务请求、Prompt 或输出。
+                capability_snapshot_json={
+                    "route_config_version": route.route_config_version,
+                    "capabilities": sorted(route.capabilities),
+                    "data_residency": route.data_residency,
+                    "max_context_tokens": route.max_context_tokens,
+                    "max_output_tokens": route.max_output_tokens,
+                },
                 prompt_id=None,
                 prompt_version=None,
                 provider=route.provider,
                 model=route.model,
-                pricing_config_version=None,
+                pricing_config_version=route.pricing_config_version,
                 cost_unit=route.price_unit,
                 reserved_estimated_cost=reserved_cost,
                 input_tokens=None,

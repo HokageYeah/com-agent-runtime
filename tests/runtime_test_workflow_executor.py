@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from pytest import MonkeyPatch
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -22,6 +23,7 @@ from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import LeaseContext
 from app.runtime.state import AgentState
+from app.services.lease_service import LeaseService
 
 
 class DeterministicNodeRunner:
@@ -61,6 +63,63 @@ def _executor(session, node_runner: DeterministicNodeRunner) -> WorkflowExecutor
         node_runner,
         CheckpointStore(session, FernetCheckpointCipher.generate()),
         ArtifactStore(session),
+    )
+
+
+def _add_claimed_two_node_run(session, run_id: str) -> datetime:
+    now = datetime.now(UTC)
+    session.add(
+        AgentRun(
+            run_id=run_id,
+            agent_id="memoir_agent",
+            agent_version="1.0.0",
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            business_type="couple_memory",
+            business_id="archive",
+            status="pending",
+            dispatch_state="claimed",
+            input_json={},
+            authorization_version=1,
+            caller_id="caller",
+            tenant_id="tenant",
+            create_idempotency_key="key",
+            callback_target_id="callback",
+            business_connector_id="connector",
+            trace_id="trace",
+            execution_attempt=1,
+            lease_owner="worker-a",
+            fencing_token=1,
+            lease_expires_at=now + timedelta(seconds=60),
+            run_deadline_at=now + timedelta(days=1),
+        )
+    )
+    session.add(
+        AgentPlan(
+            plan_id=f"{run_id}-plan",
+            run_id=run_id,
+            strategy="static_workflow",
+            steps_json=[
+                {"node_id": "load_snapshot", "node_type": "tool"},
+                {"node_id": "compute_stats", "node_type": "deterministic"},
+            ],
+            stop_conditions_json={},
+            fallback_policy_json={},
+            status="planned",
+        )
+    )
+    session.commit()
+    return now
+
+
+def _lease_context(now: datetime) -> LeaseContext:
+    return LeaseContext(
+        execution_attempt=1,
+        lease_owner="worker-a",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=60),
+        privacy_version=1,
+        authorization_version=1,
     )
 
 
@@ -128,6 +187,104 @@ def test_executor_writes_step_and_checkpoint_for_every_static_plan_node() -> Non
         ("step_changed", [{"step": "load_snapshot", "status": "succeeded"}]),
         ("step_changed", [{"step": "compute_stats", "status": "succeeded"}]),
     ]
+
+
+def test_executor_accumulates_only_node_execution_time(monkeypatch: MonkeyPatch) -> None:
+    """活跃预算只在节点运行区间累加，恢复/排队前后的间隔不参与计算。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "active-time-run")
+    ticks = iter((0.0, 0.0, 1.25, 1.25, 1.25, 3.0, 3.0))
+    monkeypatch.setattr("app.runtime.executor.monotonic", lambda: next(ticks))
+
+    result = _executor(session, DeterministicNodeRunner()).run(
+        "active-time-run", _lease_context(now)
+    )
+
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "active-time-run"))
+    assert result.status == "succeeded"
+    assert run is not None and run.active_elapsed_ms == 3_000
+
+
+def test_executor_heartbeats_same_context_before_and_after_every_node(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "heartbeat-boundary-run")
+    context = _lease_context(now)
+    runner = RecordingNodeRunner()
+    heartbeat_boundaries: list[tuple[tuple[str, ...], int]] = []
+    original_heartbeat = LeaseService.heartbeat
+
+    def record_heartbeat(
+        lease: LeaseService, run_id: str, current_context: LeaseContext
+    ) -> bool:
+        heartbeat_boundaries.append((tuple(runner.node_ids), id(current_context)))
+        return original_heartbeat(lease, run_id, current_context)
+
+    monkeypatch.setattr(LeaseService, "heartbeat", record_heartbeat)
+
+    result = _executor(session, runner).run("heartbeat-boundary-run", context)
+
+    assert result.status == "succeeded"
+    assert [nodes for nodes, _ in heartbeat_boundaries] == [
+        (),
+        ("load_snapshot",),
+        ("load_snapshot",),
+        ("load_snapshot", "compute_stats"),
+    ]
+    assert {context_id for _, context_id in heartbeat_boundaries} == {id(context)}
+
+
+def test_executor_does_not_start_node_when_pre_node_heartbeat_is_fenced(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "pre-heartbeat-fenced-run")
+    runner = RecordingNodeRunner()
+    monkeypatch.setattr(LeaseService, "heartbeat", lambda *_args: False)
+
+    result = _executor(session, runner).run(
+        "pre-heartbeat-fenced-run", _lease_context(now)
+    )
+
+    assert (result.status, result.error_code) == ("failed", "LEASE_CONTEXT_INVALID")
+    assert runner.node_ids == []
+    assert session.scalars(select(AgentStep)).all() == []
+    assert session.scalars(select(AgentArtifact)).all() == []
+    assert session.scalars(select(AgentCheckpoint)).all() == []
+
+
+def test_executor_does_not_persist_node_when_post_node_heartbeat_is_fenced(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "post-heartbeat-fenced-run")
+    runner = RecordingNodeRunner()
+    heartbeat_calls = 0
+
+    def reject_post_node_heartbeat(*_args: object) -> bool:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        return heartbeat_calls == 1
+
+    monkeypatch.setattr(LeaseService, "heartbeat", reject_post_node_heartbeat)
+
+    result = _executor(session, runner).run(
+        "post-heartbeat-fenced-run", _lease_context(now)
+    )
+
+    assert (result.status, result.error_code) == ("failed", "LEASE_CONTEXT_INVALID")
+    assert runner.node_ids == ["load_snapshot"]
+    assert session.scalars(select(AgentArtifact)).all() == []
+    assert session.scalars(select(AgentCheckpoint)).all() == []
 
 
 def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
@@ -378,6 +535,34 @@ def test_executor_stops_before_next_node_when_authorization_changes() -> None:
     result = _executor(session, runner).run("authorization-run", LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1))
 
     assert result.error_code == "LEASE_CONTEXT_INVALID"
+    assert runner.node_ids == ["load_snapshot"]
+    assert session.scalars(select(AgentArtifact)).all() == []
+    assert session.scalars(select(AgentCheckpoint)).all() == []
+
+
+def test_executor_does_not_persist_tool_result_when_privacy_version_changes() -> None:
+    """工具返回后隐私版本变化时，heartbeat 不得绕过统一写前复核。"""
+
+    class PrivacyRevokingRunner(RecordingNodeRunner):
+        def run_node(
+            self, node: dict[str, object], run: AgentRun, state: AgentState
+        ) -> dict[str, object]:
+            result = super().run_node(node, run, state)
+            if node["node_id"] == "load_snapshot":
+                run.privacy_version += 1
+            return result
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "privacy-version-run")
+    runner = PrivacyRevokingRunner()
+
+    result = _executor(session, runner).run(
+        "privacy-version-run", _lease_context(now)
+    )
+
+    assert (result.status, result.error_code) == ("failed", "LEASE_CONTEXT_INVALID")
     assert runner.node_ids == ["load_snapshot"]
     assert session.scalars(select(AgentArtifact)).all() == []
     assert session.scalars(select(AgentCheckpoint)).all() == []

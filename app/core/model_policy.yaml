@@ -2,18 +2,36 @@
 reasoning:
   max_output_tokens: 2048
   required_capabilities: [structured_output]
+  thinking_enabled: true
+  requires_vision: false
+  fallback: template
 balanced:
   max_output_tokens: 1024
   required_capabilities: [structured_output]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template
 emotional_writing:
   max_output_tokens: 1024
   required_capabilities: [structured_output]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template
 cheap_structured:
   max_output_tokens: 512
   required_capabilities: [structured_output]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template
 strict:
   max_output_tokens: 512
   required_capabilities: [structured_output]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template
 private_first:
   max_output_tokens: 512
   required_capabilities: [structured_output, private_residency]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template

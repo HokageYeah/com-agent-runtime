@@ -1,9 +1,12 @@
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
+from app.models import AgentRun
 from app.services.tool_call_audit_service import ToolCallAuditService
 
 
@@ -94,6 +97,58 @@ def test_side_effect_audit_rejects_conflicting_stable_operation() -> None:
     with pytest.raises(ValueError, match="TOOL_CALL_OPERATION_CONFLICT"):
         service.begin_side_effect(**(params | {"idempotency_key": "different-key"}))
     assert session.scalar(select(func.count()).select_from(app.models.AgentToolCall)) == 1
+
+
+def test_side_effect_audit_rejects_call_after_frozen_tool_budget_is_consumed() -> None:
+    """副作用工具发送前必须按 Run 冻结额度计数，不能靠调用方参数扩大额度。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(AgentRun(
+        run_id="budget-run", agent_id="memoir_agent", agent_version="1", package_digest="digest",
+        contract_version="1", business_type="memoir", business_id="business", status="running",
+        dispatch_state="claimed", input_json={}, capability_snapshot_json={"execution_policy": {"max_tool_calls": 1}},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=datetime.now(UTC),
+    ))
+    session.commit()
+    service = ToolCallAuditService(session)
+    params = {
+        "run_id": "budget-run", "execution_attempt": 1, "step_id": "publish_document",
+        "tool_name": "memory.publish", "tool_version": "1", "transport": "http_business_tool",
+        "logical_key": "budget-run:publish", "idempotency_key": "budget-run:publish",
+        "request_digest": "digest", "input_summary": {"operation": "publish"},
+    }
+
+    service.begin_side_effect(**params)
+    with pytest.raises(ValueError, match="TOOL_CALL_LIMIT_EXCEEDED"):
+        service.begin_side_effect(**(params | {"logical_key": "budget-run:publish-2", "idempotency_key": "budget-run:publish-2"}))
+
+
+def test_tool_budget_is_scoped_to_the_current_step() -> None:
+    """一个节点耗尽工具额度不能错误阻塞另一个节点的独立额度。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(AgentRun(
+        run_id="step-budget-run", agent_id="memoir_agent", agent_version="1", package_digest="digest",
+        contract_version="1", business_type="memoir", business_id="business", status="running",
+        dispatch_state="claimed", input_json={}, capability_snapshot_json={"execution_policy": {"max_tool_calls": 1}},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace", run_deadline_at=datetime.now(UTC),
+    ))
+    session.commit()
+    params = {
+        "run_id": "step-budget-run", "execution_attempt": 1, "step_id": "step-a",
+        "tool_name": "memory.tool", "tool_version": "1", "transport": "http_business_tool",
+        "logical_key": "step-a:1", "idempotency_key": "step-a:1", "request_digest": "digest",
+        "input_summary": {"operation": "safe"},
+    }
+    service = ToolCallAuditService(session)
+
+    service.begin_side_effect(**params)
+    service.begin_side_effect(**(params | {"step_id": "step-b", "logical_key": "step-b:1", "idempotency_key": "step-b:1"}))
 
 
 def test_latest_committed_requires_original_logical_key_idempotency_and_digest() -> None:

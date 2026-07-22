@@ -13,8 +13,14 @@ import app.reconciler as reconciler_module
 from app.db.sqlalchemy_db import Base
 from app.models import AdmissionBucket, AgentModelUsage, AgentRun, RuntimeOutboxEvent
 from app.reconciler import ReconcilerRunner
+from app.services.memory_deletion_compensation_service import (
+    MemoryDeletionMaintenanceReport,
+)
 from app.services.reconciliation_lease_service import ReconciliationLeaseService
-from app.services.reconciliation_service import ReconciliationService
+from app.services.reconciliation_service import (
+    ReconciliationReport,
+    ReconciliationService,
+)
 
 
 def _sessions():
@@ -94,6 +100,45 @@ def test_runner_forever_uses_injected_300_second_interval() -> None:
 
     assert runs == [1, 1]
     assert pauses == [300]
+
+
+def test_runner_merges_memory_deletion_maintenance_under_the_same_lease() -> None:
+    """删除补偿仅可在对账器持有 fencing lease 时执行，报告只汇总计数。"""
+    sessions = _sessions()
+    calls: list[str] = []
+
+    class ReportingReconciler:
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        def run_once(self, *, lease_guard) -> ReconciliationReport:
+            assert lease_guard()
+            return ReconciliationReport(scanned=1, repaired=0, dead_letter_callbacks=0, failures=0)
+
+    def maintain(session: object, now: datetime, *, lease_guard) -> MemoryDeletionMaintenanceReport:
+        assert lease_guard()
+        calls.append("maintenance")
+        return MemoryDeletionMaintenanceReport(
+            delivered_events=2,
+            confirmed_purges=1,
+            deleted_revisions=3,
+        )
+
+    report = ReconcilerRunner(
+        sessions,
+        "instance-a",
+        reconciler_factory=ReportingReconciler,
+        maintenance_runner=maintain,
+    ).run_once()
+
+    assert calls == ["maintenance"]
+    assert report is not None
+    assert (
+        report.memory_deletion_delivered_events,
+        report.memory_deletion_confirmed_purges,
+        report.memory_deletion_deleted_revisions,
+        report.memory_deletion_aborted,
+    ) == (2, 1, 3, False)
 
 
 def test_taken_over_runner_stops_before_a_later_scan_side_effect() -> None:
@@ -209,8 +254,8 @@ def test_main_once_calls_a_single_runner_cycle(monkeypatch) -> None:
     calls: list[object] = []
 
     class RecordingRunner:
-        def __init__(self, session_factory, owner_id, *, interval_seconds) -> None:
-            calls.append((session_factory, owner_id, interval_seconds))
+        def __init__(self, session_factory, owner_id, *, interval_seconds, maintenance_runner) -> None:
+            calls.append((session_factory, owner_id, interval_seconds, maintenance_runner))
 
         def run_once(self) -> None:
             calls.append("once")
@@ -232,13 +277,14 @@ def test_main_once_calls_a_single_runner_cycle(monkeypatch) -> None:
     runner_call = next(call for call in calls if isinstance(call, tuple))
     assert runner_call[0] == "sessions"
     assert runner_call[2] == 300
+    assert callable(runner_call[3])
 
 
 def test_main_uses_300_second_interval_by_default(monkeypatch) -> None:
     intervals: list[int] = []
 
     class RecordingRunner:
-        def __init__(self, session_factory, owner_id, *, interval_seconds) -> None:
+        def __init__(self, session_factory, owner_id, *, interval_seconds, maintenance_runner) -> None:
             intervals.append(interval_seconds)
 
         def run_once(self) -> None:

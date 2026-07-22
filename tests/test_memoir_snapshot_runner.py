@@ -33,13 +33,75 @@ def test_compute_stats_uses_snapshot_counts_and_empty_fallback():
     assert empty.stats == {"diary_count": 0, "bet_count": 0, "has_material": False}
 
 
-def test_extract_highlights_uses_stable_source_ids_without_copying_content():
+def test_sanitize_materials_redacts_identifiers_and_keeps_safe_reference():
+    """普通素材只保留可追溯引用与最多 80 字的脱敏摘要。"""
     runner = MemoirNodeRunner(object())
     run = type("Run", (), {"run_id": "r"})()
-    state = AgentState(snapshot={"diaries": [{"id": "d-1", "content": "私密正文"}, {"id": "d-2", "content": "更多正文"}], "bets": [{"id": "b-1", "title": "私密赌约"}]})
+    state = AgentState(
+        snapshot={"diaries": [{"id": "d1", "content": "小明电话13800138000"}]}
+    )
+
+    assert runner.run_node({"node_id": "sanitize_materials"}, run, state) == {
+        "node_id": "sanitize_materials",
+        "sanitized": True,
+    }
+    assert state.sanitized_material == {
+        "materials": [
+            {
+                "source_ref": "diary:d1",
+                "type": "diary",
+                "sensitive": False,
+                "summary": "我电话[REDACTED]",
+            }
+        ]
+    }
+
+
+def test_sanitize_materials_drops_sensitive_item_text():
+    """明确敏感素材仍可追溯，但绝不复制正文。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={"diaries": [{"id": "d1", "content": "私密正文", "sensitive": True}]}
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    assert state.sanitized_material == {
+        "materials": [{"source_ref": "diary:d1", "type": "diary", "sensitive": True}]
+    }
+    assert "私密正文" not in str(state.sanitized_material)
+
+
+def test_extract_highlights_uses_stable_source_ids_without_copying_content():
+    """高光只能使用脱敏后的非敏感引用，不能回读原始快照。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={"diaries": [{"id": "forged", "content": "私密正文"}]},
+        sanitized_material={"materials": [
+            {"source_ref": "diary:d-1", "type": "diary", "sensitive": False, "summary": "摘要"},
+            {"source_ref": "diary:d-2", "type": "diary", "sensitive": False, "summary": "摘要"},
+            {"source_ref": "bet:b-1", "type": "bet", "sensitive": False, "summary": "摘要"},
+        ]},
+    )
     assert runner.run_node({"node_id": "extract_highlights"}, run, state) == {"node_id": "extract_highlights", "fallback": True}
     assert state.highlights == {"source_refs": ["diary:d-1", "diary:d-2", "bet:b-1"], "mode": "template"}
     assert "私密正文" not in str(state.highlights)
+
+
+def test_highlights_ignore_sensitive_material_reference():
+    """敏感素材不进入高光候选，即使原始快照仍在内存中。"""
+    state = AgentState(
+        snapshot={"diaries": [{"id": "d1", "content": "私密正文"}]},
+        sanitized_material={"materials": [
+            {"source_ref": "diary:d1", "type": "diary", "sensitive": True},
+        ]},
+    )
+
+    MemoirNodeRunner(object()).run_node({"node_id": "extract_highlights"}, type("Run", (), {"run_id": "r"})(), state)
+
+    assert state.highlights == {"source_refs": [], "mode": "template"}
 
 
 def test_template_chapters_scenes_and_actions_form_playable_fallback():
@@ -53,16 +115,31 @@ def test_template_chapters_scenes_and_actions_form_playable_fallback():
     assert runner.run_node({"node_id": "generate_scenes"}, run, state) == {"node_id": "generate_scenes", "fallback": True}
     assert runner.run_node({"node_id": "generate_actions"}, run, state) == {"node_id": "generate_actions", "fallback": True}
     assert state.chapter_plan == {"chapters": [{"chapter_id": "chapter-1", "source_refs": ["diary:d-1", "bet:b-1"], "kind": "memory_overview"}]}
-    assert state.scenes == [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "bet:b-1"]}]
-    assert state.actions == [{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}]
+    assert state.scenes == [
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "bet:b-1"]},
+        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
+        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
+    ]
+    assert state.actions == [
+        {"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000},
+        {"action_id": "action-2", "scene_id": "scene-2", "action_type": "show_card", "duration_ms": 3000},
+        {"action_id": "action-3", "scene_id": "scene-3", "action_type": "show_card", "duration_ms": 3000},
+    ]
 
 
 def test_safety_review_builds_complete_document_and_falls_back_for_invalid_actions():
     runner = MemoirNodeRunner(object())
     run = type("Run", (), {"run_id": "r"})()
     state = AgentState(
-        scenes=[{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1"]}],
-        actions=[{"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000}],
+        scenes=[
+            {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1"]},
+            {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
+            {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
+        ],
+        actions=[
+            {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
+            for index in range(1, 4)
+        ],
     )
     assert runner.run_node({"node_id": "safety_review"}, run, state) == {"node_id": "safety_review", "safe": True}
     assert state.playback_document == {"schema_version": "1.0.0", "scenes": state.scenes, "actions": state.actions, "media_manifest": []}
@@ -70,3 +147,41 @@ def test_safety_review_builds_complete_document_and_falls_back_for_invalid_actio
     runner.run_node({"node_id": "safety_review"}, run, invalid)
     assert invalid.safety_report == {"decision": "fallback", "reason": "INVALID_PLAYBACK_STRUCTURE"}
     assert invalid.playback_document["scenes"][0]["scene_id"] == "scene-1"
+
+
+def test_safety_review_replaces_overlong_or_too_many_scenes():
+    """发布审核拒绝超过 16 张或正文超过 80 字的场景。"""
+    scenes = [
+        {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": [], "body": "x" * 81}
+        for index in range(1, 18)
+    ]
+    actions = [
+        {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
+        for index in range(1, 18)
+    ]
+    state = AgentState(scenes=scenes, actions=actions)
+
+    result = MemoirNodeRunner(object()).run_node({"node_id": "safety_review"}, type("Run", (), {"run_id": "r"})(), state)
+
+    assert result == {"node_id": "safety_review", "safe": False}
+    assert len(state.playback_document["scenes"]) == 3
+    assert all(scene["source_refs"] == [] for scene in state.playback_document["scenes"])
+    assert state.playback_document["media_manifest"] == []
+
+
+def test_safety_review_replaces_forbidden_emotional_wording_without_logging_body(caplog: object):
+    """关系失败、责备与复合暗示等禁语必须回退，日志不得回显正文。"""
+    scenes = [
+        {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": [], "body": "都怪你" if index == 1 else "安全摘要"}
+        for index in range(1, 4)
+    ]
+    actions = [
+        {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
+        for index in range(1, 4)
+    ]
+    state = AgentState(scenes=scenes, actions=actions)
+
+    MemoirNodeRunner(object()).run_node({"node_id": "safety_review"}, type("Run", (), {"run_id": "r"})(), state)
+
+    assert state.safety_report == {"decision": "fallback", "reason": "INVALID_PLAYBACK_STRUCTURE"}
+    assert "都怪你" not in caplog.text  # type: ignore[attr-defined]

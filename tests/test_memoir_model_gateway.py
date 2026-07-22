@@ -21,7 +21,10 @@ def test_model_capability_unavailable_uses_template_without_snapshot_body(caplog
 
     gateway = ModelGateway()
     state = AgentState(
-        snapshot={"diaries": [{"id": "diary-1", "content": "绝不能泄露的日记正文"}]}
+        snapshot={"diaries": [{"id": "diary-1", "content": "绝不能泄露的日记正文"}]},
+        sanitized_material={"materials": [
+            {"source_ref": "diary:diary-1", "type": "diary", "sensitive": False, "summary": "摘要"},
+        ]},
     )
 
     result = MemoirNodeRunner(object(), model_gateway=gateway).run_node(
@@ -90,11 +93,9 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
 
     assert result == {"node_id": "generate_scenes", "fallback": True}
     assert state.scenes == [
-        {
-            "scene_id": "scene-1",
-            "scene_type": "summary",
-            "source_refs": ["diary:diary-1"],
-        }
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]},
+        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
+        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
     ]
     assert state.fallback_flags == ["model_invalid_scenes", "template_scenes"]
 
@@ -177,7 +178,12 @@ def test_repaired_json_model_highlights_are_accepted_without_exposing_raw_text(c
                 {"status": "succeeded", "data": "```json\n{'source_refs': ['diary:diary-1']}\n```"},
             )()
 
-    state = AgentState(snapshot={"diaries": [{"id": "diary-1", "content": "私密正文"}]})
+    state = AgentState(
+        snapshot={"diaries": [{"id": "diary-1", "content": "私密正文"}]},
+        sanitized_material={"materials": [
+            {"source_ref": "diary:diary-1", "type": "diary", "sensitive": False, "summary": "摘要"},
+        ]},
+    )
 
     result = MemoirNodeRunner(object(), model_gateway=ModelGateway()).run_node(
         {"node_id": "extract_highlights"}, _run(), state
@@ -234,7 +240,7 @@ def test_json_string_model_scenes_are_parsed_before_state_write() -> None:
                 (),
                 {
                     "status": "succeeded",
-                    "data": '{"scenes":[{"scene_id":"scene-1","scene_type":"summary","source_refs":["diary:diary-1"]}]}',
+                    "data": '{"scenes":[{"scene_id":"scene-1","scene_type":"summary","source_refs":["diary:diary-1"]},{"scene_id":"scene-2","scene_type":"summary","source_refs":[]},{"scene_id":"scene-3","scene_type":"summary","source_refs":[]}]}',
                 },
             )()
 
@@ -251,4 +257,8 @@ def test_json_string_model_scenes_are_parsed_before_state_write() -> None:
     )
 
     assert result == {"node_id": "generate_scenes", "fallback": False}
-    assert state.scenes == [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]}]
+    assert state.scenes == [
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]},
+        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
+        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
+    ]

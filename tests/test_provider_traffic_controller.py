@@ -13,10 +13,11 @@ class FakeRedis:
     def __init__(self) -> None:
         self.operations: list[str] = []
         self.permits: dict[str, dict[str, str]] = {}
-        self.active: dict[str, set[str]] = defaultdict(set)
+        # permit -> active 截止时间；用于模拟 Redis ZSET 的 TTL 回收。
+        self.active: dict[str, dict[str, float]] = defaultdict(dict)
         self.blocked_until: dict[str, float] = {}
-        self.rpm: dict[str, list[float]] = defaultdict(list)
-        self.tpm: dict[str, list[tuple[float, int]]] = defaultdict(list)
+        self.rpm: dict[str, list[str]] = defaultdict(list)
+        self.tpm: dict[str, list[tuple[float, int, str]]] = defaultdict(list)
         self.circuit_failures: dict[str, int] = defaultdict(int)
         self.circuit_failure_expires_at: dict[str, float] = {}
         self.circuit_open_until: dict[str, float] = {}
@@ -26,6 +27,20 @@ class FakeRedis:
         self.operations.append(operation)
         route_key, permit_key, blocked_key = map(str, args[1:4])
         now = float(args[4])
+
+        def reap_expired_permits() -> None:
+            """模拟 Lua 回收：未发送回滚 RPM/TPM，已发送仅释放并发。"""
+            for expired_key, expires_at in list(self.active[route_key].items()):
+                if expires_at > now:
+                    continue
+                permit = self.permits.get(expired_key)
+                if permit is not None and permit["state"] == "acquired":
+                    self.rpm[route_key] = [item for item in self.rpm[route_key] if item != expired_key]
+                    self.tpm[route_key] = [item for item in self.tpm[route_key] if item[2] != expired_key]
+                self.active[route_key].pop(expired_key, None)
+                if permit is not None:
+                    permit["state"] = "expired"
+
         if operation == "circuit_preflight":
             threshold, route_id = int(args[5]), str(args[6])
             if threshold > 0 and self.circuit_open_until.get(route_id, 0) > now:
@@ -39,6 +54,7 @@ class FakeRedis:
             circuit_threshold = int(args[11])
             if circuit_threshold > 0 and self.circuit_open_until.get(route_id, 0) > now:
                 return ["circuit_open", self.circuit_open_until[route_id]]
+            reap_expired_permits()
             permit = self.permits.get(permit_key)
             if permit is not None:
                 if permit["route_id"] != route_id:
@@ -48,18 +64,22 @@ class FakeRedis:
                 return ["blocked", self.blocked_until[blocked_key]]
             if len(self.active[route_key]) >= limit:
                 return ["concurrency_exceeded", 0]
-            self.rpm[route_key] = [at for at in self.rpm[route_key] if at > now - 60]
+            self.rpm[route_key] = [
+                member
+                for member in self.rpm[route_key]
+                if self.tpm[route_key] and any(item[2] == member and item[0] > now - 60 for item in self.tpm[route_key])
+            ]
             self.tpm[route_key] = [item for item in self.tpm[route_key] if item[0] > now - 60]
             if len(self.rpm[route_key]) >= rpm_limit:
                 return ["rpm_exceeded", 0]
-            if sum(tokens for _, tokens in self.tpm[route_key]) + estimated_tokens > tpm_limit:
+            if sum(tokens for _, tokens, _ in self.tpm[route_key]) + estimated_tokens > tpm_limit:
                 return ["tpm_exceeded", 0]
-            self.active[route_key].add(permit_key)
+            self.active[route_key][permit_key] = now + ttl
             self.permits[permit_key] = {
                 "state": "acquired", "route": route_key, "route_id": route_id
             }
-            self.rpm[route_key].append(now)
-            self.tpm[route_key].append((now, estimated_tokens))
+            self.rpm[route_key].append(permit_key)
+            self.tpm[route_key].append((now, estimated_tokens, permit_key))
             return ["acquired", ttl]
         if operation == "circuit_failure":
             threshold, open_seconds, route_id = int(args[5]), float(args[6]), str(args[7])
@@ -80,6 +100,7 @@ class FakeRedis:
             self.circuit_open_until.pop(route_id, None)
             return ["circuit_reset", 0]
         if operation == "started":
+            reap_expired_permits()
             permit = self.permits.get(permit_key)
             if permit is None:
                 return ["expired", 0]
@@ -92,6 +113,7 @@ class FakeRedis:
                 return ["already_started", 0]
             return [permit["state"], 0]
         if operation == "settle":
+            reap_expired_permits()
             permit = self.permits.get(permit_key)
             if permit is None:
                 return ["already_settled", 0]
@@ -100,7 +122,7 @@ class FakeRedis:
             if permit["state"] == "settled":
                 return ["already_settled", 0]
             permit["state"] = "settled"
-            self.active[route_key].discard(permit_key)
+            self.active[route_key].pop(permit_key, None)
             retry_after = float(args[5])
             if retry_after > 0:
                 self.blocked_until[blocked_key] = max(
@@ -318,6 +340,30 @@ def test_shorter_retry_after_never_shortens_existing_shared_cooldown(route: Mode
     assert blocked.retry_after_seconds == 50.0
 
 
+def test_expired_acquired_permit_releases_all_pre_send_reservations_but_started_keeps_rate_usage(
+    route: ModelRoute,
+) -> None:
+    """未发送 permit 过期回滚并发/RPM/TPM，已发送 permit 只释放并发槽。"""
+    now = [100.0]
+    redis = FakeRedis()
+    controller = ProviderTrafficController(redis, clock=lambda: now[0])
+
+    assert controller.acquire(route, "acquired", estimated_tokens=7).granted
+    now[0] += route.permit_ttl_seconds + 1
+    assert controller.acquire(route, "next-after-acquired").granted
+    route_key = "model_gateway:route:example:small"
+    assert all(item[2] != "model_gateway:permit:acquired" for item in redis.tpm[route_key])
+    assert "model_gateway:permit:acquired" not in redis.rpm[route_key]
+
+    now[0] += route.permit_ttl_seconds + 1
+    assert controller.acquire(route, "started", estimated_tokens=7).granted
+    assert controller.mark_started(route, "started").status == "started"
+    now[0] += route.permit_ttl_seconds + 1
+    assert controller.acquire(route, "next-after-started").granted
+    assert any(item[2] == "model_gateway:permit:started" for item in redis.tpm[route_key])
+    assert "model_gateway:permit:started" in redis.rpm[route_key]
+
+
 def test_route_rejects_invalid_ttl_price_unit_and_endpoint() -> None:
     with pytest.raises(ValueError, match="permit_ttl_seconds"):
         ModelRoute(
@@ -334,9 +380,12 @@ def test_settings_only_exposes_validated_server_side_routes() -> None:
     settings = Settings(
         MODEL_ROUTES_JSON='[{"route_id":"summary","provider":"p","model":"m",'
         '"endpoint":"https://provider.example/v1","rate_limit_key":"p:m",'
-        '"max_concurrency":1,"rpm_limit":2,"tpm_limit":3,"timeout_seconds":1,'
-        '"permit_ttl_seconds":2,"settle_margin_seconds":1,'
-        '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0}]'
+            '"max_concurrency":1,"rpm_limit":2,"tpm_limit":3,"timeout_seconds":1,'
+            '"permit_ttl_seconds":2,"settle_margin_seconds":1,'
+            '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,'
+            '"route_config_version":"v1","pricing_config_version":"v1",'
+            '"capabilities":["structured_output"],"data_residency":"public",'
+            '"max_context_tokens":2048,"max_output_tokens":512}]'
     )
 
     assert settings.model_routes[0].route_id == "summary"
@@ -364,7 +413,10 @@ def test_settings_rejects_duplicate_route_id_at_startup() -> None:
         '"endpoint":"https://provider.example/v1","rate_limit_key":"p:m",'
         '"max_concurrency":1,"rpm_limit":2,"tpm_limit":3,"timeout_seconds":1,'
         '"permit_ttl_seconds":2,"settle_margin_seconds":1,'
-        '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0}'
+        '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,'
+        '"route_config_version":"v1","pricing_config_version":"v1",'
+        '"capabilities":["structured_output"],"data_residency":"public",'
+        '"max_context_tokens":2048,"max_output_tokens":512}'
     )
     with pytest.raises(ValueError, match="重复 route_id"):
         Settings(MODEL_ROUTES_JSON=f"[{route},{route}]")
