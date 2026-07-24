@@ -27,6 +27,8 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
     return JSONResponse(
         status_code=exc.status_code,
+        # 429 的 Retry-After、认证挑战等协议响应头必须透传；统一错误 body 不应吞掉它们。
+        headers=exc.headers,
         content=build_error_response(
             path=request.url.path,
             ret=[f"ERROR::{exc.detail}"],

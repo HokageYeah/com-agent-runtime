@@ -9,11 +9,11 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, select, update
 from sqlalchemy.orm import Session
 
 if TYPE_CHECKING:
-    from app.models import AgentModelUsage
+    from app.models import AgentModelUsage, AgentRun
     from app.runtime.model_gateway import ModelCallContext, ModelRoute
 
 
@@ -90,7 +90,9 @@ class PolicyEngine:
             return PolicyDecision(False, "MODEL_RUN_NOT_EXECUTABLE")
         return self._evaluate_budget(run, context, route, AgentModelUsage)
 
-    def context_is_authoritative(self, context: ModelCallContext, *, run: object | None = None) -> bool:
+    def context_is_authoritative(
+        self, context: ModelCallContext, *, run: AgentRun | None = None
+    ) -> bool:
         """回读 Run/Step；陈旧 context 不得预留、取 permit 或触发 Provider。"""
         from app.models import AgentRun, AgentStep
 
@@ -155,6 +157,20 @@ class PolicyEngine:
                 self._session.rollback()
                 continue
             reserved_cost = route.input_price * context.estimated_input_tokens / 1000
+            # retry/fallback 是新的物理模型调用；同一 execution/step 不能复用
+            # model_attempt，否则用量账本与后续对账无法区分候选请求。
+            previous_attempt = self._session.scalar(
+                select(func.max(AgentModelUsage.model_attempt)).where(
+                    AgentModelUsage.run_id == run.run_id,
+                    AgentModelUsage.step_id == context.step_id,
+                    AgentModelUsage.execution_attempt
+                    == context.lease_context.execution_attempt,
+                )
+            )
+            model_attempt = max(
+                context.model_attempt,
+                (int(previous_attempt) + 1) if previous_attempt is not None else 1,
+            )
             usage_id = str(uuid4())
             self._session.add(AgentModelUsage(
                 id=uuid4().int >> 65,
@@ -162,7 +178,7 @@ class PolicyEngine:
                 run_id=run.run_id,
                 step_id=context.step_id,
                 execution_attempt=context.lease_context.execution_attempt,
-                model_attempt=context.model_attempt,
+                model_attempt=model_attempt,
                 status="reserved",
                 permit_id=None,
                 # 仅冻结 route 的无内容治理配置，不保存业务请求、Prompt 或输出。
@@ -180,6 +196,7 @@ class PolicyEngine:
                 pricing_config_version=route.pricing_config_version,
                 cost_unit=route.price_unit,
                 reserved_estimated_cost=reserved_cost,
+                reserved_tokens=context.estimated_input_tokens,
                 input_tokens=None,
                 output_tokens=None,
                 request_deadline_at=context.request_deadline_at,
@@ -189,7 +206,8 @@ class PolicyEngine:
         return PolicyDecision(False, "MODEL_RUN_NOT_EXECUTABLE"), None
 
     def _evaluate_budget(
-        self, run: object, context: ModelCallContext, route: ModelRoute, usage_model: object,
+        self, run: AgentRun, context: ModelCallContext, route: ModelRoute,
+        usage_model: type[AgentModelUsage],
     ) -> PolicyDecision:
         """只汇总同一 Run 的持久 usage；预留行也必须算入额度。"""
         # 运行时导入模型使 Settings 加载路径保持无 ORM 导入环。
@@ -213,10 +231,44 @@ class PolicyEngine:
             reserved_cost = route.input_price * context.estimated_input_tokens / 1000
             if used_cost + reserved_cost >= max_cost:
                 return PolicyDecision(False, "MODEL_COST_LIMIT_EXCEEDED")
+        max_tokens = self._nonnegative_int(policy.get("max_tokens"))
+        if max_tokens is not None:
+            usages = self._session.scalars(
+                select(AgentModelUsage).where(AgentModelUsage.run_id == run.run_id)
+            ).all()
+            used_tokens = sum(self._usage_tokens(usage) for usage in usages)
+            # 下一次请求至少会消耗其已验证的输入 token；未知的 Provider 用量不能按零处理。
+            if used_tokens + context.estimated_input_tokens > max_tokens:
+                return PolicyDecision(False, "MODEL_TOKEN_LIMIT_EXCEEDED")
         return PolicyDecision(True)
 
+    def record_active_elapsed(self, context: ModelCallContext, elapsed_ms: int) -> bool:
+        """把 Provider 冷却等待的真实时长及时归集到可信 Run 活跃预算。
+
+        该方法只接受已通过 fencing/lease 校验的模型上下文，且不记录请求正文。
+        Executor 会在节点安全边界扣除这段已落库时长，避免重复累计。
+        """
+        if elapsed_ms <= 0 or not self.context_is_authoritative(context):
+            return False
+        from app.models import AgentRun
+
+        updated = self._session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.run_id == context.run_id,
+                AgentRun.execution_attempt == context.lease_context.execution_attempt,
+                AgentRun.lease_owner == context.lease_context.lease_owner,
+                AgentRun.fencing_token == context.lease_context.fencing_token,
+                AgentRun.dispatch_state == "claimed",
+            )
+            .values(active_elapsed_ms=AgentRun.active_elapsed_ms + elapsed_ms)
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return updated.rowcount == 1  # type: ignore[attr-defined]
+
     @staticmethod
-    def _run_is_executable(run: object, context: ModelCallContext) -> bool:
+    def _run_is_executable(run: AgentRun, context: ModelCallContext) -> bool:
         """每次 permit 前回读 Run 的取消、隐私、授权和 lease/fencing 屏障。"""
         lease = context.lease_context
         expires_at = run.lease_expires_at
@@ -264,3 +316,14 @@ class PolicyEngine:
             return estimated
         reserved = cls._nonnegative_finite(usage.reserved_estimated_cost)
         return reserved if reserved is not None else 0.0
+
+    @classmethod
+    def _usage_tokens(cls, usage: AgentModelUsage) -> int:
+        """优先已观察到的 input/output token；未知调用保守使用预留输入 token。"""
+        if usage.status == "aborted_before_send":
+            return 0
+        input_tokens = cls._nonnegative_int(usage.input_tokens)
+        output_tokens = cls._nonnegative_int(usage.output_tokens)
+        if input_tokens is not None and output_tokens is not None:
+            return input_tokens + output_tokens
+        return cls._nonnegative_int(usage.reserved_tokens) or 0

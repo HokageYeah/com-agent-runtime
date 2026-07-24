@@ -20,7 +20,7 @@ from app.models import (
 )
 from app.runtime.artifact import ArtifactStore
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
-from app.runtime.executor import WorkflowExecutor
+from app.runtime.executor import RetryableWorkflowNodeError, WorkflowExecutor
 from app.runtime.interfaces import LeaseContext
 from app.runtime.state import AgentState
 from app.services.lease_service import LeaseService
@@ -43,6 +43,21 @@ class RecordingNodeRunner(DeterministicNodeRunner):
         self, node: dict[str, object], run: AgentRun, state: AgentState
     ) -> dict[str, object]:
         self.node_ids.append(str(node["node_id"]))
+        return super().run_node(node, run, state)
+
+
+class RetryOnceNodeRunner(DeterministicNodeRunner):
+    """首轮返回受控临时失败，第二轮才产生节点结果。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run_node(
+        self, node: dict[str, object], run: AgentRun, state: AgentState
+    ) -> dict[str, object]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RetryableWorkflowNodeError("TRANSIENT_NODE_FAILURE")
         return super().run_node(node, run, state)
 
 
@@ -205,6 +220,27 @@ def test_executor_accumulates_only_node_execution_time(monkeypatch: MonkeyPatch)
     run = session.scalar(select(AgentRun).where(AgentRun.run_id == "active-time-run"))
     assert result.status == "succeeded"
     assert run is not None and run.active_elapsed_ms == 3_000
+
+
+def test_executor_retries_retryable_node_with_frozen_step_budget() -> None:
+    """节点自动重试必须按 step_id 计数，且只消耗冻结的节点额度。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "node-retry-run")
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "node-retry-run"))
+    assert run is not None
+    run.capability_snapshot_json = {"execution_policy": {"max_auto_retry_per_step": 1}}
+    session.commit()
+    runner = RetryOnceNodeRunner()
+
+    result = _executor(session, runner).run("node-retry-run", _lease_context(now))
+
+    steps = session.scalars(select(AgentStep).order_by(AgentStep.created_at)).all()
+    assert result.status == "succeeded"
+    assert runner.calls == 3
+    assert run.auto_retry_count == 1
+    assert steps[0].step_attempt == 2
 
 
 def test_executor_heartbeats_same_context_before_and_after_every_node(

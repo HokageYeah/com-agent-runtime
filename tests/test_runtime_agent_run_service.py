@@ -29,7 +29,7 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
         agent_id="governed-agent", version="1", runtime_type="workflow",
         definition_json={
             "policy": {
-                "max_model_calls": 2, "max_model_cost": 1.5,
+                "max_model_calls": 2, "max_model_cost": 1.5, "max_tokens": 1200,
                 "max_steps": 16, "max_tool_calls": 20, "max_run_seconds": 300,
             },
             "workflow_nodes": [],
@@ -44,7 +44,7 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
         CreateRunCommand(
             agent_id="governed-agent", agent_version="1", business_type="memoir",
             business_id="business", start_mode="held",
-            input={"model_policy": {"max_model_calls": 999, "max_model_cost": 999}},
+            input={"model_policy": {"max_model_calls": 999, "max_model_cost": 999, "max_tokens": 999999}},
             callback_target_id="callback", business_connector_id="connector",
         ), "caller", "tenant", "model-policy-freeze",
     )
@@ -53,15 +53,38 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
     assert run is not None and run.capability_snapshot_json is not None
     assert run.capability_snapshot_json["model_policy"] == {
         "max_model_calls": 2, "max_model_cost": 1.5,
+        "max_tokens": 1200,
     }
     assert run.capability_snapshot_json["execution_policy"] == {
         "max_steps": 16, "max_tool_calls": 20, "max_run_seconds": 300,
     }
 
 
+def test_create_freezes_authoritative_authorization_version() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(AgentDefinition(
+        agent_id="agent", version="1", runtime_type="workflow", definition_json={},
+        package_digest="sha256:test", contract_version="1", status="active",
+        status_changed_at=datetime.now(UTC), status_changed_by="test", status_change_reason="fixture",
+    ))
+    session.commit()
+
+    created = AgentRunService(session).create(
+        CreateRunCommand(agent_id="agent", agent_version="1", business_type="memoir", business_id="business", input={}, callback_target_id="callback", business_connector_id="connector"),
+        "caller", "tenant", "key", authorization_version=9,
+    )
+
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == created.run_id))
+    assert run is not None and run.authorization_version == 9
+
+
 @pytest.mark.parametrize("policy", [
     {"max_model_calls": True},
     {"max_model_calls": -1},
+    {"max_tokens": True},
+    {"max_tokens": -1},
     {"max_model_cost": -0.01},
     {"max_model_cost": float("nan")},
 ])
@@ -261,6 +284,16 @@ def test_internal_auditor_can_read_other_callers_run_without_private_input() -> 
 
     assert detail.run_id == "auditor-read-run"
     assert "input_json" not in detail.model_dump()
+    audit = session.scalar(
+        select(RuntimeAuditRecord).where(
+            RuntimeAuditRecord.action == "agent_run_audit_read"
+        )
+    )
+    assert audit is not None
+    assert audit.actor_type == "auditor"
+    assert audit.actor_id == "runtime-auditor"
+    assert audit.metadata_summary == {"status": "pending"}
+    assert "private" not in str(audit.metadata_summary)
 
 
 def test_waiting_human_cancel_is_immediately_terminal() -> None:

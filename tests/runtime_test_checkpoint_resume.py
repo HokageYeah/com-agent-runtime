@@ -56,7 +56,15 @@ def test_checkpoint_store_encrypts_state_and_loads_latest_for_valid_lease() -> N
         "completed_node_ids": ["load_snapshot"],
         "private_snapshot": "never-public",
     }
-    assert [record.action for record in session.scalars(select(RuntimeAuditRecord)).all()] == [
+    audit_records = list(session.scalars(select(RuntimeAuditRecord)).all())
+    assert [record.action for record in audit_records] == [
         "checkpoint_saved",
         "checkpoint_loaded",
     ]
+    # 受控解密读取仅记录资源版本和摘要前缀，严禁将恢复状态进入审计记录。
+    assert audit_records[-1].metadata_summary == {
+        "run_id": "checkpoint-run",
+        "privacy_version": "1",
+        "content_digest_prefix": record.content_digest[:12],
+    }
+    assert "never-public" not in str(audit_records[-1].metadata_summary)

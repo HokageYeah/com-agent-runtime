@@ -52,6 +52,19 @@ class AuthorizationService:
         client = self._require_client(client_id)
         return bool(client.get("internal_auditor", False))
 
+    def authorize_callback_target(self, client_id: str, callback_target_id: str) -> None:
+        """投递前复核调用方当前 callback allowlist，撤销后不得出站。"""
+        self._require_allowed(
+            self._require_client(client_id), "callback_target_ids", callback_target_id, "callback"
+        )
+
+    def authorization_version(self, client_id: str) -> int:
+        """读取部署受控的授权版本；缺省仅兼容既有配置并冻结为 1。"""
+        value = self._require_client(client_id).get("authorization_version", 1)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise AuthorizationError("authorization_version 配置非法")
+        return value
+
     def _require_client(self, client_id: str) -> dict[str, Any]:
         client = self._clients.get(client_id)
         if client is None:

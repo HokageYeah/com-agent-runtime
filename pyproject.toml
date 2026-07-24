@@ -37,6 +37,10 @@ pytest = ">=8.3.0,<9.0.0"
 pytest-asyncio = ">=0.24.0,<1.0.0"
 ruff = ">=0.6.0,<1.0.0"
 pre-commit = ">=3.8.0,<4.0.0"
+mypy = ">=1.20.0,<2.0.0"
+boto3-stubs = {version = ">=1.35.0", extras = ["essential"]}
+types-PyYAML = ">=6.0.0"
+types-cachetools = ">=5.5.0"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -55,6 +59,30 @@ ignore = ["B008", "E501"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.mypy]
+# 先让 Runtime 新边界在项目虚拟环境中稳定执行类型检查；旧版业务 ORM 仍使用
+# 未注解的 ``Column`` 声明，需单独迁移到 Mapped[] 后再纳入本轮门禁。
+python_version = "3.13"
+follow_imports = "skip"
+exclude = '''(?x)(
+    ^app/(?:
+        agents/memoir_agent/runner\.py|
+        api/endpoints/memory_api\.py|
+        core/logging_uru\.py|
+        db/sqlalchemy_db\.py|
+        main\.py|
+        memory_runtime_launcher\.py|
+        services/(?:
+            memory_agent_binding_service|memory_agent_callback_service|
+            memory_archive_service|memory_deletion_compensation_service|
+            memory_password_service|memory_player_service|
+            memory_runtime_launch_service|memory_snapshot_materializer|
+            memory_snapshot_service|model_usage_service|observability_service|
+            relationship_archive_service
+        )\.py
+    )$
+)'''
 
 
 [build-system]

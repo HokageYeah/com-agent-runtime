@@ -66,18 +66,31 @@ class LeaseService:
         )
 
     def heartbeat(self, run_id: str, context: LeaseContext) -> bool:
-        run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
-        if (
-            not run
-            or run.lease_owner != context.lease_owner
-            or run.fencing_token != context.fencing_token
-        ):
+        now = datetime.now(UTC)
+        renewed_until = now + timedelta(seconds=self._lease_seconds)
+        renewed = self._session.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.run_id == run_id,
+                AgentRun.dispatch_state == "claimed",
+                AgentRun.lease_owner == context.lease_owner,
+                AgentRun.fencing_token == context.fencing_token,
+                AgentRun.execution_attempt == context.execution_attempt,
+                AgentRun.cancel_requested_at.is_(None),
+                AgentRun.privacy_state == "active",
+                AgentRun.privacy_version == context.privacy_version,
+                AgentRun.authorization_version == context.authorization_version,
+                AgentRun.lease_expires_at > now,
+                AgentRun.run_deadline_at > now,
+            )
+            .values(lease_expires_at=renewed_until)
+            .execution_options(synchronize_session=False)
+        )
+        if renewed.rowcount != 1:  # type: ignore[attr-defined]
             logging.warning("Worker heartbeat 被 fencing 拒绝 run_id=%s", run_id)
             return False
-        renewed_until = datetime.now(UTC) + timedelta(
-            seconds=self._lease_seconds
-        )
-        run.lease_expires_at = renewed_until
+        run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+        assert run is not None
         self._session.commit()
         context.lease_expires_at = renewed_until
         return True
@@ -174,18 +187,33 @@ class LeaseService:
                 AgentRun.dispatch_state == "claimed", AgentRun.lease_expires_at < now
             )
         ).all():
+            # `running/planning/evaluating` 不是 queued Run 的可认领状态；失联
+            # 接管必须回到 pending，由下一 execution attempt 从安全恢复点重新执行。
+            next_status = (
+                "pending"
+                if run.status in {"planning", "running", "evaluating"}
+                else run.status
+            )
             reaped = self._session.execute(
                 update(AgentRun)
                 .where(
                     AgentRun.run_id == run.run_id,
+                    AgentRun.status == run.status,
                     AgentRun.dispatch_state == "claimed",
                     AgentRun.lease_expires_at < now,
                 )
                 .execution_options(synchronize_session=False)
                 .values(
+                    status=next_status,
                     dispatch_state="queued",
                     lease_owner=None,
                     lease_expires_at=None,
+                    queued_at=now,
+                    status_version=(
+                        AgentRun.status_version + 1
+                        if next_status != run.status
+                        else AgentRun.status_version
+                    ),
                 )
             )
             if reaped.rowcount != 1:  # type: ignore[attr-defined]

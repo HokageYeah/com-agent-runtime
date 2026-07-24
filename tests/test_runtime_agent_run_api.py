@@ -13,9 +13,12 @@ import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
 from app.main import app
 from app.models import AgentDefinition
+from app.services.admission_service import AdmissionLimits
 
 
-def _headers(method: str, path: str, body: bytes) -> dict[str, str]:
+def _headers(
+    method: str, path: str, body: bytes, *, idempotency_key: str = "root-runtime-create-1"
+) -> dict[str, str]:
     """构造根 Runtime 写接口需要的 HMAC 请求头，测试密钥不进入生产日志。"""
     timestamp = str(int(datetime.now(UTC).timestamp()))
     canonical = f"{method}\n{path}\n{timestamp}\n{hashlib.sha256(body).hexdigest()}"
@@ -27,7 +30,7 @@ def _headers(method: str, path: str, body: bytes) -> dict[str, str]:
         "X-Agent-Key-Id": "dev",
         "X-Agent-Timestamp": timestamp,
         "X-Agent-Signature": signature,
-        "Idempotency-Key": "root-runtime-create-1",
+        "Idempotency-Key": idempotency_key,
         "Content-Type": "application/json",
     }
 
@@ -82,3 +85,56 @@ def test_signed_create_uses_root_runtime_route_and_replays_response(client) -> N
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["run_id"] == second.json()["run_id"]
+
+
+def test_signed_create_returns_429_without_idempotency_record_when_admission_is_full(
+    client, monkeypatch
+) -> None:
+    """HTTP Admission 超载不得创建第二个 Run 或消费调用方的重试幂等键。"""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    app.state.session_factory = factory
+    session = factory()
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+            definition_json={"allowed_business_types": ["couple_memory"]},
+            package_digest="sha256:test", contract_version="1.0.0", status="active",
+            status_changed_at=datetime.now(UTC), status_changed_by="test",
+            status_change_reason="admission-overload-test",
+        )
+    )
+    session.commit()
+    session.close()
+    monkeypatch.setattr(
+        "app.api.endpoints.agent_runs_api._admission_limits",
+        lambda _request: AdmissionLimits(max_held=1, max_queued=1, max_running=1),
+    )
+
+    path = "/api/v1/runtime/agent-runs"
+    body = json.dumps(
+        {
+            "agent_id": "memoir_agent", "agent_version": "1.0.0",
+            "business_type": "couple_memory", "business_id": "archive-overload",
+            "start_mode": "held", "input": {"snapshot_id": "snapshot-overload"},
+            "callback_target_id": "callback", "business_connector_id": "couple_diary_backend",
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    first = client.post(
+        path, content=body, headers=_headers("POST", path, body, idempotency_key="admission-1")
+    )
+    overloaded = client.post(
+        path, content=body, headers=_headers("POST", path, body, idempotency_key="admission-2")
+    )
+
+    assert first.status_code == 201
+    assert overloaded.status_code == 429
+    assert overloaded.json()["ret"] == ["ERROR::RUNTIME_OVERLOADED"]
+    assert overloaded.headers["Retry-After"] == "5"

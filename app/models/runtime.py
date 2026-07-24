@@ -13,6 +13,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     UniqueConstraint,
+    event,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -246,6 +247,13 @@ class AgentEvaluation(Base):
     score_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
     reason_summary: Mapped[str | None] = mapped_column(String(500))
+    # 三个列只保存确定性布尔结论，避免观测聚合读取可能含私密内容的 score_json。
+    schema_passed: Mapped[bool | None] = mapped_column(Boolean)
+    grounding_passed: Mapped[bool | None] = mapped_column(Boolean)
+    # 引用正确性与编造风险独立持久化，聚合时无需读取 score_json 或素材正文。
+    material_reference_passed: Mapped[bool | None] = mapped_column(Boolean)
+    hallucination_detected: Mapped[bool | None] = mapped_column(Boolean)
+    emotional_safety_passed: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -301,6 +309,8 @@ class AgentModelUsage(Base, TimestampMixin):
     model_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
     permit_id: Mapped[str | None] = mapped_column(String(120))
+    # Provider 请求身份只用于核对同一物理 attempt 的迟到计量；不保存响应正文。
+    provider_request_id: Mapped[str | None] = mapped_column(String(120))
     capability_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     prompt_id: Mapped[str | None] = mapped_column(String(120))
     prompt_version: Mapped[str | None] = mapped_column(String(40))
@@ -309,6 +319,8 @@ class AgentModelUsage(Base, TimestampMixin):
     pricing_config_version: Mapped[str | None] = mapped_column(String(40))
     cost_unit: Mapped[str | None] = mapped_column(String(32))
     reserved_estimated_cost: Mapped[float | None] = mapped_column(nullable=True)
+    # Provider 未返回可信 token 时，用输入 token 预留参与 max_tokens 预算，不能按零放行。
+    reserved_tokens: Mapped[int | None] = mapped_column(Integer)
     estimated_cost: Mapped[float | None] = mapped_column(nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -333,6 +345,12 @@ class CallbackEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+
+
+@event.listens_for(CallbackEvent, "before_update")
+def _prevent_callback_event_update(*_: object) -> None:
+    """Callback 是交付事实；重试进度只能写 RuntimeOutboxEvent。"""
+    raise ValueError("CALLBACK_EVENT_IMMUTABLE")
 
 
 class RuntimeOutboxEvent(Base, TimestampMixin):

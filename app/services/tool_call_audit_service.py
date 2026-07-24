@@ -11,7 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentToolCall
+from app.runtime.interfaces import LeaseContext
 from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
+from app.schemas.audit import RuntimeAuditEvent
+from app.services.audit_service import AuditService
+from app.services.lease_service import LeaseService
 
 
 class ToolCallAuditService:
@@ -20,6 +24,7 @@ class ToolCallAuditService:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._policy = PolicyEngine(session)
+        self._audit = AuditService(session=session)
 
     def begin_side_effect(
         self,
@@ -57,6 +62,16 @@ class ToolCallAuditService:
             or item.request_digest != request_digest
             for item in existing
         ):
+            # 不同 digest/key 不能通过更换重试身份绕过既有副作用；审计只写
+            # 受控结论，禁止记录请求摘要之外的工具正文。
+            self._audit.append(RuntimeAuditEvent(
+                audit_id=str(uuid4()), actor_type="system", actor_id="tool_gateway",
+                action="tool_call_operation_conflict", resource_type="agent_run",
+                resource_id=run_id, reason_code="TOOL_CALL_OPERATION_CONFLICT",
+                outcome="rejected", occurred_at=datetime.now(UTC),
+                metadata_summary={"run_id": run_id},
+            ))
+            self._session.commit()
             logging.warning(
                 "拒绝冲突的工具逻辑操作 run_id=%s step_id=%s tool=%s",
                 run_id,
@@ -122,7 +137,8 @@ class ToolCallAuditService:
         record: AgentToolCall,
         output_summary: Mapping[str, object] | int,
         content_digest: str | None = None,
-    ) -> None:
+        *, lease_context: LeaseContext | None = None,
+    ) -> bool:
         """标记成功，只写入调用方提供的脱敏输出摘要。
 
         ``revision + content_digest`` 形态保留给已有发布节点，通用工具则直接传
@@ -134,25 +150,42 @@ class ToolCallAuditService:
             safe_output = {"revision": output_summary, "content_digest": content_digest}
         else:
             safe_output = dict(output_summary)
-        self._persist_result(record, status="succeeded", output_summary=safe_output)
+        persisted = self._persist_result(
+            record, status="succeeded", output_summary=safe_output, lease_context=lease_context
+        )
+        if not persisted:
+            return False
         logging.info("写工具审计成功 tool_call_id=%s tool=%s", record.tool_call_id, record.tool_name)
+        return True
 
-    def fail(self, record: AgentToolCall, error_code: str, *, retryable: bool) -> None:
+    def fail(
+        self, record: AgentToolCall, error_code: str, *, retryable: bool,
+        lease_context: LeaseContext | None = None,
+    ) -> bool:
         """记录已确认失败；错误码可观测，错误正文禁止进入数据库。"""
-        self._persist_result(
+        persisted = self._persist_result(
             record,
             status="failed",
             error_code=error_code,
             output_summary={"retryable": retryable},
+            lease_context=lease_context,
         )
+        if not persisted:
+            return False
         logging.warning("写工具审计失败 tool_call_id=%s code=%s retryable=%s", record.tool_call_id, error_code, retryable)
+        return True
 
-    def unknown(self, record: AgentToolCall, error_code: str) -> None:
+    def unknown(
+        self, record: AgentToolCall, error_code: str, *, lease_context: LeaseContext | None = None,
+    ) -> bool:
         """超时等无法判断业务端是否提交的情况必须保守标记。"""
-        self._persist_result(
-            record, status="outcome_unknown", error_code=error_code
+        persisted = self._persist_result(
+            record, status="outcome_unknown", error_code=error_code, lease_context=lease_context
         )
+        if not persisted:
+            return False
         logging.warning("写工具结果未知 tool_call_id=%s code=%s", record.tool_call_id, error_code)
+        return True
 
     def latest_committed(
         self,
@@ -183,9 +216,19 @@ class ToolCallAuditService:
         status: str,
         error_code: str | None = None,
         output_summary: dict[str, object] | None = None,
-    ) -> None:
+        lease_context: LeaseContext | None = None,
+    ) -> bool:
         """在副作用返回后同步持久化脱敏终态。"""
+        if lease_context is not None and not LeaseService(self._session).can_write(
+            record.run_id, lease_context
+        ):
+            logging.warning(
+                "迟到工具审计结算被执行边界拒绝 tool_call_id=%s code=TOOL_RESULT_LEASE_INVALID",
+                record.tool_call_id,
+            )
+            return False
         record.status = status
         record.error_code = error_code
         record.output_summary = output_summary
         self._session.commit()
+        return True

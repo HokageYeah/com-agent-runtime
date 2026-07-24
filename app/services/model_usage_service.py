@@ -84,6 +84,7 @@ class ModelUsageService:
             pricing_config_version=route.pricing_config_version,
             cost_unit=route.price_unit,
             reserved_estimated_cost=reserved,
+            reserved_tokens=context.estimated_input_tokens,
             input_tokens=None,
             output_tokens=None,
             request_deadline_at=context.request_deadline_at,
@@ -148,11 +149,17 @@ class ModelUsageService:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         route: ModelRoute | None = None,
+        provider_request_id: str | None = None,
     ) -> str:
+        late_recovery = status in {"succeeded", "failed"}
         if input_tokens is not None and input_tokens < 0:
             raise ValueError("input_tokens 不可为负")
         if output_tokens is not None and output_tokens < 0:
             raise ValueError("output_tokens 不可为负")
+        if provider_request_id is not None and (
+            not provider_request_id or len(provider_request_id) > 120
+        ):
+            raise ValueError("provider_request_id 非法")
         if status == "aborted_before_send":
             cost = 0.0
         elif status == "succeeded" and input_tokens is not None and output_tokens is not None:
@@ -163,32 +170,50 @@ class ModelUsageService:
             # 超时/网络中断不能伪造成免费调用，保留已预留的保守成本。
             usage = self._get(usage_id)
             cost = usage.reserved_estimated_cost
-        # 条件 UPDATE 是跨 worker 的最终裁决：只有第一个 running/started
-        # 结算者能写入结果，后到者不会覆盖 outcome 或成本。
+        # 条件 UPDATE 是跨 worker 的最终裁决。未知结果的迟到计量必须同时匹配
+        # 已持久化的 Provider 请求身份；仅知道 usage_id 不能把未知副作用改写为成功。
+        usage = self._get(usage_id)
+        if late_recovery and usage.status == "outcome_unknown":
+            if provider_request_id is None or usage.provider_request_id != provider_request_id:
+                return "identity_mismatch"
+        allowed_statuses = ("running", "started", "outcome_unknown") if late_recovery else (
+            "running", "started",
+        )
+        values: dict[str, object] = {
+            "status": status,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "estimated_cost": cost,
+        }
+        # Provider 返回的身份在首次结算时写入；未知态恢复不允许更换它。
+        if provider_request_id is not None:
+            values["provider_request_id"] = provider_request_id
+        conditions = [
+            AgentModelUsage.usage_id == usage_id,
+            AgentModelUsage.status.in_(allowed_statuses),
+        ]
+        if late_recovery and usage.status == "outcome_unknown":
+            conditions.append(AgentModelUsage.provider_request_id == provider_request_id)
         settled = self._session.execute(
             update(AgentModelUsage)
-            .where(
-                AgentModelUsage.usage_id == usage_id,
-                AgentModelUsage.status.in_(("running", "started")),
-            )
-            .values(
-                status=status,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                estimated_cost=cost,
-            )
+            .where(*conditions)
+            .values(**values)
             .execution_options(synchronize_session=False)
         )
         self._session.flush()
         return "settled" if settled.rowcount == 1 else "already_settled"  # type: ignore[attr-defined]
 
     def mark_expired_running_unknown(self, now: datetime | None = None) -> int:
-        """供后续 Reconciler 使用：仅将过期 in-flight 调用标为未知结果。"""
+        """将过期的发送中调用标为未知结果，保留预留成本。
+
+        `started` 表示 permit 已授予 Provider 发送权；Worker 在该边界崩溃时
+        无法确认上游是否已收到请求，必须与 `running` 一样保守结算。
+        """
         current = now or datetime.now(UTC)
         expired = self._session.execute(
             update(AgentModelUsage)
             .where(
-                AgentModelUsage.status == "running",
+                AgentModelUsage.status.in_(("running", "started")),
                 AgentModelUsage.request_deadline_at.is_not(None),
                 AgentModelUsage.request_deadline_at < current,
             )

@@ -18,6 +18,9 @@ from app.runtime.checkpoint import CheckpointError, CheckpointStore
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
 from app.runtime.state import AgentState
+from app.schemas.audit import RuntimeAuditEvent
+from app.services.agent_run_service import AgentRunService, AgentRunServiceError
+from app.services.audit_service import AuditService
 from app.services.lease_service import LeaseService
 from app.services.outbox_service import OutboxService
 
@@ -28,6 +31,10 @@ class WorkflowNodeRunner(Protocol):
     def run_node(
         self, node: dict[str, object], run: AgentRun, state: AgentState
     ) -> dict[str, object]: ...
+
+
+class RetryableWorkflowNodeError(RuntimeError):
+    """节点明确声明的瞬时失败；Executor 才可按冻结额度重新执行该节点。"""
 
 
 class WorkflowExecutor:
@@ -41,15 +48,18 @@ class WorkflowExecutor:
         artifact_store: ArtifactStore,
         *,
         is_draining: Callable[[], bool] = lambda: False,
+        authorization_version_resolver: Callable[[AgentRun], int | None] | None = None,
     ) -> None:
         self._session = session
         self._node_runner = node_runner
         self._checkpoint_store = checkpoint_store
         self._artifact_store = artifact_store
         self._is_draining = is_draining
+        self._authorization_version_resolver = authorization_version_resolver
         self._lease = LeaseService(session)
         self._outbox = OutboxService(session)
         self._policy = PolicyEngine(session)
+        self._runs = AgentRunService(session)
 
     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
         """执行当前 execution attempt；所有状态写入前均复核 lease/fencing 边界。"""
@@ -143,6 +153,14 @@ class WorkflowExecutor:
                 execution_attempt=lease_context.execution_attempt,
                 error_code="LEASE_CONTEXT_INVALID",
             )
+        if self._authorization_changed(run):
+            run.cancel_requested_at = datetime.now(UTC)
+            self._record_authorization_change(run)
+            return AgentRunResult(
+                run_id=run_id, status="cancelled",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="AUTHORIZATION_CHANGED",
+            )
         # draining 不接管 Run 状态；RunQueueService 会在这个安全边界释放 lease。
         if self._is_draining():
             return self._draining_result(run_id, lease_context, len(completed_node_ids))
@@ -192,6 +210,14 @@ class WorkflowExecutor:
                 return self._fail(run, lease_context, exc.code)
             if not self._lease.can_write(run_id, lease_context):
                 return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
+            if self._authorization_changed(run):
+                run.cancel_requested_at = datetime.now(UTC)
+                self._record_authorization_change(run)
+                return AgentRunResult(
+                    run_id=run_id, status="cancelled",
+                    execution_attempt=lease_context.execution_attempt,
+                    error_code="AUTHORIZATION_CHANGED",
+                )
             if self._is_draining():
                 return self._draining_result(run_id, lease_context, completed_steps)
             if not self._lease.heartbeat(run_id, lease_context):
@@ -210,8 +236,35 @@ class WorkflowExecutor:
             )
             self._session.add(step)
             self._session.flush()
+            node_active_elapsed_before = run.active_elapsed_ms
             try:
-                node_result = self._node_runner.run_node(node, run, state)
+                bind_lease_context = getattr(self._node_runner, "bind_lease_context", None)
+                if callable(bind_lease_context):
+                    bind_lease_context(lease_context)
+                while True:
+                    try:
+                        node_result = self._node_runner.run_node(node, run, state)
+                        break
+                    except RetryableWorkflowNodeError as exc:
+                        try:
+                            self._runs.record_auto_retry(run_id, step.step_id)
+                        except AgentRunServiceError:
+                            logging.warning(
+                                "Workflow 节点自动重试额度已耗尽 run_id=%s node=%s",
+                                run_id,
+                                node_id,
+                            )
+                            step.status = "failed"
+                            step.error_code = "AUTO_RETRY_LIMIT_EXCEEDED"
+                            step.finished_at = datetime.now(UTC)
+                            return self._fail(run, lease_context, "AUTO_RETRY_LIMIT_EXCEEDED")
+                        logging.info(
+                            "Workflow 节点自动重试 run_id=%s node=%s step_attempt=%s code=%s",
+                            run_id,
+                            node_id,
+                            step.step_attempt,
+                            str(exc),
+                        )
             except Exception:  # noqa: BLE001 - 节点异常必须转为安全错误码。
                 logging.exception("Workflow 节点执行失败 run_id=%s node=%s", run_id, node["node_id"])
                 step.status = "failed"
@@ -243,7 +296,10 @@ class WorkflowExecutor:
             step.finished_at = datetime.now(UTC)
             # 每个安全节点边界刷新累计活跃时间；不能用 Run.created_at，避免排队
             # 或人工审批时间错误消耗执行额度。
-            run.active_elapsed_ms += int((monotonic() - active_started_at) * 1000)
+            node_elapsed_ms = int((monotonic() - active_started_at) * 1000)
+            # 429 等待可能已由 ModelGateway 提前写入，节点边界只补未归集的部分。
+            already_recorded_ms = max(0, run.active_elapsed_ms - node_active_elapsed_before)
+            run.active_elapsed_ms += max(0, node_elapsed_ms - already_recorded_ms)
             active_started_at = monotonic()
             checkpoint_state = {
                 "completed_steps": completed_steps,
@@ -342,4 +398,22 @@ class WorkflowExecutor:
             status="failed",
             execution_attempt=lease_context.execution_attempt,
             error_code=error_code,
+        )
+
+    def _authorization_changed(self, run: AgentRun) -> bool:
+        if self._authorization_version_resolver is None:
+            return False
+        current = self._authorization_version_resolver(run)
+        return current is None or current != run.authorization_version
+
+    def _record_authorization_change(self, run: AgentRun) -> None:
+        """只审计版本失配结论，不记录授权配置、输入或节点数据。"""
+        AuditService(session=self._session).append(
+            RuntimeAuditEvent(
+                audit_id=str(uuid4()), actor_type="system", actor_id="workflow_executor",
+                action="agent_run_authorization_changed", resource_type="agent_run",
+                resource_id=run.run_id, reason_code="AUTHORIZATION_CHANGED",
+                outcome="cancel_requested", occurred_at=datetime.now(UTC),
+                trace_id=run.trace_id, metadata_summary={"status": run.status},
+            )
         )

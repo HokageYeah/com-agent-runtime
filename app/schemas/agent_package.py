@@ -80,19 +80,21 @@ class PackagePolicy(PackageSchema):
     # 缺失表示不设额度，不能被解释为零额度。
     max_model_calls: int | None = None
     max_model_cost: float | None = None
+    # 单个 Run 的模型 token 总量上限；实际计量未知时使用输入 token 预留保守计入。
+    max_tokens: int | None = None
     # 以下额度由 Runtime 在创建 Run 时冻结，避免请求方在执行期扩大资源权限。
     max_steps: int | None = None
     max_tool_calls: int | None = None
     max_run_seconds: int | None = None
     max_auto_retry_per_step: int | None = None
 
-    @field_validator("max_model_calls", mode="before")
+    @field_validator("max_model_calls", "max_tokens", mode="before")
     @classmethod
     def validate_max_model_calls(cls, value: object) -> object:
         if value is None:
             return value
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError("max_model_calls 必须为非负整数")
+            raise ValueError("max_model_calls/max_tokens 必须为非负整数")
         return value
 
     @field_validator("max_steps", "max_tool_calls", "max_run_seconds", "max_auto_retry_per_step", mode="before")

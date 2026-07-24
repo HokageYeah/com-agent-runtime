@@ -15,6 +15,9 @@ from app.services.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeClientConfig,
 )
+from app.services.memory_agent_callback_reconciliation_service import (
+    MemoryAgentCallbackReconciliationService,
+)
 from app.services.memory_runtime_launch_service import MemoryRuntimeLaunchService
 
 
@@ -38,12 +41,15 @@ def run_once() -> int:
         now = datetime.now(UTC)
         repaired = service.reconcile_pending_start(now)
         orphaned = service.reconcile_orphaned_create(now)
+        callback_repaired = MemoryAgentCallbackReconciliationService(
+            session, adapter
+        ).reconcile_pending()
         session.commit()
         logging.info(
-            "回忆录 Runtime launcher 完成 delivered=%s repaired=%s orphaned=%s",
-            delivered, repaired, orphaned,
+            "回忆录 Runtime launcher 完成 delivered=%s repaired=%s orphaned=%s callback_repaired=%s",
+            delivered, repaired, orphaned, callback_repaired,
         )
-        return delivered + repaired + orphaned
+        return delivered + repaired + orphaned + callback_repaired
     except Exception:
         session.rollback()
         # adapter/outbox 已记录标准码；此处不能输出上游 response 或业务正文。

@@ -59,6 +59,36 @@ def test_reconciler_fails_expired_waiting_human_and_reports_dead_letter() -> Non
     assert refreshed is not None and (refreshed.status, refreshed.dispatch_state, refreshed.error_code) == ("failed", "finished", "WAITING_HUMAN_TIMEOUT")
 
 
+def test_reconciliation_report_logs_only_safe_aggregates(caplog: pytest.LogCaptureFixture) -> None:
+    """报告和日志只含计数与固定动作码，绝不回显 Run 输入或 callback 正文。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    run = _run("safe-report-run", status="pending", dispatch_state="held")
+    run.input_json = {"prompt": "private prompt", "diary": "private diary"}
+    run.held_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.add(run)
+    session.commit()
+
+    with caplog.at_level("INFO"):
+        report = ReconciliationService(session).run_once()
+
+    assert report.as_dict() == {
+        "scanned": 1,
+        "repaired": 1,
+        "dead_letter_callbacks": 0,
+        "failures": 0,
+        "alerts": 0,
+        "action_counts": {},
+        "memory_deletion_delivered_events": 0,
+        "memory_deletion_confirmed_purges": 0,
+        "memory_deletion_deleted_revisions": 0,
+        "memory_deletion_aborted": False,
+    }
+    assert "private prompt" not in caplog.text
+    assert "private diary" not in caplog.text
+
+
 def test_reconciler_cancels_expired_waiting_human_when_package_requires_it() -> None:
     """已冻结的 cancelled 策略必须在对账时产生对应终态 callback。"""
     engine = create_engine("sqlite://")
@@ -125,6 +155,7 @@ def test_reconciler_requeues_timeout_fallback_from_frozen_plan() -> None:
     ).all()
     assert report.repaired == 1
     assert refreshed is not None and (refreshed.status, refreshed.dispatch_state) == ("waiting_human", "queued")
+    assert refreshed.queued_at is not None
     assert len(dispatches) == 1 and dispatches[0].payload_json["reason"] == "waiting_human_timeout_fallback"
 
 
@@ -232,6 +263,76 @@ def test_reconciler_reaps_expired_lease_to_queued() -> None:
     assert refreshed is not None and refreshed.dispatch_state == "queued"
 
 
+def test_reconciler_reaps_expired_running_lease_into_a_new_claimable_attempt() -> None:
+    """失联中的 running Run 必须回到 pending，避免 queued 但永远无法再次 claim。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = _run("expired-running-lease", status="running", dispatch_state="claimed")
+    run.execution_attempt = 1
+    run.fencing_token = 1
+    run.lease_owner = "lost-worker"
+    run.lease_expires_at = now - timedelta(seconds=1)
+    session.add(run)
+    session.commit()
+
+    assert ReconciliationService(session).run_once(now=now).repaired == 1
+    session.refresh(run)
+    assert (run.status, run.dispatch_state, run.execution_attempt, run.fencing_token) == (
+        "pending", "queued", 1, 1,
+    )
+
+    context = LeaseService(session).claim(run.run_id, "recovery-worker")
+    assert context is not None
+    assert (context.execution_attempt, context.fencing_token) == (2, 2)
+
+
+def test_reconciler_enforces_active_and_wall_clock_deadlines_without_side_effect_replay() -> None:
+    """未被 Worker 持有的耗尽 Run 条件终止；claimed Run 仅写取消请求。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    active = _run("active-timeout", status="pending", dispatch_state="queued")
+    active.active_elapsed_ms = 60_000
+    wall = _run("wall-timeout", status="pending", dispatch_state="held")
+    wall.run_deadline_at = now - timedelta(seconds=1)
+    claimed = _run("claimed-wall-timeout", status="running", dispatch_state="claimed")
+    claimed.lease_owner, claimed.fencing_token = "worker", 1
+    claimed.lease_expires_at = now + timedelta(minutes=1)
+    claimed.run_deadline_at = now - timedelta(seconds=1)
+    session.add_all([
+        active,
+        wall,
+        claimed,
+        AgentPlan(
+            plan_id="active-timeout-plan", run_id=active.run_id,
+            strategy="static_workflow", steps_json=[],
+            stop_conditions_json={"max_run_seconds": 60}, fallback_policy_json={}, status="planned",
+        ),
+    ])
+    session.commit()
+
+    report = ReconciliationService(session).run_once(now=now)
+
+    session.refresh(active)
+    session.refresh(wall)
+    session.refresh(claimed)
+    assert (active.status, active.dispatch_state, active.error_code) == (
+        "failed", "finished", "ACTIVE_TIME_LIMIT_EXCEEDED",
+    )
+    assert (wall.status, wall.dispatch_state, wall.error_code) == (
+        "failed", "finished", "RUN_DEADLINE_EXCEEDED",
+    )
+    assert claimed.cancel_requested_at is not None
+    assert report.action_counts == {
+        "active_time_limit_terminated": 1,
+        "run_deadline_cancel_requested": 1,
+        "run_deadline_terminated": 1,
+    }
+
+
 def test_reconciler_terminates_pending_queued_run_for_dead_dispatch() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -243,6 +344,12 @@ def test_reconciler_terminates_pending_queued_run_for_dead_dispatch() -> None:
         aggregate_id=dead_dispatch.run_id, payload_json={"run_id": dead_dispatch.run_id},
         status="dead_letter", retention_until=datetime.now(UTC) + timedelta(days=1),
     ))
+    session.add_all([
+        AdmissionBucket(scope_type="global", scope_key="*", queued_count=1),
+        AdmissionBucket(scope_type="caller", scope_key="caller", queued_count=1),
+        AdmissionBucket(scope_type="tenant", scope_key="tenant", queued_count=1),
+        AdmissionBucket(scope_type="agent", scope_key="memoir_agent", queued_count=1),
+    ])
     session.commit()
 
     report = ReconciliationService(session).run_once()
@@ -252,6 +359,65 @@ def test_reconciler_terminates_pending_queued_run_for_dead_dispatch() -> None:
     assert refreshed is not None and (refreshed.status, refreshed.dispatch_state, refreshed.error_code) == (
         "failed", "finished", "DISPATCH_FAILED"
     )
+    assert all(bucket.queued_count == 0 for bucket in session.scalars(select(AdmissionBucket)))
+
+
+def test_reconciler_restores_missing_or_lost_run_dispatch_without_duplicate_identity() -> None:
+    """queued Run 缺少 outbox 时补建；已投递但丢失通知时复用原 outbox 身份。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    missing = _run("missing-dispatch", status="pending", dispatch_state="queued")
+    delivered = _run("lost-dispatch", status="pending", dispatch_state="queued")
+    expired_delivery = _run("expired-delivery", status="pending", dispatch_state="queued")
+    pending = _run("active-dispatch", status="pending", dispatch_state="queued")
+    session.add_all([
+        missing,
+        delivered,
+        expired_delivery,
+        pending,
+        RuntimeOutboxEvent(
+            outbox_id="expired-delivering-dispatch", event_type="run_dispatch",
+            aggregate_type="agent_run", aggregate_id=expired_delivery.run_id,
+            payload_json={"run_id": expired_delivery.run_id, "reason": "auto_create"},
+            status="delivering", lease_owner="lost-worker",
+            lease_expires_at=now - timedelta(seconds=1),
+            retention_until=now + timedelta(days=1),
+        ),
+        RuntimeOutboxEvent(
+            outbox_id="delivered-dispatch", event_type="run_dispatch",
+            aggregate_type="agent_run", aggregate_id=delivered.run_id,
+            payload_json={"run_id": delivered.run_id, "reason": "auto_create"},
+            status="delivered", delivered_at=now - timedelta(minutes=10),
+            retention_until=now + timedelta(days=1),
+        ),
+        RuntimeOutboxEvent(
+            outbox_id="pending-dispatch", event_type="run_dispatch",
+            aggregate_type="agent_run", aggregate_id=pending.run_id,
+            payload_json={"run_id": pending.run_id, "reason": "auto_create"},
+            status="pending", retention_until=now + timedelta(days=1),
+        ),
+    ])
+    session.commit()
+
+    report = ReconciliationService(session).run_once(now=now)
+
+    events = session.scalars(
+        select(RuntimeOutboxEvent)
+        .where(RuntimeOutboxEvent.event_type == "run_dispatch")
+        .order_by(RuntimeOutboxEvent.outbox_id)
+    ).all()
+    by_run = {event.aggregate_id: event for event in events}
+    assert by_run[missing.run_id].status == "pending"
+    assert by_run[missing.run_id].payload_json["reason"] == "reconciliation_missing_dispatch"
+    assert by_run[delivered.run_id].outbox_id == "delivered-dispatch"
+    assert by_run[delivered.run_id].status == "pending"
+    assert by_run[expired_delivery.run_id].outbox_id == "expired-delivering-dispatch"
+    assert by_run[expired_delivery.run_id].status == "pending"
+    assert by_run[pending.run_id].outbox_id == "pending-dispatch"
+    assert len(events) == 4
+    assert report.action_counts == {"run_dispatch_repaired": 3}
 
 
 def test_reconciler_cancels_unclaimed_runs_for_revoked_definition_and_requests_claimed_cancel() -> None:

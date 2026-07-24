@@ -21,6 +21,7 @@ from app.runtime.model_gateway import (
     ModelGateway,
     ModelRoute,
     ModelRouteRegistry,
+    PermitResult,
     ProviderTrafficController,
 )
 from app.runtime.policy_engine import PolicyEngine
@@ -555,6 +556,148 @@ def test_usage_settlement_is_idempotent() -> None:
     assert persisted is not None and persisted.status == "aborted_before_send"
 
 
+def test_reconciler_marks_expired_started_usage_as_outcome_unknown() -> None:
+    """Worker 在已获发送权后崩溃时，不能遗留 started 计量或猜测零成本。"""
+    session, lease = _run_session()
+    usage_id = ModelUsageService(session).create_running(_context(session, lease), _route(), "permit-crash")
+    assert ModelUsageService(session).mark_started(usage_id)
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == usage_id))
+    assert usage is not None
+    usage.request_deadline_at = datetime.now(UTC) - timedelta(seconds=1)
+    session.commit()
+
+    assert ModelUsageService(session).mark_expired_running_unknown() == 1
+    session.refresh(usage)
+    assert usage.status == "outcome_unknown"
+
+
+def test_late_usage_monotonically_settles_unknown_attempt_once() -> None:
+    """迟到计量必须同时匹配 usage 与已冻结的 Provider 请求身份。"""
+    session, lease = _run_session()
+    usage_service = ModelUsageService(session)
+    usage_id = usage_service.create_running(_context(session, lease), _route(), "permit-late")
+    assert usage_service.mark_started(usage_id)
+    assert usage_service.settle(
+        usage_id, "outcome_unknown", provider_request_id="provider-request-1",
+    ) == "settled"
+
+    assert usage_service.settle(
+        usage_id, "succeeded", input_tokens=3, output_tokens=2, route=_route(),
+        provider_request_id="wrong-provider-request",
+    ) == "identity_mismatch"
+    assert usage_service.settle(
+        usage_id, "succeeded", input_tokens=3, output_tokens=2, route=_route(),
+        provider_request_id="provider-request-1",
+    ) == "settled"
+    assert usage_service.settle(
+        usage_id, "failed", provider_request_id="provider-request-1",
+    ) == "already_settled"
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == usage_id))
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert usage is not None
+    assert (usage.status, usage.input_tokens, usage.output_tokens) == ("succeeded", 3, 2)
+    # 迟到 usage 仅更新无内容账本，绝不借旧 execution 结算推进工作流状态。
+    assert run is not None and (run.status, run.status_version) == ("pending", 1)
+
+
+def test_unknown_usage_without_provider_identity_rejects_late_usage_recovery() -> None:
+    """未记录 Provider 请求身份时，不能仅凭 usage_id 接受迟到计量。"""
+    session, lease = _run_session()
+    usage_service = ModelUsageService(session)
+    usage_id = usage_service.create_running(_context(session, lease), _route(), "permit-late")
+    assert usage_service.mark_started(usage_id)
+    assert usage_service.mark_expired_running_unknown(datetime.now(UTC) + timedelta(days=1)) == 1
+
+    assert usage_service.settle(
+        usage_id, "succeeded", input_tokens=3, output_tokens=2, route=_route(),
+        provider_request_id="provider-request-1",
+    ) == "identity_mismatch"
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == usage_id))
+    assert usage is not None
+    assert (usage.status, usage.input_tokens, usage.output_tokens, usage.estimated_cost) == (
+        "outcome_unknown", None, None, usage.reserved_estimated_cost,
+    )
+
+
+def test_gateway_marks_usage_started_before_provider_call() -> None:
+    """Provider 边界只接受已持久化 started usage，避免发送后无可对账账本。"""
+    session, lease = _run_session()
+
+    class InspectingProvider(RecordingProvider):
+        def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
+            usage = session.scalar(select(AgentModelUsage))
+            assert usage is not None and usage.status == "started"
+            return super().call(route, request, timeout_seconds=timeout_seconds)
+
+    provider = InspectingProvider(
+        {"ok": True, "usage": {"input_tokens": 1, "output_tokens": 1}}
+    )
+    result = _gateway(session, RevokingLease([True]), provider).call(
+        _context(session, lease), "summary", {"private": "must not persist"},
+    )
+
+    assert result.status == "succeeded"
+    assert provider.calls == 1
+
+
+def test_gateway_does_not_send_when_permit_mark_started_is_rejected() -> None:
+    """Redis permit 未进入 started 时，即使 usage 已存在也不得发送 Provider 请求。"""
+    session, lease = _run_session()
+
+    class RejectingTraffic(ProviderTrafficController):
+        def mark_started(self, route: ModelRoute, permit_id: str) -> PermitResult:
+            return PermitResult("expired")
+
+    provider = RecordingProvider()
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]), RejectingTraffic(FakeRedis()),
+        ModelUsageService(session), RevokingLease([True]), provider, PolicyEngine(session),
+    ).call(_context(session, lease), "summary", {"private": "must not persist"})
+
+    usage = session.scalar(select(AgentModelUsage))
+    assert result.status == "aborted_before_send"
+    assert provider.calls == 0
+    assert usage is not None and usage.status == "aborted_before_send"
+
+
+def test_usage_settle_failure_still_releases_permit_and_hides_success() -> None:
+    """usage 账本故障不能遗留 permit，也不能把 Provider 返回误报为成功。"""
+    session, lease = _run_session()
+    redis = FakeRedis()
+
+    class FailingUsage(ModelUsageService):
+        def settle(self, *args: object, **kwargs: object) -> str:
+            raise RuntimeError("storage unavailable")
+
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]), ProviderTrafficController(redis),
+        FailingUsage(session), RevokingLease([True]), RecordingProvider(), PolicyEngine(session),
+    ).call(_context(session, lease), "summary", {"private": "must not persist"})
+
+    assert result.status == "outcome_unknown"
+    assert "settle" in redis.operations
+
+
+def test_permit_settle_failure_still_settles_usage_and_hides_success() -> None:
+    """共享流控结算故障不能阻断 usage 账本，调用方只能得到未知结果。"""
+    session, lease = _run_session()
+
+    class FailingTraffic(ProviderTrafficController):
+        def settle(
+            self, route: ModelRoute, permit_id: str, *, retry_after_seconds: float = 0,
+        ) -> PermitResult:
+            raise RuntimeError("redis unavailable")
+
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]), FailingTraffic(FakeRedis()),
+        ModelUsageService(session), RevokingLease([True]), RecordingProvider(), PolicyEngine(session),
+    ).call(_context(session, lease), "summary", {"private": "must not persist"})
+
+    usage = session.scalar(select(AgentModelUsage))
+    assert result.status == "outcome_unknown"
+    assert usage is not None and usage.status == "succeeded"
+
+
 def test_revocation_between_mark_started_and_http_send_does_not_call_provider() -> None:
     session, lease = _run_session()
     provider = RecordingProvider()
@@ -562,6 +705,38 @@ def test_revocation_between_mark_started_and_http_send_does_not_call_provider() 
     result = _gateway(session, RevokingLease([True, True, False]), provider).call(
         _context(session, lease), "summary", {"message": "private"}
     )
+
+    usage = session.scalar(select(AgentModelUsage))
+    assert result.status == "aborted_before_send"
+    assert provider.calls == 0
+    assert usage is not None and usage.status == "aborted_before_send"
+
+
+@pytest.mark.parametrize("change", ["cancel", "lease_lost"])
+def test_change_after_permit_acquire_aborts_before_provider_send(change: str) -> None:
+    """permit 已获批后发生取消或失租时，仍不得把请求发送给 Provider。"""
+    session, lease = _run_session()
+    provider = RecordingProvider()
+
+    class ChangingTraffic(ProviderTrafficController):
+        def acquire(
+            self, route: ModelRoute, permit_id: str, *, estimated_tokens: int = 0,
+        ) -> object:
+            result = super().acquire(route, permit_id, estimated_tokens=estimated_tokens)
+            if result.granted:
+                run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+                assert run is not None
+                if change == "cancel":
+                    run.cancel_requested_at = datetime.now(UTC)
+                else:
+                    run.lease_owner = "replacement-worker"
+                session.commit()
+            return result
+
+    result = ModelGateway(
+        ModelRouteRegistry([_route()]), ChangingTraffic(FakeRedis()),
+        ModelUsageService(session), RevokingLease([True] * 4), provider, PolicyEngine(session),
+    ).call(_context(session, lease), "summary", {"request": "private"})
 
     usage = session.scalar(select(AgentModelUsage))
     assert result.status == "aborted_before_send"
@@ -637,7 +812,11 @@ def test_provider_timeout_is_clamped_to_trusted_deadline_and_lease_window() -> N
 
 def test_success_settles_provider_tokens_with_frozen_route_prices() -> None:
     session, lease = _run_session()
-    provider = RecordingProvider({"ok": True, "usage": {"input_tokens": 100, "output_tokens": 50}})
+    provider = RecordingProvider({
+        "ok": True,
+        "provider_request_id": "provider-request-success",
+        "usage": {"input_tokens": 100, "output_tokens": 50},
+    })
 
     result = _gateway(session, RevokingLease([True, True, True, True]), provider).call(
         _context(session, lease), "summary", {"message": "private"}
@@ -646,6 +825,7 @@ def test_success_settles_provider_tokens_with_frozen_route_prices() -> None:
     usage = session.scalar(select(AgentModelUsage))
     assert result.status == "succeeded"
     assert usage is not None
+    assert usage.provider_request_id == "provider-request-success"
     assert usage.input_tokens == 100
     assert usage.output_tokens == 50
     assert usage.estimated_cost == 0.2
@@ -1299,6 +1479,8 @@ def test_gateway_uses_allowed_fallback_route_with_a_separate_permit_after_429() 
     assert result.status == "succeeded"
     assert provider.route_ids == ["primary", "fallback"]
     assert len(redis.permits) == 2
+    usages = list(session.scalars(select(AgentModelUsage)))
+    assert sorted(usage.model_attempt for usage in usages) == [1, 2]
 
 
 def test_gateway_waits_once_within_deadline_then_reacquires_a_new_permit() -> None:
@@ -1319,6 +1501,7 @@ def test_gateway_waits_once_within_deadline_then_reacquires_a_new_permit() -> No
     slept: list[float] = []
     redis = FakeRedis()
     provider = RetryProvider()
+    ticks = iter((0.0, 0.1))
     def wait(seconds: float) -> None:
         slept.append(seconds)
         time.sleep(seconds)
@@ -1327,12 +1510,44 @@ def test_gateway_waits_once_within_deadline_then_reacquires_a_new_permit() -> No
         ModelRouteRegistry([_route()]), ProviderTrafficController(redis),
         ModelUsageService(session), RevokingLease([True] * 8), provider, PolicyEngine(session),
         sleep=wait,
+        monotonic=lambda: next(ticks),
     ).call(_context(session, lease), "summary", {"request": "private"})
 
     assert result.status == "succeeded"
     assert provider.calls == 2
     assert slept == [0.1]
     assert len(redis.permits) == 2
+    usages = list(session.scalars(select(AgentModelUsage)))
+    assert sorted(usage.model_attempt for usage in usages) == [1, 2]
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    session.refresh(run)
+    assert run.active_elapsed_ms == 100
+
+
+def test_gateway_freezes_max_tokens_and_rejects_next_attempt_after_observed_usage() -> None:
+    """实际 token 用量必须计入 Run 冻结上限，不能由请求参数扩大。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    run.capability_snapshot_json = {
+        "allowed_model_route_ids": ["summary"],
+        "model_policy": {"max_tokens": 25},
+    }
+    session.commit()
+    provider = RecordingProvider(
+        {"ok": True, "usage": {"input_tokens": 10, "output_tokens": 10}}
+    )
+    gateway = _gateway(session, RevokingLease([True] * 8), provider)
+
+    assert (
+        gateway.call(_context(session, lease), "summary", {"request": "private"}).status
+        == "succeeded"
+    )
+    rejected = gateway.call(_context(session, lease), "summary", {"request": "private"})
+
+    assert (rejected.status, rejected.error_code) == ("policy_denied", "MODEL_TOKEN_LIMIT_EXCEEDED")
+    assert provider.calls == 1
 
 
 def test_model_governance_denial_logs_exclude_request_body(caplog: pytest.LogCaptureFixture) -> None:

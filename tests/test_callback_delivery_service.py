@@ -24,7 +24,7 @@ def test_callback_delivery_service_sends_original_callback_event_payload() -> No
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     session.add(_run("run-1"))
-    payload = {"event": "run_cancelled", "event_id": "event-1", "event_seq": 1, "run_id": "run-1", "business_id": "archive-1"}
+    payload = {"event": "run_cancelled", "event_id": "event-1", "event_seq": 1, "status_version": 2, "run_id": "run-1", "business_id": "archive-1"}
     session.add(CallbackEvent(event_id="event-1", run_id="run-1", event_seq=1, status_version=2, event_type="run_cancelled", payload_json=payload, created_at=datetime.now(UTC)))
     outbox = RuntimeOutboxEvent(outbox_id="outbox-1", event_type="callback", aggregate_type="agent_run", aggregate_id="run-1", payload_json={"event_id": "event-1", "target_id": "memory"}, status="pending", retention_until=datetime.now(UTC) + timedelta(days=1))
     session.add(outbox)
@@ -50,7 +50,7 @@ def test_callback_delivery_service_rejects_purged_run_before_send() -> None:
     run.privacy_state = "purged"
     callback = CallbackEvent(
         event_id="purged-event", run_id=run.run_id, event_seq=1, status_version=2,
-        event_type="run_succeeded", payload_json={"event_id": "purged-event"},
+        event_type="run_succeeded", payload_json={"event": "run_succeeded", "event_id": "purged-event", "run_id": run.run_id, "event_seq": 1, "status_version": 2},
         created_at=datetime.now(UTC),
     )
     outbox = RuntimeOutboxEvent(

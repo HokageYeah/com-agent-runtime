@@ -54,8 +54,16 @@ def test_memory_callback_updates_run_ref_once_and_replays_same_event(client) -> 
 
     first = client.post(path, content=body, headers=_headers(path, body, event_id, archive.archive_id))
     second = client.post(path, content=body, headers=_headers(path, body, event_id, archive.archive_id))
+    altered = {**payload, "public_trace": [{"step": "safe", "status": "succeeded"}]}
+    altered_body = json.dumps(altered, separators=(",", ":")).encode()
+    conflict = client.post(path, content=altered_body, headers=_headers(path, altered_body, event_id, archive.archive_id))
+    mismatched_headers = _headers(path, body, event_id, archive.archive_id)
+    mismatched_headers["X-Agent-Event-Seq"] = "2"
+    mismatch = client.post(path, content=body, headers=mismatched_headers)
 
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json() == {"output": {"applied": True}, "schema_version": "1.0.0"}
+    assert conflict.status_code == 409
+    assert mismatch.status_code == 403
     ref = factory().query(MemoryAgentRunRef).filter_by(run_id="run-callback").one()
     assert (ref.status, ref.event_seq, ref.status_version) == ("cancelled", 1, 2)

@@ -120,6 +120,26 @@ def test_gateway_fails_closed_when_real_transport_has_no_peer_verifier() -> None
         gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
 
 
+def test_gateway_rechecks_authorization_before_each_physical_send() -> None:
+    """授权版本已撤销时不得向业务 connector 发送任何请求。"""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"output": {}})
+
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        authorization_permitted=lambda run_id: run_id != "run-1",
+    )
+
+    with pytest.raises(ValueError, match="TOOL_AUTHORIZATION_REVOKED"):
+        gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
+    assert calls == 0
+
+
 def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> None:
     captured: dict[str, object] = {}
 

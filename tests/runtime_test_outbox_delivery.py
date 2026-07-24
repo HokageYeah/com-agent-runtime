@@ -93,3 +93,40 @@ def test_callback_delivery_moves_to_dead_letter_after_five_failures() -> None:
     assert (callback_event.status, callback_event.attempt_count, callback_event.last_error_code) == (
         "dead_letter", 5, "CALLBACK_DELIVERY_FAILED"
     )
+
+
+def test_run_dispatch_moves_to_dead_letter_after_five_failures() -> None:
+    """dispatch 重试达到上限后交由对账器终结尚未 claimed 的 Run。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    event = RuntimeOutboxEvent(
+        outbox_id="dispatch-dead", event_type="run_dispatch", aggregate_type="agent_run",
+        aggregate_id="run-1", payload_json={"run_id": "run-1"}, status="pending",
+        attempt_count=4, retention_until=datetime.now(UTC) + timedelta(days=1),
+    )
+    session.add(event)
+    session.commit()
+
+    def fail(_: str) -> None:
+        raise RuntimeError("queue unavailable")
+
+    assert Dispatcher(session, notify_run=fail).dispatch_pending() == 0
+    session.refresh(event)
+    assert (event.status, event.attempt_count, event.last_error_code) == (
+        "dead_letter", 5, "DISPATCH_DELIVERY_FAILED"
+    )
+
+
+def test_dispatcher_respects_http_date_retry_after() -> None:
+    """Retry-After 的 HTTP-date 语法不能退化成默认指数退避。"""
+    retry_at = datetime.now(UTC) + timedelta(seconds=90)
+    exc = __import__("httpx").HTTPStatusError(
+        "limited",
+        request=__import__("httpx").Request("POST", "https://business.local/callback"),
+        response=__import__("httpx").Response(429, headers={"Retry-After": __import__("email.utils").utils.format_datetime(retry_at, usegmt=True)}),
+    )
+
+    delay = Dispatcher._retry_delay_seconds(exc, 1)
+
+    assert 80 <= delay <= 90

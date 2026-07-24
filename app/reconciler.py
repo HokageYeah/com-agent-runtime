@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import os
 import socket
@@ -13,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
@@ -41,6 +43,7 @@ class ReconcilerRunner:
         *,
         reconciler_factory: Callable[[Any], Any] = ReconciliationService,
         maintenance_runner: Callable[..., MemoryDeletionMaintenanceReport] | None = None,
+        authorization_version_resolver: Callable[[Any], int | None] | None = None,
         interval_seconds: int = 300,
         lease_ttl_seconds: int = 300,
         clock: Callable[[], Any] | None = None,
@@ -53,6 +56,7 @@ class ReconcilerRunner:
         self._reconciler_factory = reconciler_factory
         # 删除补偿使用同一 database lease，不能由无 fencing 的独立 cron 执行。
         self._maintenance_runner = maintenance_runner
+        self._authorization_version_resolver = authorization_version_resolver
         self._interval_seconds = interval_seconds
         self._lease_ttl_seconds = lease_ttl_seconds
         self._clock = clock
@@ -96,7 +100,11 @@ class ReconcilerRunner:
                 set_failure_streaks = getattr(reconciler, "set_failure_streaks", None)
                 if callable(set_failure_streaks):
                     set_failure_streaks(self._failure_streaks)
-                report = reconciler.run_once(lease_guard=lease_guard)
+                run_once_parameters = inspect.signature(reconciler.run_once).parameters
+                run_once_kwargs: dict[str, Any] = {"lease_guard": lease_guard}
+                if "authorization_version_resolver" in run_once_parameters:
+                    run_once_kwargs["authorization_version_resolver"] = self._authorization_version_resolver
+                report = reconciler.run_once(**run_once_kwargs)
                 if self._maintenance_runner is None or not isinstance(report, ReconciliationReport):
                     return report
                 if not lease_guard():
@@ -179,6 +187,17 @@ def _run_memory_deletion_maintenance(
         adapter.close()
 
 
+def _configured_authorization_version(run: Any) -> int | None:
+    """从当前部署可信 client 配置读取版本；未知/非法身份一律视为已撤销。"""
+    caller_id = getattr(run, "caller_id", None)
+    if not isinstance(caller_id, str):
+        return None
+    try:
+        return AuthorizationService(settings.trusted_clients).authorization_version(caller_id)
+    except AuthorizationError:
+        return None
+
+
 def main() -> None:
     """运行安全对账器：--once 单轮，默认每 300 秒一轮。"""
     parser = argparse.ArgumentParser(description="Run AgentRuntime reconciliation once")
@@ -189,12 +208,13 @@ def main() -> None:
     database.connect()
     try:
         owner_id = f"{socket.gethostname()}:{os.getpid()}"
-        runner = ReconcilerRunner(
-            database.get_session_factory(),
-            owner_id,
-            interval_seconds=args.interval_seconds,
-            maintenance_runner=_run_memory_deletion_maintenance,
-        )
+        runner_kwargs: dict[str, Any] = {
+            "interval_seconds": args.interval_seconds,
+            "maintenance_runner": _run_memory_deletion_maintenance,
+        }
+        if "authorization_version_resolver" in inspect.signature(ReconcilerRunner).parameters:
+            runner_kwargs["authorization_version_resolver"] = _configured_authorization_version
+        runner = ReconcilerRunner(database.get_session_factory(), owner_id, **runner_kwargs)
         if args.once:
             runner.run_once()
         else:

@@ -133,6 +133,12 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512}]')
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
+    monkeypatch.setattr(
+        worker.settings,
+        "RUNTIME_TRUSTED_CLIENTS_JSON",
+        '{"caller":{"authorization_version":1}}',
+        raising=False,
+    )
 
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -153,6 +159,16 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     assert active is not None
     active.bind_lease(lease)
     assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "succeeded"
+    assert RecordingProvider.calls == 1
+
+    # 同一 Run 冻结的版本与当前权威授权不一致时，模型边界必须在触网前拒绝。
+    monkeypatch.setattr(
+        worker.settings,
+        "RUNTIME_TRUSTED_CLIENTS_JSON",
+        '{"caller":{"authorization_version":2}}',
+        raising=False,
+    )
+    assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
     assert RecordingProvider.calls == 1
 
 

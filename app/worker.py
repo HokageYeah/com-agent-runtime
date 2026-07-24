@@ -7,6 +7,7 @@ import inspect
 import logging
 from collections.abc import Callable
 from time import sleep
+from typing import cast
 
 try:
     from redis import Redis
@@ -18,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.memoir_agent.runner import MemoirNodeRunner
+from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
@@ -75,7 +77,11 @@ class WorkerLoop:
         dispatcher_session = self._session_factory()
         try:
             callback_sender = (
-                CallbackDeliveryService(dispatcher_session, self._callback_gateway).send
+                CallbackDeliveryService(
+                    dispatcher_session,
+                    self._callback_gateway,
+                    authorize_target=self._callback_target_authorized,
+                ).send
                 if self._callback_gateway is not None
                 else None
             )
@@ -96,10 +102,11 @@ class WorkerLoop:
                 executor = self._executor
                 if callable(executor):
                     parameters = inspect.signature(executor).parameters
+                    executor_factory = cast(Callable[..., RunExecutor], executor)
                     executor = (
-                        executor(session, is_draining=self._is_draining)
+                        executor_factory(session, is_draining=self._is_draining)
                         if "is_draining" in parameters
-                        else executor(session)
+                        else executor_factory(session)
                     )
                 queue = RunQueueService(
                     session,
@@ -114,6 +121,23 @@ class WorkerLoop:
             "Worker 本轮完成 worker_id=%s claimed=%s", self._worker_id, consumed
         )
         return consumed
+
+    def _callback_target_authorized(self, run: AgentRun) -> bool:
+        """每次发送前以当前部署配置复核 target；不记录 callback body。"""
+        if not isinstance(self._callback_gateway, CallbackGateway):
+            return True
+        if not self._callback_gateway.has_target(run.callback_target_id):
+            return False
+        try:
+            authorization = AuthorizationService(settings.trusted_clients)
+            authorization.authorize_callback_target(
+                run.caller_id, run.callback_target_id
+            )
+            if authorization.authorization_version(run.caller_id) != run.authorization_version:
+                return False
+        except AuthorizationError:
+            return False
+        return True
 
 
 class BootstrapExecutor:
@@ -166,10 +190,10 @@ def configured_model_gateway(
         logging.exception("Memoir Worker Redis 初始化失败，使用模板 fallback")
         return None
     class _WorkerDrainingGuard(ModelCallGuard):
-        """每次检查实时读取 Worker 状态，不能把状态写入 Run。"""
+        """每次检查实时读取 Worker 和权威授权状态，不能把状态写入 Run。"""
 
         def permits_new_call(self, context: ModelCallContext) -> bool:
-            return not is_draining()
+            return not is_draining() and _authorization_is_current(session, context.run_id)
 
     # Provider 每次请求都使用无 keep-alive 的真实 socket 对端追踪，防止 DNS rebinding。
     provider_peer_transport = PeerTrackingHTTPTransport()
@@ -204,7 +228,12 @@ def configured_executor(
             if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
                 logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
                 return None
-            connector = BusinessConnector(**{key: config[key] for key in required})
+            connector = BusinessConnector(
+                base_url=cast(str, config["base_url"]),
+                runtime_id=cast(str, config["runtime_id"]),
+                key_id=cast(str, config["key_id"]),
+                secret=cast(str, config["secret"]),
+            )
             # ToolGateway 每次发送前读取同一实时 draining 回调，不能在装配时冻结状态。
             peer_transport = PeerTrackingHTTPTransport()
             tool_gateway = ToolGateway(
@@ -213,6 +242,9 @@ def configured_executor(
                 is_draining=is_draining,
                 deadline_at=lambda: agent_run.run_deadline_at,
                 lease_expires_at=lambda: lease_context.lease_expires_at,
+                authorization_permitted=lambda checked_run_id: _authorization_is_current(
+                    session, checked_run_id
+                ),
                 peer_ip_provider=peer_transport.peer_ip,
                 reset_peer_ip=peer_transport.reset_peer_ip,
             )
@@ -229,6 +261,9 @@ def configured_executor(
                 ),
                 CheckpointStore(session, FernetCheckpointCipher(settings.MEMORY_SNAPSHOT_FERNET_KEY.encode())),
                 ArtifactStore(session),
+                authorization_version_resolver=lambda run: AuthorizationService(
+                    settings.trusted_clients
+                ).authorization_version(run.caller_id),
                 is_draining=is_draining,
             )
 
@@ -242,13 +277,31 @@ def configured_executor(
     return _Executor()
 
 
+def _authorization_is_current(session: Session, run_id: str) -> bool:
+    """只按权威 Run 冻结版本与部署授权配置决定是否允许外部副作用。"""
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+    if run is None:
+        return False
+    try:
+        return AuthorizationService(settings.trusted_clients).authorization_version(
+            run.caller_id
+        ) == run.authorization_version
+    except AuthorizationError:
+        return False
+
+
 def configured_callback_gateway() -> CallbackGateway | None:
     """按部署白名单装配 callback 网关；非法或关闭配置不启用 callback 消费。"""
     targets: dict[str, CallbackTarget] = {}
     for target_id, config in settings.callback_targets.items():
         required = ("url", "runtime_id", "key_id", "secret")
         if bool(config.get("enabled")) and all(isinstance(config.get(key), str) for key in required):
-            targets[target_id] = CallbackTarget(**{key: config[key] for key in required})
+            targets[target_id] = CallbackTarget(
+                url=cast(str, config["url"]),
+                runtime_id=cast(str, config["runtime_id"]),
+                key_id=cast(str, config["key_id"]),
+                secret=cast(str, config["secret"]),
+            )
         else:
             logging.warning("callback target 未启用或配置不完整 target_id=%s", target_id)
     return CallbackGateway(targets, httpx.Client()) if targets else None

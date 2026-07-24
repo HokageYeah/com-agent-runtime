@@ -64,6 +64,7 @@ class ToolGateway:
         is_draining: Callable[[], bool] = lambda: False,
         deadline_at: Callable[[], datetime | None] = lambda: None,
         lease_expires_at: Callable[[], datetime | None] = lambda: None,
+        authorization_permitted: Callable[[str], bool] = lambda run_id: True,
         peer_ip_provider: Callable[[], str | None] | None = None,
         reset_peer_ip: Callable[[], None] | None = None,
     ) -> None:
@@ -78,6 +79,8 @@ class ToolGateway:
         # 仅由 Worker 装配可信 Run/lease 窗口；Package 和工具输入不能影响 timeout。
         self._deadline_at = deadline_at
         self._lease_expires_at = lease_expires_at
+        # 由 Worker 注入的权威 Run 版本复核；工具输入不能影响该决策。
+        self._authorization_permitted = authorization_permitted
         # 生产 Worker 必须注入真实 socket 对端读取器；MockTransport 测试没有 TCP 连接，
         # 因而不强制该字段，避免测试伪造一套网络栈。
         self._peer_ip_provider = peer_ip_provider
@@ -228,6 +231,14 @@ class ToolGateway:
             headers["Idempotency-Key"] = idempotency_key
         attempts = 2 if retry_transport else 1
         for attempt in range(attempts):
+            run_id = input_data.get("run_id")
+            if not isinstance(run_id, str) or not self._authorization_permitted(run_id):
+                logging.info(
+                    "工具调用在发送前中止 tool=%s code=%s",
+                    tool_name,
+                    "TOOL_AUTHORIZATION_REVOKED",
+                )
+                raise ValueError("TOOL_AUTHORIZATION_REVOKED")
             if self._is_draining() and not allow_during_draining:
                 # 每次物理发送前实时复核，读取重试也不能穿透 draining。
                 logging.info(

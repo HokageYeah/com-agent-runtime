@@ -17,6 +17,7 @@ from app.models import AgentRun
 from app.runtime.context_manager import ContextManager
 from app.runtime.evaluator import MemoirPlaybackEvaluator
 from app.runtime.guardrails import MemoirGuardrails
+from app.runtime.interfaces import LeaseContext
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
@@ -124,6 +125,11 @@ class MemoirNodeRunner:
         self._prompts = PromptRegistry(Path(__file__).parents[1])
         self._contexts = ContextManager()
         self._structured_output = StructuredOutputParser()
+        self._lease_context: LeaseContext | None = None
+
+    def bind_lease_context(self, lease_context: LeaseContext) -> None:
+        """Executor 每个节点前绑定有效写上下文，拒绝迟到工具结果落库。"""
+        self._lease_context = lease_context
 
     def run_node(self, node: dict[str, object], run: AgentRun, state: AgentState) -> dict[str, object]:
         if node.get("node_id") == "safety_review":
@@ -268,7 +274,11 @@ class MemoirNodeRunner:
                 reconciled = self._gateway.get_publish_result(run.business_connector_id, archive_id, run.run_id, committed.idempotency_key)
                 if reconciled is not None:
                     state.publish_result = reconciled
-                    self._audit.succeed(committed, int(reconciled["revision"]), str(reconciled["content_digest"]))
+                    if not self._audit.succeed(
+                        committed, int(reconciled["revision"]), str(reconciled["content_digest"]),
+                        lease_context=self._lease_context,
+                    ):
+                        raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN")
                     logging.info("MemoirAgent 对账恢复发布结果 run_id=%s", run.run_id)
                     return {"node_id": "publish_document", "published": True}
                 logging.warning("MemoirAgent 发布未知结果尚未可对账 run_id=%s", run.run_id)
@@ -278,17 +288,17 @@ class MemoirNodeRunner:
                 state.publish_result = self._gateway.publish_playback_document(run.business_connector_id, archive_id, run.run_id, snapshot_id, epoch, state.playback_document, logical_key)
             except httpx.TimeoutException:
                 if audit is not None:
-                    self._audit.unknown(audit, "HTTP_TIMEOUT")
+                    self._audit.unknown(audit, "HTTP_TIMEOUT", lease_context=self._lease_context)
                 logging.warning("MemoirAgent 发布结果未知 run_id=%s", run.run_id)
                 raise
             except httpx.HTTPStatusError as exc:
                 if audit is not None:
-                    self._audit.fail(audit, f"HTTP_{exc.response.status_code}", retryable=exc.response.status_code >= 500)
+                    self._audit.fail(audit, f"HTTP_{exc.response.status_code}", retryable=exc.response.status_code >= 500, lease_context=self._lease_context)
                 logging.warning("MemoirAgent 发布被业务端拒绝 run_id=%s status=%s", run.run_id, exc.response.status_code)
                 raise
             except Exception:
                 if audit is not None:
-                    self._audit.fail(audit, "TOOL_CALL_FAILED", retryable=True)
+                    self._audit.fail(audit, "TOOL_CALL_FAILED", retryable=True, lease_context=self._lease_context)
                 # 异常消息可能携带 HTTP 请求体；只记录受控码，不记录异常正文。
                 logging.warning(
                     "MemoirAgent 发布调用异常 run_id=%s code=%s",
@@ -297,7 +307,12 @@ class MemoirNodeRunner:
                 )
                 raise
             if audit is not None:
-                self._audit.succeed(audit, int(state.publish_result["revision"]), str(state.publish_result["content_digest"]))
+                if not self._audit.succeed(
+                    audit, int(state.publish_result["revision"]), str(state.publish_result["content_digest"]),
+                    lease_context=self._lease_context,
+                ):
+                    state.publish_result = None
+                    raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN")
             logging.info("MemoirAgent 已发布作品 run_id=%s archive_id=%s", run.run_id, archive_id)
             return {"node_id": "publish_document", "published": True}
         if node.get("node_id") != "load_snapshot":

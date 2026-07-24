@@ -35,6 +35,19 @@ class MemoryRuntimeClientConfig:
     capability_ttl_seconds: int = 60
 
 
+@dataclass(frozen=True)
+class RuntimeRunState:
+    """业务补偿可读取的按 Run ID 状态，不承载 Runtime 输入或执行数据。"""
+
+    run_id: str
+    status: str
+    dispatch_state: str
+    privacy_state: str
+    privacy_version: int
+    last_event_seq: int
+    status_version: int
+
+
 class MemoryAgentAdapter:
     """先验证 Runtime 能力，再以 held/create/start 两阶段启动回忆录 Run。"""
 
@@ -68,6 +81,8 @@ class MemoryAgentAdapter:
             "data_domain": "couple_memory",
         }
         data = self._request("POST", "/api/v1/runtime/agent-runs", payload, idempotency_key)
+        if data is None:
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_CREATE_RESPONSE_INVALID")
         required = ("run_id", "contract_version", "package_digest", "authorization_version")
         if not all(isinstance(data.get(key), (str, int)) for key in required):
             raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_CREATE_RESPONSE_INVALID")
@@ -122,6 +137,8 @@ class MemoryAgentAdapter:
         data = self._request(
             "POST", f"/api/v1/runtime/agent-runs/{run_id}/retry", {}, idempotency_key,
         )
+        if data is None:
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_RETRY_RESPONSE_INVALID")
         if data.get("run_id") != run_id:
             raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_RETRY_RESPONSE_INVALID")
 
@@ -133,6 +150,8 @@ class MemoryAgentAdapter:
             {},
             idempotency_key,
         )
+        if data is None:
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_PURGE_RESPONSE_INVALID")
         if (
             data.get("run_id") != run_id
             or data.get("privacy_state") not in {"purge_requested", "purged"}
@@ -153,6 +172,50 @@ class MemoryAgentAdapter:
             raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_PRIVACY_QUERY_INVALID")
         return privacy_state
 
+    def get_run_state(self, run_id: str) -> RuntimeRunState | None:
+        """为业务状态与 purge 补偿提供单次受限的 Run ID 兜底查询。"""
+        data = self._request(
+            "GET", f"/api/v1/runtime/agent-runs/{run_id}", allow_not_found=True,
+        )
+        if data is None:
+            return None
+        status = data.get("status")
+        dispatch_state = data.get("dispatch_state")
+        privacy_state = data.get("privacy_state")
+        privacy_version = data.get("privacy_version")
+        last_event_seq = data.get("last_event_seq")
+        status_version = data.get("status_version")
+        allowed_statuses = {
+            "pending", "running", "waiting_human", "succeeded", "failed", "cancelled",
+        }
+        allowed_dispatch_states = {"held", "queued", "claimed", "finished"}
+        allowed_privacy_states = {"active", "purge_requested", "purged"}
+        if (
+            data.get("run_id") != run_id
+            or status not in allowed_statuses
+            or dispatch_state not in allowed_dispatch_states
+            or privacy_state not in allowed_privacy_states
+            or isinstance(privacy_version, bool)
+            or not isinstance(privacy_version, int)
+            or privacy_version < 1
+            or isinstance(last_event_seq, bool)
+            or not isinstance(last_event_seq, int)
+            or last_event_seq < 0
+            or isinstance(status_version, bool)
+            or not isinstance(status_version, int)
+            or status_version < 1
+        ):
+            raise MemoryRuntimeAdapterError("MEMORY_RUNTIME_STATE_QUERY_INVALID")
+        return RuntimeRunState(
+            run_id=run_id,
+            status=status,
+            dispatch_state=dispatch_state,
+            privacy_state=privacy_state,
+            privacy_version=privacy_version,
+            last_event_seq=last_event_seq,
+            status_version=status_version,
+        )
+
     def close(self) -> None:
         """释放注入的 HTTP 连接，供单次 launcher 结束时调用。"""
         self._client.close()
@@ -160,16 +223,21 @@ class MemoryAgentAdapter:
     def _fetch_capabilities(self) -> RuntimeCapabilitySnapshot:
         """readiness 与 capability 必须同时满足，draining 或协议漂移均 fail closed。"""
         ready = self._request("GET", "/api/v1/runtime/health/ready")
+        if ready is None:
+            raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")
         if ready.get("status") != "ready":
             raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")
         data = self._request("GET", "/api/v1/runtime/capabilities")
+        if data is None:
+            raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")
         return self._capability_snapshot(data)
 
     def _fetch_capability_summary(self) -> RuntimeCapabilitySnapshot:
         """在 TTL 内探测无敏感版本摘要，变化时由缓存触发完整握手。"""
-        return self._capability_snapshot(
-            self._request("GET", "/api/v1/runtime/capabilities"),
-        )
+        data = self._request("GET", "/api/v1/runtime/capabilities")
+        if data is None:
+            raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")
+        return self._capability_snapshot(data)
 
     def _capability_snapshot(self, data: dict[str, Any]) -> RuntimeCapabilitySnapshot:
         """把 Runtime 安全能力响应规整为可比较的内存摘要。"""
@@ -178,10 +246,14 @@ class MemoryAgentAdapter:
         capabilities = data.get("capabilities")
         if not isinstance(agents, list) or not isinstance(policies, list) or not isinstance(capabilities, dict):
             raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")
-        agent_versions = frozenset(
-            (item.get("agent_id"), item.get("version")) for item in agents
-            if isinstance(item, dict) and isinstance(item.get("agent_id"), str) and isinstance(item.get("version"), str)
-        )
+        parsed_agent_versions: set[tuple[str, str]] = set()
+        for item in agents:
+            if not isinstance(item, dict):
+                continue
+            agent_id, version = item.get("agent_id"), item.get("version")
+            if isinstance(agent_id, str) and isinstance(version, str):
+                parsed_agent_versions.add((agent_id, version))
+        agent_versions = frozenset(parsed_agent_versions)
         digest = data.get("package_digest")
         if not isinstance(digest, str):
             raise RuntimeCapabilityError("MEMORY_RUNTIME_CAPABILITY_INCOMPATIBLE")

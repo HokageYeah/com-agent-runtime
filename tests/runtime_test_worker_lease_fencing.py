@@ -147,6 +147,33 @@ def test_heartbeat_refreshes_the_same_mutable_lease_context() -> None:
     assert run.lease_expires_at.replace(tzinfo=UTC) == context.lease_expires_at
 
 
+def test_heartbeat_cannot_revive_an_expired_lease() -> None:
+    """失效 lease 只能由 reaper 接管，原 owner 不能靠 heartbeat 恢复写权。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="expired-heartbeat-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="running", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now - timedelta(seconds=1), run_deadline_at=now + timedelta(days=1),
+    )
+    session.add(run)
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now - timedelta(seconds=1), privacy_version=1, authorization_version=1,
+    )
+
+    assert LeaseService(session).heartbeat(run.run_id, context) is False
+    session.refresh(run)
+    assert run.lease_expires_at is not None and run.lease_expires_at.replace(tzinfo=UTC) <= now
+
+
 def test_draining_release_expires_current_lease_without_releasing_admission_early() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

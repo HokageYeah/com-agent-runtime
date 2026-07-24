@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -40,6 +40,7 @@ class AgentRunService:
         admission_limits: AdmissionLimits | None = None,
         *,
         trusted_model_route_ids: Iterable[str] = (),
+        authorization_version_resolver: Callable[[AgentRun], int | None] | None = None,
     ) -> None:
         self._session = session
         self._outbox = OutboxService(session)
@@ -50,6 +51,7 @@ class AgentRunService:
         self._trusted_model_route_ids = tuple(
             sorted({route_id for route_id in trusted_model_route_ids if isinstance(route_id, str) and route_id})
         )
+        self._authorization_version_resolver = authorization_version_resolver
 
     def create(
         self,
@@ -57,6 +59,8 @@ class AgentRunService:
         caller_id: str,
         tenant_id: str,
         idempotency_key: str,
+        *,
+        authorization_version: int = 1,
     ) -> RunSummary:
         definition = self._session.scalar(
             select(AgentDefinition).where(
@@ -85,6 +89,7 @@ class AgentRunService:
             for key, value in {
                 "max_model_calls": policy.max_model_calls,
                 "max_model_cost": policy.max_model_cost,
+                "max_tokens": policy.max_tokens,
             }.items()
             if value is not None
         }
@@ -98,6 +103,8 @@ class AgentRunService:
             }.items()
             if value is not None
         }
+        if isinstance(authorization_version, bool) or authorization_version < 1:
+            raise AgentRunServiceError("authorization_version 非法")
         run = AgentRun(
             run_id=run_id,
             agent_id=command.agent_id,
@@ -119,8 +126,10 @@ class AgentRunService:
                 "allowed_model_route_ids": list(self._trusted_model_route_ids),
                 "model_policy": model_policy,
                 "execution_policy": execution_policy,
+                # 注册 Package 时持久化的 ui-trace 是唯一可信公开投影策略，Run 创建后冻结。
+                "ui_trace": definition.definition_json.get("ui_trace", {"mode": "status_only"}),
             },
-            authorization_version=1,
+            authorization_version=authorization_version,
             caller_id=caller_id,
             tenant_id=tenant_id,
             create_idempotency_key=idempotency_key,
@@ -150,6 +159,7 @@ class AgentRunService:
 
     def start(self, run_id: str, caller_id: str, idempotency_key: str) -> RunSummary:
         run = self._owned_run(run_id, caller_id)
+        self._assert_authorization_current(run)
         definition = self._session.scalar(
             select(AgentDefinition).where(
                 AgentDefinition.agent_id == run.agent_id,
@@ -181,6 +191,15 @@ class AgentRunService:
         self, run_id: str, caller_id: str, allow_auditor: bool = False
     ) -> RunDetail:
         run = self._owned_run(run_id, caller_id, allow_auditor)
+        if allow_auditor and run.caller_id != caller_id:
+            # 内部审计身份跨调用方读取仅有脱敏摘要时，也需留下可追溯的访问事实。
+            self._append_audit(
+                run,
+                caller_id,
+                "agent_run_audit_read",
+                {"status": run.status},
+                actor_type="auditor",
+            )
         step_records = self._step_records(run_id)
         current = next(
             (record for record in reversed(step_records) if record.status == "running"),
@@ -267,9 +286,10 @@ class AgentRunService:
             return False
         if run.privacy_state != "purge_requested":
             raise AgentRunServiceError("Run 未请求私密数据清理")
-        deleted_checkpoints = self._session.execute(
+        checkpoint_result = self._session.execute(
             delete(AgentCheckpoint).where(AgentCheckpoint.run_id == run_id)
-        ).rowcount
+        )
+        deleted_checkpoints = int(getattr(checkpoint_result, "rowcount", 0) or 0)
         self._session.execute(
             update(AgentArtifact)
             .where(AgentArtifact.run_id == run_id)
@@ -308,6 +328,7 @@ class AgentRunService:
     ) -> RunSummary:
         """仅原创建者或经 API 验证的内部审计身份可执行人工重试。"""
         run = self._owned_run(run_id, caller_id, allow_auditor)
+        self._assert_authorization_current(run)
         if run.status not in {"failed", "partial"} or run.manual_retry_count >= 3:
             raise AgentRunServiceError("Run 当前状态不允许 retry")
         if run.privacy_state != "active":
@@ -326,6 +347,7 @@ class AgentRunService:
             raise AgentRunServiceError("AgentPackage 已撤销，禁止 retry")
         run.manual_retry_count += 1
         run.status, run.dispatch_state = "pending", "queued"
+        run.queued_at = datetime.now(UTC)
         run.status_version += 1
         self._admission.transition_run(run, "finished", "queued")
         self._outbox.append_run_dispatch(run_id, "manual_retry")
@@ -384,7 +406,11 @@ class AgentRunService:
         if decision == "approve":
             # 正常 approve 只能按 checkpoint 已完成节点继续；不能把等待时预置的
             # fallback 目标当作恢复入口。
-            values = {"error_code": None, "dispatch_state": "queued"}
+            values = {
+                "error_code": None,
+                "dispatch_state": "queued",
+                "queued_at": datetime.now(UTC),
+            }
             dispatch_reason = "human_approve"
         else:
             plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run_id))
@@ -393,6 +419,7 @@ class AgentRunService:
                 values = {
                     "error_code": "WAITING_HUMAN_FALLBACK",
                     "dispatch_state": "queued",
+                    "queued_at": datetime.now(UTC),
                 }
                 dispatch_reason = "human_reject_fallback"
             else:
@@ -443,6 +470,14 @@ class AgentRunService:
         if run is None or (run.caller_id != caller_id and not allow_auditor):
             raise AgentRunServiceError("Run 不存在或无访问权限")
         return run
+
+    def _assert_authorization_current(self, run: AgentRun) -> None:
+        """控制面动作也必须以当前权威版本为准，避免撤权后的 start/retry。"""
+        if self._authorization_version_resolver is None:
+            return
+        current = self._authorization_version_resolver(run)
+        if current is None or current != run.authorization_version:
+            raise AgentRunServiceError("授权版本已变化")
 
     def _append_audit(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 import httpx
 from sqlalchemy import select, update
@@ -66,8 +67,9 @@ class Dispatcher:
                 event.lease_expires_at = None
                 event.attempt_count += 1
                 event.last_error_code = "CALLBACK_DELIVERY_FAILED" if event.event_type == "callback" else "DISPATCH_DELIVERY_FAILED"
-                if event.event_type == "callback" and event.attempt_count >= 5:
-                    # callback 死信不回写 Run；业务侧可由原 event_id 重放或主动查询恢复。
+                if event.attempt_count >= 5:
+                    # callback 死信不回写 Run；run_dispatch 死信则由对账器以 Run
+                    # 条件状态安全终结。两者都保留原 outbox 身份，禁止改造新事件。
                     event.status, event.next_attempt_at = "dead_letter", None
                 else:
                     event.status = "pending"
@@ -121,8 +123,18 @@ class Dispatcher:
         """优先尊重上游 Retry-After，其他错误采用有上限的指数退避。"""
         if isinstance(exc, httpx.HTTPStatusError):
             retry_after = exc.response.headers.get("Retry-After")
-            if retry_after is not None and retry_after.isdigit():
-                return min(300, max(1, int(retry_after)))
+            if retry_after is not None:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    try:
+                        retry_at = parsedate_to_datetime(retry_after)
+                        if retry_at.tzinfo is None:
+                            return min(60, 2**attempt_count)
+                        delay = (retry_at - datetime.now(UTC)).total_seconds()
+                    except (TypeError, ValueError, IndexError):
+                        return min(60, 2**attempt_count)
+                return min(300, max(1, int(delay)))
         return min(60, 2**attempt_count)
 
     @staticmethod

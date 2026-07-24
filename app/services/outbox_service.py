@@ -7,6 +7,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models import AgentRun, CallbackEvent, RuntimeOutboxEvent
+from app.services.public_trace_service import PublicTraceService
 
 
 class OutboxService:
@@ -45,24 +46,29 @@ class OutboxService:
             "run_succeeded", "run_failed", "run_cancelled",
         }:
             raise ValueError("CALLBACK_EVENT_TYPE_INVALID")
-        run.last_event_seq += 1
+        # public trace 是跨业务边界的最终投影，只保留固定状态字段。
+        # 即使内部调用方误传模型/工具数据，也不能进入 callback 或日志。
+        trace_config = (run.capability_snapshot_json or {}).get("ui_trace")
+        safe_trace = PublicTraceService.from_snapshot(trace_config).render(public_trace)
+        # SQLAlchemy 的 server/default 在 flush 前可能仍为 None；分配仍以当前 Run 行为权威。
+        run.last_event_seq = (run.last_event_seq or 0) + 1
         callback = CallbackEvent(
             event_id=str(uuid4()),
             run_id=run.run_id,
             event_seq=run.last_event_seq,
-            status_version=run.status_version,
+            status_version=run.status_version or 1,
             event_type=callback_event,
             payload_json={
                 "event": callback_event,
                 "event_id": None,  # 创建后立即回填，保证 body 与 event 主键一致。
                 "run_id": run.run_id,
                 "event_seq": run.last_event_seq,
-                "status_version": run.status_version,
+                "status_version": run.status_version or 1,
                 "agent_id": run.agent_id,
                 "business_id": run.business_id,
                 "status": run.status,
                 "error": {"code": run.error_code} if run.error_code else None,
-                "public_trace": public_trace or [],
+                "public_trace": safe_trace,
             },
             created_at=datetime.now(UTC),
         )

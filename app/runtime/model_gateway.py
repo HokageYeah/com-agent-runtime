@@ -475,6 +475,7 @@ class ModelGateway:
         call_guard: ModelCallGuard | None = None,
         model_policies: ModelPolicyRegistry | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._routes = routes
         self._traffic = traffic
@@ -485,6 +486,7 @@ class ModelGateway:
         self._call_guard = call_guard or _AllowModelCalls()
         self._model_policies = model_policies or ModelPolicyRegistry.default()
         self._sleep = sleep
+        self._monotonic = monotonic
 
     def call(
         self,
@@ -503,7 +505,11 @@ class ModelGateway:
                 route, context, result.retry_after_seconds
             ):
                 # 等待期间不持有 permit；重新执行会创建新的 usage/permit 并重新校验 lease。
+                wait_started_at = self._monotonic()
                 self._sleep(result.retry_after_seconds)
+                waited_ms = max(0, int((self._monotonic() - wait_started_at) * 1000))
+                if waited_ms:
+                    self._policy.record_active_elapsed(context, waited_ms)
                 result = self._call_route(context, route, request, prompt=prompt)
                 if result.status != "rate_limited":
                     return result
@@ -626,79 +632,118 @@ class ModelGateway:
         if usage_id is None or not self._usage.activate_reservation(usage_id, permit_id):
             self._traffic.settle(route, permit_id)
             return ModelGatewayResult("aborted_before_send")
-        # Acquire 后立即复核撤权、取消、draining 与 fencing；此处失败绝不能触网。
-        if not self._can_send(context):
-            self._usage.settle(usage_id, "aborted_before_send")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("aborted_before_send")
-        # 进入 started 前再次复核，避免状态变化跨越 permit 的发送权转换。
-        if not self._can_send(context):
-            self._usage.settle(usage_id, "aborted_before_send")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("aborted_before_send")
-        started = self._traffic.mark_started(route, permit_id)
-        if started.status != "started" or not self._usage.mark_started(usage_id):
-            self._usage.settle(usage_id, "aborted_before_send")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("aborted_before_send")
-
-        # 此检查必须紧贴实际 HTTP 调用；mark_started 与 Provider 之间不能有
-        # 可被撤权/取消/失租穿透的窗口。
-        if not self._can_send(context):
-            self._usage.settle(usage_id, "aborted_before_send")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("aborted_before_send")
-
-        # 同步调用不得跨越可信 Run deadline 或当前 Worker lease；只把最短窗口交给 Provider。
-        effective_timeout = self._effective_timeout(route, context)
-        if effective_timeout is None:
-            logging.info(
-                "模型调用在发送前中止 run_id=%s step_id=%s route_id=%s reason=execution_window_expired",
-                context.run_id,
-                context.step_id,
-                route_id,
-            )
-            self._usage.settle(usage_id, "aborted_before_send")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("aborted_before_send")
-
-        try:
-            payload = self._provider.call(route, request, timeout_seconds=effective_timeout)
-        except httpx.HTTPStatusError as exc:
-            retry_after = self._retry_after(exc.response)
-            self._usage.settle(usage_id, "rate_limited" if exc.response.status_code == 429 else "outcome_unknown")
-            self._traffic.settle(route, permit_id, retry_after_seconds=retry_after if exc.response.status_code == 429 else 0)
-            # 仅 5xx 是可确认的 Provider 故障；429 仍只使用原有共享冷却。
-            if exc.response.status_code >= 500:
-                self._traffic.record_circuit_failure(route)
-            return ModelGatewayResult(
-                "rate_limited" if exc.response.status_code == 429 else "outcome_unknown",
-                retry_after_seconds=retry_after,
-            )
-        except (httpx.TimeoutException, httpx.NetworkError):
-            self._usage.settle(usage_id, "outcome_unknown")
-            self._traffic.settle(route, permit_id)
-            self._traffic.record_circuit_failure(route)
-            return ModelGatewayResult("outcome_unknown")
-        except Exception:
-            self._usage.settle(usage_id, "outcome_unknown")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("outcome_unknown")
-
-        # 响应到达也不可绕过状态边界；撤权时丢弃 Provider 正文。
-        if not self._can_send(context):
-            self._usage.settle(usage_id, "outcome_unknown")
-            self._traffic.settle(route, permit_id)
-            return ModelGatewayResult("response_discarded")
-        input_tokens, output_tokens = self._provider_usage(payload)
-        self._usage.settle(
-            usage_id, "succeeded", input_tokens=input_tokens,
-            output_tokens=output_tokens, route=route,
+        return self._send_activated_attempt(
+            context, route, request, usage_id, permit_id,
         )
-        self._traffic.settle(route, permit_id)
-        # 仅可交付给调用方的成功响应才清除连续失败状态。
-        self._traffic.record_circuit_success(route)
-        return ModelGatewayResult("succeeded", data=payload)
+
+    def _send_activated_attempt(
+        self,
+        context: ModelCallContext,
+        route: ModelRoute,
+        request: object,
+        usage_id: str,
+        permit_id: str,
+    ) -> ModelGatewayResult:
+        """在单一 finally 中收敛已激活 usage 与 permit，禁止留下发送中孤儿记录。"""
+        outcome = "aborted_before_send"
+        retry_after = 0.0
+        tokens: tuple[int | None, int | None] = (None, None)
+        provider_request_id: str | None = None
+        result = ModelGatewayResult("aborted_before_send")
+        try:
+            # acquire 后、started 前和 HTTP 紧邻处都回读权威状态，任一失败不触网。
+            if not self._can_send(context) or not self._can_send(context):
+                return result
+            if self._traffic.mark_started(route, permit_id).status != "started":
+                return result
+            if not self._usage.mark_started(usage_id) or not self._can_send(context):
+                return result
+            effective_timeout = self._effective_timeout(route, context)
+            if effective_timeout is None:
+                logging.info(
+                    "模型调用在发送前中止 run_id=%s step_id=%s route_id=%s reason=execution_window_expired",
+                    context.run_id, context.step_id, route.route_id,
+                )
+                return result
+            try:
+                payload = self._provider.call(route, request, timeout_seconds=effective_timeout)
+            except httpx.HTTPStatusError as exc:
+                retry_after = self._retry_after(exc.response)
+                outcome = "rate_limited" if exc.response.status_code == 429 else "outcome_unknown"
+                if exc.response.status_code >= 500:
+                    self._traffic.record_circuit_failure(route)
+                result = ModelGatewayResult(outcome, retry_after_seconds=retry_after)
+            except (httpx.TimeoutException, httpx.NetworkError):
+                outcome = "outcome_unknown"
+                self._traffic.record_circuit_failure(route)
+                result = ModelGatewayResult(outcome)
+            except Exception:
+                outcome = "outcome_unknown"
+                result = ModelGatewayResult(outcome)
+            else:
+                # 仅提取 Provider 的无内容请求身份；正文仍只在当前调用栈可见。
+                provider_request_id = self._provider_request_id(payload)
+                # 响应到达后再撤权时只结算无内容计量，绝不返回 Provider 正文。
+                if not self._can_send(context):
+                    outcome = "outcome_unknown"
+                    result = ModelGatewayResult("response_discarded")
+                else:
+                    outcome = "succeeded"
+                    tokens = self._provider_usage(payload)
+                    result = ModelGatewayResult("succeeded", data=payload)
+        finally:
+            settled = self._settle_activated_attempt(
+                route, usage_id, permit_id, outcome, tokens, retry_after, provider_request_id,
+            )
+        if not settled and result.status == "succeeded":
+            # 已调用 Provider 但账本无法确认，不能把不可对账结果当作成功交付。
+            return ModelGatewayResult("outcome_unknown")
+        if result.status == "succeeded":
+            self._traffic.record_circuit_success(route)
+        return result
+
+    def _settle_activated_attempt(
+        self,
+        route: ModelRoute,
+        usage_id: str,
+        permit_id: str,
+        outcome: str,
+        tokens: tuple[int | None, int | None],
+        retry_after: float,
+        provider_request_id: str | None,
+    ) -> bool:
+        """两个账本分别尽力收敛；一侧故障不能阻断另一侧释放共享资源。"""
+        usage_settled = permit_settled = True
+        try:
+            usage_result = self._usage.settle(
+                usage_id, outcome, input_tokens=tokens[0], output_tokens=tokens[1],
+                route=route if outcome == "succeeded" else None,
+                provider_request_id=provider_request_id,
+            )
+            usage_settled = usage_result in {"settled", "already_settled"}
+            if not usage_settled:
+                logging.warning(
+                    "模型 usage 结算未确认 usage_id=%s code=MODEL_USAGE_SETTLE_UNCONFIRMED",
+                    usage_id,
+                )
+        except Exception:
+            usage_settled = False
+            logging.warning("模型 usage 结算失败 usage_id=%s code=MODEL_USAGE_SETTLE_FAILED", usage_id)
+        try:
+            permit_result = self._traffic.settle(
+                route, permit_id,
+                retry_after_seconds=retry_after if outcome == "rate_limited" else 0,
+            )
+            permit_settled = permit_result.status in {"settled", "already_settled"}
+            if not permit_settled:
+                logging.warning(
+                    "模型 permit 结算未确认 route_id=%s code=MODEL_PERMIT_SETTLE_UNCONFIRMED",
+                    route.route_id,
+                )
+        except Exception:
+            permit_settled = False
+            logging.warning("模型 permit 结算失败 route_id=%s code=MODEL_PERMIT_SETTLE_FAILED", route.route_id)
+        return usage_settled and permit_settled
 
     def _route_supports_prompt(
         self,
@@ -798,6 +843,16 @@ class ModelGateway:
         ):
             return None, None
         return input_tokens, output_tokens
+
+    @staticmethod
+    def _provider_request_id(payload: object) -> str | None:
+        """只接受 Provider 约定的请求身份，供未知结果的迟到计量核验。"""
+        if not isinstance(payload, Mapping):
+            return None
+        value = payload.get("provider_request_id", payload.get("request_id"))
+        if not isinstance(value, str) or not value or len(value) > 120:
+            return None
+        return value
 
     @staticmethod
     def _retry_after(response: httpx.Response) -> float:

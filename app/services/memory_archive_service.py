@@ -255,22 +255,31 @@ class MemoryArchiveService:
             published_at=datetime.now(UTC),
         )
         self._session.add(published)
-        for scene in document["scenes"]:
+        for scene_index, scene in enumerate(document["scenes"], start=1):
+            # Runtime 的播放契约允许省略展示排序；持久化层以完整文档中的
+            # 列表位置冻结排序，不能从来源引用数量推导（空素材时会全部冲突）。
             self._session.add(MemoryScene(
                 scene_id=scene["scene_id"],
                 document_id=published.document_id,
-                scene_order=scene.get("order", len(scene.get("source_refs", [])) + 1),
+                scene_order=scene.get("order", scene_index),
                 schema_major=_MEMORY_SCHEMA_MAJOR,
                 scene_type=scene["scene_type"],
                 safety_level=scene.get("safety_level", "normal"),
                 payload_json=scene.get("payload", {}),
                 source_refs_json=scene.get("source_refs", []),
             ))
+        next_action_order: dict[str, int] = {}
         for action in document["actions"]:
+            scene_id = action["scene_id"]
+            # 与场景相同，动作未显式排序时遵循其在同场景中的文档顺序。
+            action_order = action.get("order")
+            if action_order is None:
+                action_order = next_action_order.get(scene_id, 0) + 1
+            next_action_order[scene_id] = max(next_action_order.get(scene_id, 0), action_order)
             self._session.add(MemoryAction(
                 action_id=action["action_id"],
-                scene_id=action["scene_id"],
-                action_order=action.get("order", 1),
+                scene_id=scene_id,
+                action_order=action_order,
                 schema_major=_MEMORY_SCHEMA_MAJOR,
                 action_type=action["action_type"],
                 duration_ms=action["duration_ms"],

@@ -71,7 +71,37 @@ def test_evaluation_service_persists_only_safe_evaluation_summary() -> None:
     assert stored is not None
     assert stored.decision == "pass"
     assert stored.score_json == {"scene_count": 3, "action_count": 3, "source_ref_count": 1}
+    assert (
+        stored.schema_passed,
+        stored.grounding_passed,
+        stored.material_reference_passed,
+        stored.hallucination_detected,
+        stored.emotional_safety_passed,
+    ) == (True, True, True, False, True)
     assert stored.reason_summary == "OK"
+
+
+def test_evaluation_service_persists_reference_and_hallucination_flags() -> None:
+    """素材引用越权只持久化布尔结论与受控码，不能保存伪造引用本身。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    scenes, actions = _playback()
+    scenes[0]["source_refs"] = ["diary:forged"]
+    decision = MemoirPlaybackEvaluator().evaluate(
+        scenes, actions, trusted_source_refs={"diary:d-1"}, enabled_capabilities=set(),
+    )
+
+    EvaluationService(session).record(
+        run_id="run-1", step_id="safety_review", target_type="playback_document",
+        target_id="draft", evaluator_type="memoir_playback", evaluation=decision,
+    )
+    session.commit()
+
+    stored = session.scalar(select(AgentEvaluation))
+    assert stored is not None
+    assert (stored.material_reference_passed, stored.hallucination_detected) == (False, True)
+    assert "diary:forged" not in str(stored.score_json)
 
 
 def test_safety_review_records_evaluation_without_playback_content() -> None:

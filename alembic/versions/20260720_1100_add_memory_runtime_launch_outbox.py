@@ -1,7 +1,7 @@
 """创建回忆录业务侧 Runtime 启动意图 outbox。
 
 Revision ID: 20260720_1100
-Revises: 20260717_1200
+Revises: 20260720_1000
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260720_1100"
-down_revision = "20260717_1200"
+down_revision = "20260720_1000"
 branch_labels = None
 depends_on = None
 

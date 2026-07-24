@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from threading import Lock
-from typing import Any
 
 import httpcore
 import httpx
@@ -27,18 +27,48 @@ class _PeerTrackingNetworkBackend(httpcore.NetworkBackend):
         with self._lock:
             return self._peer_ip
 
-    def connect_tcp(self, **kwargs: Any) -> httpcore.NetworkStream:
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[
+            tuple[int, int, int]
+            | tuple[int, int, bytes | bytearray]
+            | tuple[int, int, None, int]
+        ]
+        | None = None,
+    ) -> httpcore.NetworkStream:
         """委托实际建连，并从 socket 的 server_addr 读取不可伪造的对端地址。"""
-        stream = self._delegate.connect_tcp(**kwargs)
+        stream = self._delegate.connect_tcp(
+            host=host,
+            port=port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
         address = stream.get_extra_info("server_addr")
         peer_ip = address[0] if isinstance(address, tuple) and address else None
         with self._lock:
             self._peer_ip = peer_ip if isinstance(peer_ip, str) else None
         return stream
 
-    def connect_unix_socket(self, **kwargs: Any) -> httpcore.NetworkStream:
+    def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: Iterable[
+            tuple[int, int, int]
+            | tuple[int, int, bytes | bytearray]
+            | tuple[int, int, None, int]
+        ]
+        | None = None,
+    ) -> httpcore.NetworkStream:
         """Tool connector 不使用 Unix socket；保留委托以满足 httpcore 后端协议。"""
-        return self._delegate.connect_unix_socket(**kwargs)
+        return self._delegate.connect_unix_socket(
+            path=path, timeout=timeout, socket_options=socket_options
+        )
 
     def sleep(self, seconds: float) -> None:
         """保持 httpcore 原有退避行为。"""

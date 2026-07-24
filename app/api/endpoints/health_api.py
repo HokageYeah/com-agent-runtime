@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
+from app.runtime.observability import ExternalExporterPolicy
 
 router = APIRouter(tags=["health"])
 
@@ -31,10 +32,30 @@ class RuntimeHealth:
             "agent_package": "configured",
             "trusted_clients": "configured" if self.settings.trusted_clients else "missing",
             "draining": "true" if self.draining else "false",
+            "audit_sink": "configured" if self.settings.RUNTIME_AUDIT_SINK_CONFIGURED else "missing",
         }
+        # Worker 仅在至少一个完整、启用的 target 存在时注册 callback handler；ready 必须反映该条件。
+        callback_targets = self.settings.callback_targets
+        required_callback_fields = ("url", "runtime_id", "key_id", "secret")
+        callback_invalid = any(
+            bool(config.get("enabled"))
+            and not all(isinstance(config.get(field), str) and config[field] for field in required_callback_fields)
+            for config in callback_targets.values()
+            if isinstance(config, dict)
+        ) or any(not isinstance(config, dict) for config in callback_targets.values())
+        checks["callback_dispatcher"] = "invalid" if callback_invalid else "configured"
+        governance = self.settings.external_observability
+        exporter = ExternalExporterPolicy(**governance.model_dump())
+        # enabled 但治理不完整时不对外宣告 ready，避免误以为导出能力已受控启用。
+        checks["external_exporter"] = (
+            "disabled" if not governance.enabled else "governed" if exporter.allows_export({"run_id": "check"}) else "invalid"
+        )
         ready = (
             database_ok
             and checks["trusted_clients"] == "configured"
+            and checks["external_exporter"] != "invalid"
+            and checks["audit_sink"] == "configured"
+            and checks["callback_dispatcher"] == "configured"
             and not self.draining
         )
         logging.info("Runtime readiness 检查 ready=%s checks=%s", ready, checks)

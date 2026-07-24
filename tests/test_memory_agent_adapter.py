@@ -153,6 +153,36 @@ def test_adapter_queries_or_cancels_held_run_without_reading_error_body() -> Non
     ]
 
 
+def test_adapter_queries_runtime_status_and_purge_state_by_run_id() -> None:
+    """业务补偿只接收按 Run ID 查询到的受限状态，不读取 Runtime 私密字段。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        return httpx.Response(
+            200,
+            json={
+                    "run_id": "run-1", "status": "cancelled", "dispatch_state": "finished",
+                    "privacy_state": "purged", "privacy_version": 2,
+                    "last_event_seq": 4, "status_version": 5,
+                    "input": {"private": "must not be read"},
+            },
+            request=request,
+        )
+
+    adapter = MemoryAgentAdapter(
+        MemoryRuntimeClientConfig("http://runtime.local", "couple-diary", "dev", "secret"),
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    state = adapter.get_run_state("run-1")
+    assert state is not None
+    assert state.run_id == "run-1"
+    assert state.status == "cancelled"
+    assert state.dispatch_state == "finished"
+    assert state.privacy_state == "purged"
+    assert state.privacy_version == 2
+    assert (state.last_event_seq, state.status_version) == (4, 5)
+
+
 def test_adapter_requests_private_purge_and_reads_only_privacy_state() -> None:
     """隐私删除使用调用方给定稳定键，查询只接收 Runtime 的安全状态摘要。"""
     calls: list[tuple[str, str, str | None]] = []

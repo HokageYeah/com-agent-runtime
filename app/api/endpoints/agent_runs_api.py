@@ -123,7 +123,8 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
         raise HTTPException(status_code=409, detail="IDEMPOTENCY_CONFLICT") from exc
     session = request.app.state.session_factory()
     try:
-        AuthorizationService(request.app.state.settings.trusted_clients).authorize_create(
+        authorization = AuthorizationService(request.app.state.settings.trusted_clients)
+        authorization.authorize_create(
             client_id=caller,
             agent_id=command.agent_id,
             business_type=command.business_type,
@@ -139,7 +140,8 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
             _admission_limits(request),
             trusted_model_route_ids=(route.route_id for route in request.app.state.settings.model_routes),
         ).create(
-            command, caller, tenant, request.headers["Idempotency-Key"]
+            command, caller, tenant, request.headers["Idempotency-Key"],
+            authorization_version=authorization.authorization_version(caller),
         )
         IdempotencyService(session).store(
             caller,
@@ -177,7 +179,13 @@ async def start_run(run_id: str, request: Request) -> RunSummary:
         return RunSummary.model_validate(existing)
     session = request.app.state.session_factory()
     try:
-        result = AgentRunService(session, _admission_limits(request)).start(
+        result = AgentRunService(
+            session,
+            _admission_limits(request),
+            authorization_version_resolver=lambda run: AuthorizationService(
+                request.app.state.settings.trusted_clients
+            ).authorization_version(run.caller_id),
+        ).start(
             run_id, caller, request.headers["Idempotency-Key"]
         )
         IdempotencyService(session).store(
@@ -255,7 +263,13 @@ async def retry_run(run_id: str, request: Request) -> RunSummary:
         auditor = AuthorizationService(
             request.app.state.settings.trusted_clients
         ).can_audit(caller)
-        result = AgentRunService(session, _admission_limits(request)).retry(
+        result = AgentRunService(
+            session,
+            _admission_limits(request),
+            authorization_version_resolver=lambda run: AuthorizationService(
+                request.app.state.settings.trusted_clients
+            ).authorization_version(run.caller_id),
+        ).retry(
             run_id, caller, allow_auditor=auditor
         )
         IdempotencyService(session).store(

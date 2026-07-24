@@ -6,7 +6,8 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentRun
+from app.models import AgentRun, AgentToolCall, RuntimeAuditRecord
+from app.runtime.interfaces import LeaseContext
 from app.services.tool_call_audit_service import ToolCallAuditService
 
 
@@ -97,6 +98,13 @@ def test_side_effect_audit_rejects_conflicting_stable_operation() -> None:
     with pytest.raises(ValueError, match="TOOL_CALL_OPERATION_CONFLICT"):
         service.begin_side_effect(**(params | {"idempotency_key": "different-key"}))
     assert session.scalar(select(func.count()).select_from(app.models.AgentToolCall)) == 1
+    audits = session.scalars(select(RuntimeAuditRecord)).all()
+    assert len(audits) == 2
+    assert all(
+        (audit.action, audit.reason_code, audit.outcome, audit.metadata_summary)
+        == ("tool_call_operation_conflict", "TOOL_CALL_OPERATION_CONFLICT", "rejected", {"run_id": "run-1"})
+        for audit in audits
+    )
 
 
 def test_side_effect_audit_rejects_call_after_frozen_tool_budget_is_consumed() -> None:
@@ -165,3 +173,34 @@ def test_latest_committed_requires_original_logical_key_idempotency_and_digest()
     assert service.latest_committed(
         "run-1", "logical", "idempotency", "different-digest"
     ) is None
+
+
+def test_late_tool_result_cannot_settle_after_privacy_or_authorization_boundary_changes() -> None:
+    """迟到结果只能保留原 running 记录，不能越过权威执行边界。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="guarded-run", agent_id="memoir_agent", agent_version="1", package_digest="digest",
+        contract_version="1", business_type="memoir", business_id="business", status="running",
+        dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        lease_owner="worker", fencing_token=1, execution_attempt=1, lease_expires_at=now.replace(year=now.year + 1),
+        run_deadline_at=now.replace(year=now.year + 1),
+    ))
+    session.commit()
+    service = ToolCallAuditService(session)
+    record = service.begin_publish("guarded-run", 1, "logical", "key", "digest")
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker", fencing_token=1,
+        lease_expires_at=now.replace(year=now.year + 1), privacy_version=1, authorization_version=1,
+    )
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "guarded-run"))
+    assert run is not None
+    run.authorization_version = 2
+    session.commit()
+
+    assert not service.succeed(record, 1, "safe-digest", lease_context=context)
+    saved = session.scalar(select(AgentToolCall).where(AgentToolCall.tool_call_id == record.tool_call_id))
+    assert saved is not None and saved.status == "running"

@@ -4,9 +4,13 @@ import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+if TYPE_CHECKING:
+    from app.runtime.model_gateway import ModelRoute
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -155,6 +159,18 @@ class LoggingConfig(BaseModel):
     logging_level: str
 
 
+class ExternalObservabilityConfig(BaseModel):
+    """外部观测治理声明；缺失字段时 exporter 必须保持关闭。"""
+
+    enabled: bool
+    data_classification: str
+    sampled_fields: tuple[str, ...]
+    region: str
+    retention_days: int
+    audit_permission: str
+    privacy_purge_supported: bool
+
+
 class CorsConfig(BaseModel):
     """跨域配置。"""
 
@@ -201,6 +217,15 @@ class Settings(BaseSettings):
     REQUEST_ID_HEADER: str = "X-Request-ID"
     SLOW_REQUEST_THRESHOLD_MS: int = 800
     LOGGING_LEVEL: str = "INFO"
+    RUNTIME_EXTERNAL_EXPORTER_ENABLED: bool = False
+    RUNTIME_EXTERNAL_EXPORTER_DATA_CLASSIFICATION: str = ""
+    RUNTIME_EXTERNAL_EXPORTER_SAMPLED_FIELDS: str = ""
+    RUNTIME_EXTERNAL_EXPORTER_REGION: str = ""
+    RUNTIME_EXTERNAL_EXPORTER_RETENTION_DAYS: int = 0
+    RUNTIME_EXTERNAL_EXPORTER_AUDIT_PERMISSION: str = ""
+    RUNTIME_EXTERNAL_EXPORTER_PRIVACY_PURGE_SUPPORTED: bool = False
+    # 生产环境必须显式确认审计账本已持久化且访问受控；缺失时 readiness fail-closed。
+    RUNTIME_AUDIT_SINK_CONFIGURED: bool = True
     BACKEND_CORS_ORIGINS: str = (
         "http://localhost,"
         "http://127.0.0.1,"
@@ -346,6 +371,24 @@ class Settings(BaseSettings):
         return LoggingConfig(logging_level=self.LOGGING_LEVEL)
 
     @property
+    def external_observability(self) -> ExternalObservabilityConfig:
+        """将环境变量收口为不含 endpoint/secret 的 exporter 治理配置。"""
+        return ExternalObservabilityConfig(
+            enabled=self.RUNTIME_EXTERNAL_EXPORTER_ENABLED,
+            data_classification=self.RUNTIME_EXTERNAL_EXPORTER_DATA_CLASSIFICATION,
+            # 环境变量常写成逗号加空格；标准化后仍只允许 exporter 白名单字段。
+            sampled_fields=tuple(
+                field
+                for raw_field in self.RUNTIME_EXTERNAL_EXPORTER_SAMPLED_FIELDS.split(",")
+                if (field := raw_field.strip())
+            ),
+            region=self.RUNTIME_EXTERNAL_EXPORTER_REGION,
+            retention_days=self.RUNTIME_EXTERNAL_EXPORTER_RETENTION_DAYS,
+            audit_permission=self.RUNTIME_EXTERNAL_EXPORTER_AUDIT_PERMISSION,
+            privacy_purge_supported=self.RUNTIME_EXTERNAL_EXPORTER_PRIVACY_PURGE_SUPPORTED,
+        )
+
+    @property
     def database(self) -> DatabaseRuntimeConfig:
         """返回数据库运行时配置分组。
 
@@ -406,7 +449,7 @@ class Settings(BaseSettings):
         return self.RUNTIME_ADMISSION_MAX_RUNNING
 
     @property
-    def model_routes(self) -> list[object]:
+    def model_routes(self) -> list[ModelRoute]:
         """解析并校验部署预注册的模型路由。
 
         延迟导入避免基础配置在应用启动时引入 HTTP/Redis 运行时依赖。
