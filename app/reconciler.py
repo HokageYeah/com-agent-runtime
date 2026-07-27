@@ -18,6 +18,7 @@ from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
 from app.core.logging_uru import setup_logging
 from app.db.sqlalchemy_db import database
+from app.runtime.test_harness import RuntimeDependencies
 from app.services.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeClientConfig,
@@ -62,6 +63,18 @@ class ReconcilerRunner:
         self._clock = clock
         self._sleep = sleep
         self._failure_streaks: dict[str, int] = {}
+
+    @classmethod
+    def from_dependencies(
+        cls, dependencies: RuntimeDependencies, owner_id: str, **kwargs: Any
+    ) -> ReconcilerRunner:
+        """测试 harness 只能显式传入 session/clock，不能改写进程全局配置。"""
+        return cls(
+            dependencies.session_factory,
+            owner_id,
+            clock=dependencies.clock,
+            **kwargs,
+        )
 
     def run_once(self) -> Any | None:
         """执行至多一轮；租约被占用时立即返回，不创建扫描副作用。"""

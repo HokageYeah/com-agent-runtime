@@ -41,3 +41,62 @@ def test_observability_service_aggregates_only_safe_numeric_facts() -> None:
     assert report.as_dict()["hallucination_rate"] == 0.5
     assert report.as_dict()["fallback_rate"] == 0.5
     assert "private-marker" not in str(report.as_dict())
+
+
+def test_failure_review_template_exports_only_controlled_run_facts() -> None:
+    """失败复盘不得读取 Run 输入、错误原文或任意模型/工具内容。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(
+        AgentRun(
+            run_id="review-run", agent_id="agent", agent_version="1",
+            package_digest="digest", contract_version="1", business_type="memoir",
+            business_id="business", status="failed", dispatch_state="finished",
+            input_json={"prompt": "private-marker"},
+            output_summary_json={"tool_payload": "private-marker"},
+            error_code="PROVIDER_TIMEOUT", error_message="private-marker",
+            authorization_version=1, caller_id="caller", tenant_id="tenant",
+            create_idempotency_key="key", callback_target_id="callback",
+            business_connector_id="connector", trace_id="trace", status_version=7,
+            execution_attempt=2, privacy_version=3,
+            run_deadline_at=datetime.now(UTC) + timedelta(minutes=1),
+        )
+    )
+    session.commit()
+
+    review = ObservabilityService(session).failure_review_for_run("review-run")
+
+    assert review == {
+        "run_id": "review-run",
+        "status": "failed",
+        "dispatch_state": "finished",
+        "error_code": "PROVIDER_TIMEOUT",
+        "status_version": 7,
+        "execution_attempt": 2,
+        "privacy_state": "active",
+        "privacy_version": 3,
+        "metrics": {
+            "evaluation_count": 0,
+            "evaluation_pass_rate": 0.0,
+            "fallback_count": 0,
+            "fallback_rate": 0.0,
+            "model_cost": 0.0,
+            "actual_model_cost": 0.0,
+            "reserved_cost": 0.0,
+            "unknown_outcome_count": 0,
+            "tool_call_count": 0,
+            "model_attempt_count": 0,
+            "execution_attempt_count": 0,
+            "aborted_before_send_count": 0,
+            "model_elapsed_ms": 0,
+            "tool_elapsed_ms": 0,
+            "active_elapsed_ms": 0,
+            "schema_pass_rate": 0.0,
+            "grounding_pass_rate": 0.0,
+            "material_reference_pass_rate": 0.0,
+            "hallucination_rate": 0.0,
+            "emotional_safety_pass_rate": 0.0,
+        },
+    }
+    assert "private-marker" not in str(review)

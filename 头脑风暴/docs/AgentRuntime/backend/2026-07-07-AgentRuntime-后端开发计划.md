@@ -878,7 +878,7 @@ unique(client_id, idempotency_key, scope)
 
 - [ ] 根据 `tools.manifest.json` 校验工具在 allowlist 内。
 - [ ] 实现少量 Native Tool：JSON repair、摘要压缩和敏感字段扫描；它们同样经过 ToolGateway 策略、计数和审计。
-- [ ] 将 UnifiedToolDefinition 包装为 LangChain StructuredTool/BaseTool；adapter 只转换 schema/结果，实际执行必须回到 `ToolGateway.call()`，不得自行请求 connector。
+- [✅] 将 UnifiedToolDefinition 包装为 LangChain StructuredTool/BaseTool；adapter 只转换 schema/结果，实际执行必须回到 `ToolGateway.call()`，不得自行请求 connector。
 - [ ] 由预注册 `connector_id + relative path` 解析 endpoint；禁止 AgentPackage 或模型提供完整 URL，并执行协议/host/port/DNS/IP allowlist、私网阻断和禁止重定向。
 - [ ] 根据 `input_from` 从 trusted run/manifest/deterministic state 组装 identity、权限、generation token 和 side effect 参数；模型只提供 schema 允许的候选字段。
 - [ ] 工具结果通过 output schema、敏感字段扫描和 `output_to` allowlist 后写入 AgentState；禁止覆盖 run identity、authorization、connector、generation/version token 或 operation key。
@@ -945,24 +945,24 @@ unique(client_id, idempotency_key, scope)
 - [✅] provider 返回或抛错时，在 finally 中分别 settle permit 与同一 usage；响应后再次校验 ModelCallContext，失效时只允许结算无内容 token/成本/状态并丢弃输出，不能更新 AgentRun、AgentStep、Checkpoint、Artifact 或工作流状态。
 - [✅] 请求超时、进程崩溃或响应归属无法确认时不写零 usage；对账将过期 running/started 标为 `outcome_unknown` 并保留预留成本。迟到 usage 只允许对同一 `usage_id` 做幂等、单调结算。
 - [ ] 记录 route config version、capability snapshot，以及 permit wait/reject/TTL recovery/shared cooldown/circuit 指标；普通日志不写 route secret 或 prompt。
-- [ ] capabilities 只在 ProviderTrafficController 可用且 route policy 完整时宣告对应模型增强可用；共享控制异常时返回 capability disabled，业务 baseline 和模板能力保持可用。
+- [✅] `ModelCapabilityEvaluator` 只在 ProviderTrafficController 可用且 route/policy/驻留/窗口完整时宣告对应模型增强可用；`/runtime/capabilities` 仅返回安全布尔值和逻辑 policy，Redis 异常时关闭模型增强，业务 baseline 和模板能力保持可用。
 - [ ] provider endpoint 只从管理员注册表解析；自定义 base URL 执行协议/host/port allowlist、DNS/IP 校验、私网阻断和逐跳重定向复检。
 - [✅] Provider Adapter 每次 HTTP 发送前重新 DNS 预检，使用无代理、无 keep-alive 的受控 Transport 读取真实 TCP 对端；响应解析前仅接受本轮公网解析集合中的 peer，缺失/非法/不匹配均 fail-closed，且拒绝重定向。
 - [✅] `private_first` 未配置合规私有 provider 时返回 `capability_disabled`，Memoir 节点仅执行 policy 明确的模板 fallback，不静默切换任意云 provider。
 - [ ] 调用前校验 structured output、vision、上下文长度、数据驻留和 thinking 参数；能力不满足时只走当前 policy 明示 fallback，无匹配路由时返回配置错误。
 - [ ] 调 LiteLLM 或 Provider Adapter。
-- [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate` 拼装受信任模板变量，使用 Pydantic/structured output parser，并以 middleware/hook 接入 ContextManager 脱敏、usage 和安全摘要；不启用动态 createAgent。
-- [ ] ContextManager 按节点类型和模型策略计算 token 预算尚待接入；当前仅支持调用方提供的固定 token budget。
-- [ ] ContextManager 对素材分块、长日记摘录与工具结果摘要压缩尚待接入；当前对长文本截断并二次脱敏。
+- [✅] 使用 LangChain `ChatPromptTemplate` 拼装受信任模板与脱敏不可信数据槽，使用 Pydantic/structured output parser，并在 ModelGateway 调用边界接入 ContextManager、usage 和安全摘要；不启用动态 createAgent。
+- [✅] ContextManager 使用 Prompt 的 model_policy 与 route 的 context/output 窗口计算 fail-closed 输入预算，再按 `extract_highlights/plan_chapters/generate_scenes` 的受控节点 cap 收紧；素材与工具键名/数量摘要共享同一窗口，未知节点或无效预算拒绝。
+- [✅] ContextManager 对素材分块、长日记摘录与工具结果摘要压缩：固定预算下按顺序截取素材，工具结果只进入键名/数量摘要，原始 payload 不进入模型上下文。
 - [✅] ContextManager 把 Runtime/Package 规则标为 trusted instructions，把日记、赌局、RAG/Web Search 和工具结果放入 untrusted 数据槽。
 - [✅] ContextManager 只保存上下文摘要，不保存完整私密原文。
 - [✅] 解析 JSON 输出并用 Pydantic schema 校验。
-- [ ] schema 后完整校验 material/source ID、owner scope、scene/action 引用、数量、时长、统计和工具参数尚待接入；当前拒绝未知 source_ref、非法时长及 URL/connector/permission/callback 等控制字段。
+- [✅] schema 后统一校验 material/source ID 与冻结 owner scope、scene/action 引用和覆盖、数量、时长、统计及 action enum；`owner_id` 等控制字段和任意 `tool_params` fail-closed，语义越权只返回受控错误码并走模板 fallback。
 - [✅] 解析失败时执行一次无执行能力的 JSON repair；one-shot repair prompt 尚待接入受控模型调用链。
-- [ ] `AgentModelUsage` 不保存 prompt 或模型原文；privacy purge 后只可按治理保留 status、route、token、成本、provider request ID 和时间等无内容字段。
-- [ ] `thinking_summary` 只记录能力开关、预算和归一化参数，不保存隐藏推理内容。
-- [ ] 禁止日志记录完整 prompt 和私密素材。
-- [ ] 测试正常/脏 JSON、语义非法但 schema 合法、提示注入、模型超时 fallback 和敏感字段阻断。
+- [✅] `AgentModelUsage` 不保存 prompt、模型原文、工具 payload 或签名 URL；privacy purge 后删除 checkpoint 并清空 Run/Step/ToolCall/Artifact 的可承载内容字段，同时对历史或异常直写的 usage JSON 做白名单净化，仅保留 status、route、token、成本、Provider 请求身份与严格 thinking summary 等无内容治理字段。
+- [✅] `thinking_summary_json` 只持久化由可信 model policy/route 派生的能力开关、输入/输出预算与固定归一化版本；持久化 service 严格拒绝 hidden reasoning、模型原文和任意自由字段。
+- [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计禁止记录完整 prompt、私密素材、模型原文、隐藏推理、工具 payload、签名 URL 和密钥；安全边界仅允许受控 ID、计数、状态、错误码、预算和版本摘要。
+- [✅] 覆盖模型成功、语义非法 schema 合法的模板 fallback、Provider 异常、脏 JSON 与 privacy purge 后查询/对账的敏感字段阻断；Provider、日志、trace、callback、checkpoint、artifact 与审计均 fail-closed 或完成清除。
 - [ ] 测试多 Worker 不突破共享并发/RPM/TPM、acquired/started 两类 TTL 回收、permit TTL/请求超时配置拒绝、实际 token 结算、`mark_started` 与 settle 重复调用幂等、`aborted_before_send` 只回滚 acquired permit、共享 Retry-After、fallback 分区和 Redis 不可用 fail closed。
 
 ### Task 9: Evaluator、Guardrails、PolicyEngine
@@ -1131,7 +1131,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 断言日志、trace 和评测结果不含 prompt、日记正文、工具原始 payload、签名媒体 URL、隐藏推理和 Checkpoint 内容。
 - [✅] 断言 package 生命周期变更、Checkpoint 解密读取、authorization 变化、approval/cancel/retry/purge 和敏感调试访问均产生不含私密 payload 的 RuntimeAuditEvent；生产缺少持久 audit sink 时 readiness 失败。
 - [✅] 外部 OTel/LangSmith/调试样本 exporter 默认关闭；启用配置必须显式声明数据分级、采样字段、区域/跨境、保留期、审计权限和 privacy purge 删除能力，并测试脱敏失败时拒绝导出。
-- [ ] 运行 `ruff check .`、`mypy app`、`pytest`。
+- [✅] 运行 `ruff check .`、`mypy app`、`pytest`。
 
 ## 6. 第一版不做
 

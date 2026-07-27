@@ -465,7 +465,14 @@ def test_worker_dispatches_callback_outbox_when_callback_gateway_is_configured()
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     session = factory()
-    payload = {"event": "run_cancelled", "event_id": "event-worker", "event_seq": 1, "run_id": "run-worker", "business_id": "archive-worker"}
+    payload = {
+        "event": "run_cancelled",
+        "event_id": "event-worker",
+        "event_seq": 1,
+        "status_version": 2,
+        "run_id": "run-worker",
+        "business_id": "archive-worker",
+    }
     session.add(AgentRun(run_id="run-worker", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive-worker", status="cancelled", dispatch_state="finished", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="memory", business_connector_id="connector", trace_id="trace", run_deadline_at=datetime.now(UTC) + timedelta(days=1)))
     session.add(CallbackEvent(event_id="event-worker", run_id="run-worker", event_seq=1, status_version=2, event_type="run_cancelled", payload_json=payload, created_at=datetime.now(UTC)))
     session.add(RuntimeOutboxEvent(outbox_id="callback-worker", event_type="callback", aggregate_type="agent_run", aggregate_id="run-worker", payload_json={"event_id": "event-worker", "target_id": "memory"}, status="pending", retention_until=datetime.now(UTC) + timedelta(days=1)))

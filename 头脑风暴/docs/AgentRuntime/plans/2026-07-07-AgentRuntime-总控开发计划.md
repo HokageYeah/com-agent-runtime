@@ -510,8 +510,8 @@ Runtime 侧：
 
 - [✅] 实现 `ToolGateway.call()`。
 - [✅] 实现固定注册表驱动的 `ToolGateway.call()`：manifest 只能匹配 Runtime 内置 connector/method/path/input/side-effect 声明，运行上下文的 archive/snapshot/run/epoch 引用不可由 package 输入覆盖；输出执行 JSON 与敏感标识符扫描。
-- [ ] 实现 JSON repair、摘要压缩、敏感字段扫描等少量 Native Tool，以及 LangChain Tool 基础包装；所有 adapter 最终回到 ToolGateway，不自行请求业务 connector。
-- [✅] 已提供无网络 Native Tool：一次 fenced/raw JSON repair、仅键名与数量的摘要、递归敏感标识布尔扫描；不复制正文、不写日志、不新增 LangChain 依赖，动态工具包装仍保持待实现。
+- [✅] 实现 JSON repair、摘要压缩、敏感字段扫描等少量 Native Tool，以及 LangChain Tool 基础包装；所有 adapter 最终回到 ToolGateway，不自行请求业务 connector。
+- [✅] 已提供无网络 Native Tool：一次 fenced/raw JSON repair、仅键名与数量的摘要、递归敏感标识布尔扫描；不复制正文、不写日志；LangChain `StructuredTool/BaseTool` 最小包装只转换受限 schema/结果并回流 `ToolGateway`，不启用动态工具选择。
 - [✅] Runtime 固定 `memory.*` HTTP Tool 已使用既有 HMAC、固定 path、10 秒超时、读取单次传输重试与写入零盲重试；写工具使用稳定幂等键并由审计/查询恢复。
 - [✅] 固定 connector registry 在构造期拒绝非 HTTP(S) origin、userinfo/path/query/fragment、localhost 与非公网 IP；每次物理发送前重新解析 DNS，任一解析结果为私网/链路本地/loopback 或解析失败即 fail-closed，并拒绝所有重定向；日志不记录工具正文。
 - [✅] 连接建立后校验实际对端 IP 与本次预检解析结果一致，覆盖连接期间 DNS rebinding；Worker 使用无代理、无 keep-alive 的对端跟踪 Transport，未注入真实 socket 对端读取器时 ToolGateway 在发包前 fail-closed。
@@ -542,7 +542,7 @@ Runtime 侧：
 
 - [✅] 实现文件化 PromptRegistry。
 - [✅] PromptRegistry 校验 `prompt_id/version/owner_agent/input_schema/output_schema/model_policy/guardrail_policy/status`，不自动回退 latest；ModelGateway 可将已注册 prompt id/version 写入对应 usage attempt，且不保存模板正文。
-- [ ] 使用 LangChain `PromptTemplate/ChatPromptTemplate`、Pydantic structured parser 和 ContextManager/usage/安全 middleware hook；第一版不启用 createAgent 动态工具选择。
+- [✅] 使用 LangChain `ChatPromptTemplate` 将部署内可信模板与 ContextManager 脱敏数据槽渲染为短生命周期消息请求；Pydantic structured parser 和语义校验仍在结果写入前执行，usage 仅关联 prompt id/version；第一版不启用 createAgent 动态工具选择。
 - [✅] 实现受信任 HTTP Provider Adapter 与 ModelGateway：Redis 共享 permit、route allowlist、fail-closed、429 共享冷却、usage 安全结算；LiteLLM 适配仍按后续 Provider 扩展处理。
 - [✅] 固化第一版 `model_policy.yaml`，包含 `reasoning/balanced/emotional_writing/cheap_structured/strict/private_first` 映射。
 - [✅] 每个可信 route 的部署 JSON 强制声明流控/permit/circuit、`route_config_version/pricing_config_version`、统一 cost unit/价格、能力、数据驻留及上下文/输出上限；业务输入不能覆盖这些字段。
@@ -552,12 +552,12 @@ Runtime 侧：
 - [ ] provider endpoint 只允许管理员在 registry 配置；校验协议、host、port、DNS/IP、内网地址和每次重定向，AgentPackage、业务请求和 prompt 均不能覆盖 endpoint/key。
 - [✅] 已对 `ModelRoute` endpoint 做构造期 origin/localhost/非公网 IP 拒绝，并在每次 Provider 发送前重新解析 DNS；解析失败或任一 IP 非公网时返回安全错误、不创建 usage/permit、不发送请求，且不记录 prompt/响应正文。
 - [✅] Provider HTTP 连接建立后校验实际对端 IP：每次发送前重新 DNS 预检并清空旧 socket peer，响应解析前要求真实 TCP 对端属于本轮公网解析集合；缺少 peer、地址非法或不匹配均 fail-closed，禁止重定向，且日志不记录 prompt/响应正文。
-- [✅] `private_first` 没有合规私有 provider 时在 usage/permit/HTTP 前返回 `capability_disabled`，Memoir 节点只走 YAML 显式 `template` fallback，禁止静默改用云模型。
-- [ ] ContextManager 的节点/模型策略预算、分块和工具结果摘要压缩尚待接入；当前仅提供固定预算截断、手机号/数字脱敏和无正文摘要。
+- [✅] `ModelCapabilityEvaluator` 无副作用地统一判定 Prompt policy、route capability/驻留、上下文窗口与 Redis 前置可用性；`/runtime/capabilities` 只公开 `model_enhancement_available` 与可用逻辑 policy，不泄露 provider、endpoint、route 或凭据。`private_first` 没有合规私有 provider 时在 usage/permit/HTTP 前返回 `capability_disabled`，Memoir 节点只走 YAML 显式 `template` fallback，禁止静默改用云模型。
+- [✅] ContextManager 按 `extract_highlights/plan_chapters/generate_scenes` 的受控 cap 与 Prompt policy/route 输入窗口取最小预算，在节点内对素材和工具键名/数量摘要共享严格总窗口；未知节点或无效预算 fail-closed，工具 payload 不进入上下文。
 - [✅] MemoirAgent 的高光、章节、场景模型节点现精确加载内置 `prompt_id@v1`，向模型只传 prompt id/version、model policy、ContextManager 的 source-ref/脱敏计数摘要与安全输入；日记正文和模板正文不进入模型请求 DTO、日志或 checkpoint。
 - [✅] MemoirAgent 模型结果的字符串与 Mapping 统一经 StructuredOutputParser、一次无执行 JSON repair、Pydantic schema、SemanticValidator 和 `AgentState.apply_tool_output` 白名单；无效 JSON、未知来源引用或控制字段只触发模板 fallback。
 - [✅] MemoirModelGatewayAdapter 只从权威运行中 Step、有效 Lease、Run 冻结 agent version 与部署 PromptRegistry 构造调用；请求伪造的 prompt 元数据会被覆盖，usage 仅关联 prompt id/version。
-- [ ] 已实现 trusted/untrusted 槽隔离以及 source_ref、时长和禁止控制字段的基础语义校验；owner scope、数量、Action/工具参数的完整领域校验尚待接入。
+- [✅] StructuredOutputParser 统一调用 SemanticValidator：来源引用必须属于冻结 owner scope，scene/action 引用与覆盖、数量、时长、受控统计字段和 action enum 均 fail-closed；`owner_id` 等控制字段及任意 `tool_params` 一律拒绝，语义越权只触发模板 fallback。
 - [✅] 实现结构化输出、一次无执行能力的 JSON repair、schema 校验。
 - [✅] 实现 `ProviderTrafficController.acquire/mark_started/settle` 与 route 级连续失败熔断；Redis 原子维护共享并发、RPM/TPM、blocked_until、circuit open 与 `acquired -> started -> settled` permit，重复调用不重复增减计数；半开探测仍待后续策略扩展。
 - [✅] permit TTL 回收区分发送边界：`acquired` 过期回滚其 RPM/TPM 预留并释放并发槽，`started` 过期仅释放并发槽且保留速率预留至一分钟窗口结束；状态短暂保留以支持安全结算与重复调用。
@@ -569,11 +569,11 @@ Runtime 侧：
 - [✅] 实现 `ModelUsageService` 与 `AgentModelUsage` 生命周期：权威 Context、发送前/后边界校验、running/started/aborted/unknown 条件结算、实际 token 成本与 permit 回收；重试策略扩展仍待后续节点策略接入。
 - [✅] Provider 响应后复用同一 lease/privacy/authorization/deadline 边界；上下文失效时丢弃模型输出并将原 usage 保守结算为 `outcome_unknown`，不推进 run/step/checkpoint/artifact。
 - [✅] 对账将过期 running/started usage 条件转为 `outcome_unknown` 并保留预留成本；PolicyEngine 已按冻结 package policy 聚合模型调用次数与保守成本，在 permit 前以条件预留拒绝超限；active/held/queue/approval/wall clock 与工具预算仍待实现。
-- [ ] `thinking_summary` 只记录能力开关、预算和归一化参数，不保存隐藏推理文本。
+- [✅] `AgentModelUsage.thinking_summary_json` 仅在受控 Prompt 关联阶段写入 `thinking_enabled`、输入/输出预算和固定归一化版本；service 层严格 allowlist 拒绝 reasoning、模型原文和任意自由字段，且不进入日志、trace、callback、checkpoint 或审计。
 - [ ] 实现 Evaluator、Guardrails、PolicyEngine。
 - [ ] 实现 AdmissionController：AdmissionBucket 管理 global/caller/tenant/agent 的 held/queued/running；实际路由确定后由 ProviderTrafficController 管理 provider/model 流量。PolicyEngine 负责 active/held/queue/approval/wall clock 预算，不重复实现限流状态。
 - [✅] 共享流量控制 Redis 在 preflight/acquire 异常时统一返回 `capability_disabled(MODEL_TRAFFIC_UNAVAILABLE)`，不触网、不保留 usage/permit，并由节点走显式模板 fallback。
-- [ ] 禁止完整 prompt 和私密素材入日志。
+- [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计仅输出或持久化受控 ID、状态、错误码、计数、预算与版本摘要；完整 prompt、模型原文/隐藏推理、工具 payload、签名 URL、checkpoint 正文和密钥一律拒绝、投影剥离或在 privacy purge 中清除。
 
 **Checkpoint:** 模型节点输出可控、可评价、可降级，成本可记录。
 
@@ -744,7 +744,7 @@ Runtime 侧：
 - [ ] 统计 admission/队列、provider 限流、outbox/dead letter、隐私 purge、授权撤销、提示注入和语义校验失败指标。
 - [✅] 检查日志不含敏感字段。
 - [✅] 外部 OTel/LangSmith/调试样本 exporter 默认关闭；启用前配置数据分级、采样字段、区域/跨境、保留期、审计权限和 privacy purge 删除能力，脱敏失败时拒绝导出。
-- [ ] 输出第一版失败复盘模板。
+- [✅] 输出第一版失败复盘模板：仅包含 Run ID、状态、受控错误码、状态/执行/隐私版本及安全聚合指标；不读取或导出输入输出、错误原文、prompt、模型/工具载荷、Checkpoint 或密钥。
 
 **Checkpoint:** Runtime 不只是能跑，还能被排查、评测和持续优化。
 

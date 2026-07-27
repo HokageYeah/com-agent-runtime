@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentRun, AgentStep
+from app.runtime.context_manager import ContextManager
 from app.runtime.interfaces import LeaseContext
+from app.runtime.langchain_components import render_model_messages
 from app.runtime.model_gateway import ModelCallContext, ModelGateway, ModelGatewayResult
 from app.runtime.prompt_registry import PromptRegistry, PromptRegistryError
 
@@ -35,6 +38,7 @@ class MemoirModelGatewayAdapter:
         self._route_ids = dict(route_ids)
         self._lease_context = lease_context
         self._prompts = PromptRegistry(Path(__file__).parents[1] / "agents")
+        self._contexts = ContextManager()
 
     def bind_lease(self, lease_context: LeaseContext) -> None:
         self._lease_context = lease_context
@@ -73,16 +77,37 @@ class MemoirModelGatewayAdapter:
             )
         except (PromptRegistryError, ValueError):
             return ModelGatewayResult("aborted_before_send")
-        # Prompt 身份与策略只认部署内注册表，忽略调用 request 中可伪造的同名字段。
-        safe_request = dict(request)
-        safe_request.update({
-            "prompt_id": prompt.prompt_id,
-            "prompt_version": prompt.version,
-            "model_policy": prompt.model_policy,
-        })
+        # 在渲染消息前使用与 Gateway 相同的判定，避免已知不兼容配置产生任何 Provider 调用。
+        if not self._model_gateway.capability_available(
+            route_id, prompt, context.estimated_input_tokens
+        ):
+            return ModelGatewayResult("capability_disabled", error_code="MODEL_CAPABILITY_UNAVAILABLE")
+        # Prompt 身份只认部署注册表。候选输入只可作为不可信 data 槽进入消息，
+        # 绝不允许 request 自报 provider、route、授权或运行控制字段。
+        candidate_input = request.get("input", {})
+        if not isinstance(candidate_input, Mapping):
+            return ModelGatewayResult("aborted_before_send")
+        refs = _candidate_source_refs(candidate_input)
+        try:
+            token_budget = self._contexts.node_token_budget(
+                node_id, self._model_gateway.context_token_budget(route_id, prompt)
+            )
+            node_context = self._contexts.build_node_context(
+                trusted_instructions=prompt.template,
+                materials=[{"source_ref": ref, "text": "[SOURCE_REF]"} for ref in refs],
+                tool_results=[],
+                token_budget=token_budget,
+            )
+            provider_request = {
+                "messages": render_model_messages(
+                    prompt, node_context, candidate_input
+                )
+            }
+        except ValueError:
+            return ModelGatewayResult("aborted_before_send")
         try:
             return self._model_gateway.call(
-                context, route_id, safe_request, prompt=prompt,
+                context, route_id, provider_request, prompt=prompt,
             )
         except ValueError:
             # route 配置失配属于能力不可用，交给 Runner 做确定性 fallback。
@@ -94,3 +119,20 @@ class MemoirModelGatewayAdapter:
                 run_id, step.step_id, node_id,
             )
             return ModelGatewayResult("outcome_unknown")
+
+
+def _candidate_source_refs(candidate_input: Mapping[str, object]) -> list[str]:
+    """仅提取引用 ID 作为 ContextManager 的占位数据，不透传任何素材正文。"""
+    source_refs = candidate_input.get("source_refs")
+    if isinstance(source_refs, list):
+        return [ref for ref in source_refs if isinstance(ref, str)]
+    chapters = candidate_input.get("chapters")
+    if not isinstance(chapters, list):
+        return []
+    return [
+        ref
+        for chapter in chapters
+        if isinstance(chapter, Mapping)
+        for ref in chapter.get("source_refs", [])
+        if isinstance(ref, str)
+    ]

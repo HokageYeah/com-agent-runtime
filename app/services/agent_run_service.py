@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -12,6 +13,7 @@ from app.models import (
     AgentArtifact,
     AgentCheckpoint,
     AgentDefinition,
+    AgentModelUsage,
     AgentPlan,
     AgentRun,
     AgentStep,
@@ -305,6 +307,17 @@ class AgentRunService:
             .where(AgentToolCall.run_id == run_id)
             .values(input_summary=None, output_summary=None)
         )
+        # ModelUsage 正常写入已只存受控治理摘要；但 purge 同样必须清理旧版本或
+        # 异常直写的 JSON，不能把它们当作无内容账本永久保留。
+        for usage in self._session.scalars(
+            select(AgentModelUsage).where(AgentModelUsage.run_id == run_id)
+        ):
+            usage.capability_snapshot_json = self._safe_usage_capability_snapshot(
+                usage.capability_snapshot_json
+            )
+            usage.thinking_summary_json = self._safe_thinking_summary(
+                usage.thinking_summary_json
+            )
         run.input_json = {}
         run.output_summary_json = None
         run.privacy_state = "purged"
@@ -523,6 +536,62 @@ class AgentRunService:
             step_attempt=record.step_attempt,
             error_code=record.error_code,
             error_message=record.error_message,
+        )
+
+    @staticmethod
+    def _safe_usage_capability_snapshot(value: object) -> dict[str, object] | None:
+        """仅保留 ModelUsage 可对账的 route 治理摘要，未知字段一律清除。"""
+        if not isinstance(value, dict):
+            return None
+        result: dict[str, object] = {}
+        for key in ("route_config_version", "data_residency"):
+            candidate = value.get(key)
+            if AgentRunService._safe_summary_string(candidate, 64):
+                result[key] = candidate
+        capabilities = value.get("capabilities")
+        if (
+            isinstance(capabilities, list)
+            and len(capabilities) <= 32
+            and all(AgentRunService._safe_summary_string(item, 64) for item in capabilities)
+        ):
+            result["capabilities"] = list(capabilities)
+        for key in ("max_context_tokens", "max_output_tokens"):
+            candidate = value.get(key)
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and 0 <= candidate <= 10_000_000:
+                result[key] = candidate
+        return result or None
+
+    @staticmethod
+    def _safe_thinking_summary(value: object) -> dict[str, object] | None:
+        """隐藏推理不可恢复；只保留受控开关、预算和归一化版本。"""
+        if not isinstance(value, dict):
+            return None
+        enabled = value.get("thinking_enabled")
+        output_budget = value.get("max_output_tokens")
+        input_budget = value.get("input_token_budget")
+        version = value.get("normalization_version")
+        if (
+            not isinstance(enabled, bool)
+            or not isinstance(output_budget, int)
+            or isinstance(output_budget, bool)
+            or not isinstance(input_budget, int)
+            or isinstance(input_budget, bool)
+            or not 0 <= output_budget <= 10_000_000
+            or not 0 <= input_budget <= 10_000_000
+            or not AgentRunService._safe_summary_string(version, 64)
+        ):
+            return None
+        return {
+            "thinking_enabled": enabled,
+            "max_output_tokens": output_budget,
+            "input_token_budget": input_budget,
+            "normalization_version": version,
+        }
+
+    @staticmethod
+    def _safe_summary_string(value: object, maximum_length: int) -> bool:
+        return isinstance(value, str) and bool(
+            re.fullmatch(r"[A-Za-z0-9._-]{1," + str(maximum_length) + r"}", value)
         )
 
     @staticmethod

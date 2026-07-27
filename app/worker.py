@@ -35,12 +35,15 @@ from app.runtime.model_gateway import (
     HttpProviderAdapter,
     ModelCallContext,
     ModelCallGuard,
+    ModelCapabilityEvaluator,
     ModelGateway,
+    ModelPolicyRegistry,
     ModelRouteRegistry,
     ProviderTrafficController,
 )
 from app.runtime.peer_tracking_transport import PeerTrackingHTTPTransport
 from app.runtime.policy_engine import PolicyEngine
+from app.runtime.test_harness import LoopbackTestTransport, RuntimeDependencies
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.services.callback_delivery_service import (
     CallbackDeliveryService,
@@ -167,11 +170,13 @@ _MEMOIR_MODEL_NODES = frozenset(
 
 def configured_model_gateway(
     session: Session, *, is_draining: Callable[[], bool] = lambda: False,
+    dependencies: RuntimeDependencies | None = None,
 ) -> MemoirModelGatewayAdapter | None:
     """只从受信任 Settings 装配模型边界；任何缺项都禁用模型能力。"""
     try:
-        routes = settings.model_routes
-        node_routes = settings.memoir_model_node_routes
+        runtime_settings = dependencies.settings if dependencies is not None else settings
+        routes = runtime_settings.model_routes
+        node_routes = runtime_settings.memoir_model_node_routes
     except ValueError:
         logging.exception("Memoir Worker 模型配置无效，使用模板 fallback")
         return None
@@ -197,6 +202,7 @@ def configured_model_gateway(
 
     # Provider 每次请求都使用无 keep-alive 的真实 socket 对端追踪，防止 DNS rebinding。
     provider_peer_transport = PeerTrackingHTTPTransport()
+    model_policies = ModelPolicyRegistry.default()
     gateway = ModelGateway(
         ModelRouteRegistry(routes),
         ProviderTrafficController(redis),
@@ -209,21 +215,25 @@ def configured_model_gateway(
         ),
         PolicyEngine(session),
         call_guard=_WorkerDrainingGuard(),
+        model_policies=model_policies,
+        capability_evaluator=ModelCapabilityEvaluator(model_policies),
     )
     return MemoirModelGatewayAdapter(session, gateway, node_routes)
 
 
 def configured_executor(
     session: Session, *, is_draining: Callable[[], bool] = lambda: False,
+    dependencies: RuntimeDependencies | None = None,
 ) -> RunExecutor:
     """按 Worker 当前事务装配 Memoir 执行器，配置不完整时安全退回占位器。"""
     class _Executor:
         @staticmethod
         def _memoir_executor(run_id: str, lease_context: LeaseContext) -> WorkflowExecutor | None:
+            runtime_settings = dependencies.settings if dependencies is not None else settings
             agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
             if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != ("memoir_agent", "1.0.0"):
                 return None
-            config = settings.business_connectors.get(agent_run.business_connector_id, {})
+            config = runtime_settings.business_connectors.get(agent_run.business_connector_id, {})
             required = ("base_url", "runtime_id", "key_id", "secret")
             if not bool(config.get("enabled")) or any(not isinstance(config.get(key), str) for key in required):
                 logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
@@ -235,20 +245,23 @@ def configured_executor(
                 secret=cast(str, config["secret"]),
             )
             # ToolGateway 每次发送前读取同一实时 draining 回调，不能在装配时冻结状态。
-            peer_transport = PeerTrackingHTTPTransport()
+            peer_transport = PeerTrackingHTTPTransport() if dependencies is None else None
             tool_gateway = ToolGateway(
                 {agent_run.business_connector_id: connector},
-                httpx.Client(transport=peer_transport, trust_env=False),
+                dependencies.tool_client if dependencies is not None else httpx.Client(transport=peer_transport, trust_env=False),
                 is_draining=is_draining,
                 deadline_at=lambda: agent_run.run_deadline_at,
                 lease_expires_at=lambda: lease_context.lease_expires_at,
                 authorization_permitted=lambda checked_run_id: _authorization_is_current(
                     session, checked_run_id
                 ),
-                peer_ip_provider=peer_transport.peer_ip,
-                reset_peer_ip=peer_transport.reset_peer_ip,
+                peer_ip_provider=peer_transport.peer_ip if peer_transport is not None else None,
+                reset_peer_ip=peer_transport.reset_peer_ip if peer_transport is not None else None,
+                test_transport=dependencies.transport_verifier if isinstance(getattr(dependencies, "transport_verifier", None), LoopbackTestTransport) else None,
             )
-            model_gateway = configured_model_gateway(session, is_draining=is_draining)
+            model_gateway = configured_model_gateway(
+                session, is_draining=is_draining, dependencies=dependencies
+            )
             if model_gateway is not None:
                 model_gateway.bind_lease(lease_context)
             return WorkflowExecutor(
@@ -290,10 +303,13 @@ def _authorization_is_current(session: Session, run_id: str) -> bool:
         return False
 
 
-def configured_callback_gateway() -> CallbackGateway | None:
+def configured_callback_gateway(
+    dependencies: RuntimeDependencies | None = None,
+) -> CallbackGateway | None:
     """按部署白名单装配 callback 网关；非法或关闭配置不启用 callback 消费。"""
     targets: dict[str, CallbackTarget] = {}
-    for target_id, config in settings.callback_targets.items():
+    runtime_settings = dependencies.settings if dependencies is not None else settings
+    for target_id, config in runtime_settings.callback_targets.items():
         required = ("url", "runtime_id", "key_id", "secret")
         if bool(config.get("enabled")) and all(isinstance(config.get(key), str) for key in required):
             targets[target_id] = CallbackTarget(
@@ -304,7 +320,8 @@ def configured_callback_gateway() -> CallbackGateway | None:
             )
         else:
             logging.warning("callback target 未启用或配置不完整 target_id=%s", target_id)
-    return CallbackGateway(targets, httpx.Client()) if targets else None
+    client = dependencies.callback_client if dependencies is not None else httpx.Client()
+    return CallbackGateway(targets, client) if targets else None
 
 
 def main() -> None:

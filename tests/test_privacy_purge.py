@@ -12,6 +12,7 @@ from app.db.sqlalchemy_db import Base
 from app.models import (
     AgentArtifact,
     AgentCheckpoint,
+    AgentModelUsage,
     AgentRun,
     AgentStep,
     AgentToolCall,
@@ -103,6 +104,32 @@ def test_complete_purge_removes_private_checkpoint_and_scrubs_runtime_summaries(
                 status="succeeded",
                 created_at=now,
             ),
+            AgentModelUsage(
+                id=1,
+                usage_id="usage-1",
+                run_id=run.run_id,
+                step_id="step-1",
+                execution_attempt=1,
+                model_attempt=1,
+                status="succeeded",
+                # 模拟旧版本或异常写入的 JSON：purge 不能把这类载荷当作安全元数据保留。
+                capability_snapshot_json={
+                    "capabilities": ["structured_output"],
+                    "prompt": "private-marker",
+                    "tool_payload": {"private": "private-marker"},
+                    "signed_url": "https://example.invalid/private-marker",
+                },
+                thinking_summary_json={
+                    "thinking_enabled": False,
+                    "max_output_tokens": 512,
+                    "input_token_budget": 7680,
+                    "normalization_version": "v1",
+                    "hidden_reasoning": "private-marker",
+                },
+                input_tokens=1,
+                output_tokens=1,
+                estimated_cost=0.1,
+            ),
         ]
     )
     session.commit()
@@ -114,11 +141,20 @@ def test_complete_purge_removes_private_checkpoint_and_scrubs_runtime_summaries(
     artifact = session.scalar(select(AgentArtifact).where(AgentArtifact.artifact_id == "artifact-1"))
     step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
     tool_call = session.scalar(select(AgentToolCall).where(AgentToolCall.tool_call_id == "tool-1"))
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == "usage-1"))
     assert refreshed is not None and refreshed.input_json == {} and refreshed.output_summary_json is None
     assert session.scalar(select(AgentCheckpoint).where(AgentCheckpoint.run_id == run.run_id)) is None
     assert artifact is not None and artifact.summary_json is None
     assert step is not None and step.input_summary is None and step.output_summary is None
     assert tool_call is not None and tool_call.input_summary is None and tool_call.output_summary is None
+    assert usage is not None
+    assert usage.capability_snapshot_json == {"capabilities": ["structured_output"]}
+    assert usage.thinking_summary_json == {
+        "thinking_enabled": False,
+        "max_output_tokens": 512,
+        "input_token_budget": 7680,
+        "normalization_version": "v1",
+    }
 
 
 def test_expired_purge_idempotency_record_is_retained_until_run_is_confirmed_purged() -> None:

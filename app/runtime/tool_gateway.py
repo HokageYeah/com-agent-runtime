@@ -18,6 +18,7 @@ import httpx
 from app.core.tool_security import tool_signature
 from app.runtime.interfaces import LeaseContext
 from app.runtime.state import AgentState
+from app.runtime.test_harness import LoopbackTestTransport
 from app.schemas.agent_package import ToolManifest
 
 # 工具注册表属于 Runtime 代码，而非可变 AgentPackage。即使 package 文件被错误更新，
@@ -67,10 +68,15 @@ class ToolGateway:
         authorization_permitted: Callable[[str], bool] = lambda run_id: True,
         peer_ip_provider: Callable[[], str | None] | None = None,
         reset_peer_ip: Callable[[], None] | None = None,
+        test_transport: LoopbackTestTransport | None = None,
     ) -> None:
+        # 仅测试 harness 显式注入的对象可绕过公网 DNS/peer 校验；生产默认 None。
+        self._test_transport = test_transport
         self._connectors = connectors
         self._connector_origins = {
-            connector_id: self._fixed_origin(connector.base_url)
+            connector_id: self._fixed_origin(
+                connector.base_url, allow_loopback=test_transport is not None
+            )
             for connector_id, connector in connectors.items()
         }
         self._client = client
@@ -249,8 +255,14 @@ class ToolGateway:
                 raise ValueError("TOOL_CALL_DRAINING")
             # 不缓存 DNS；每一次物理发送前都重新解析，避免 connector 域名在
             # 注册后被重绑定到 loopback、私网或云元数据地址。
-            allowed_peer_ips = self._ensure_public_endpoint(connector.base_url)
-            if not self._is_mock_transport and self._peer_ip_provider is None:
+            allowed_peer_ips: frozenset[str]
+            if self._test_transport is not None:
+                if not self._test_transport.allows(connector.base_url):
+                    raise ValueError("TEST_HARNESS_LOOPBACK_REQUIRED")
+                allowed_peer_ips = frozenset()
+            else:
+                allowed_peer_ips = self._ensure_public_endpoint(connector.base_url)
+            if self._test_transport is None and not self._is_mock_transport and self._peer_ip_provider is None:
                 raise ValueError("BUSINESS_CONNECTOR_PEER_UNVERIFIABLE")
             if self._reset_peer_ip is not None:
                 self._reset_peer_ip()
@@ -262,7 +274,8 @@ class ToolGateway:
                     timeout=self._effective_timeout(10.0),
                     follow_redirects=False,
                 )
-                self._verify_connected_peer(allowed_peer_ips)
+                if self._test_transport is None:
+                    self._verify_connected_peer(allowed_peer_ips)
                 break
             except httpx.TransportError:
                 if attempt + 1 == attempts:
@@ -314,7 +327,7 @@ class ToolGateway:
         return timeout
 
     @staticmethod
-    def _fixed_origin(base_url: str) -> str:
+    def _fixed_origin(base_url: str, *, allow_loopback: bool = False) -> str:
         """connector 只能是无路径、查询或片段的 HTTP(S) origin。"""
         parsed = urlsplit(base_url)
         if (
@@ -333,7 +346,8 @@ class ToolGateway:
             raise ValueError("BUSINESS_CONNECTOR_URL_INVALID") from exc
         if port is not None and not 0 < port < 65536:
             raise ValueError("BUSINESS_CONNECTOR_URL_INVALID")
-        ToolGateway._reject_unsafe_host(parsed.hostname)
+        if not allow_loopback:
+            ToolGateway._reject_unsafe_host(parsed.hostname)
         return f"{parsed.scheme}://{parsed.netloc}"
 
     @staticmethod

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -125,6 +126,31 @@ class ModelUsageService:
             update(AgentModelUsage)
             .where(AgentModelUsage.usage_id == usage_id, AgentModelUsage.status == "reserved")
             .values(prompt_id=prompt_id, prompt_version=prompt_version)
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        return updated.rowcount == 1  # type: ignore[attr-defined]
+
+    def attach_thinking_summary(self, usage_id: str, summary: Mapping[str, object]) -> bool:
+        """仅写入受控开关/预算摘要，拒绝 reasoning、模型文本或任意自由字段。"""
+        expected = {
+            "thinking_enabled", "max_output_tokens", "input_token_budget", "normalization_version",
+        }
+        if set(summary) != expected or (
+            not isinstance(summary.get("thinking_enabled"), bool)
+            or isinstance(summary.get("max_output_tokens"), bool)
+            or not isinstance(summary.get("max_output_tokens"), int)
+            or isinstance(summary.get("input_token_budget"), bool)
+            or not isinstance(summary.get("input_token_budget"), int)
+            or summary.get("max_output_tokens", 0) <= 0
+            or summary.get("input_token_budget", 0) <= 0
+            or summary.get("normalization_version") != "v1"
+        ):
+            raise ValueError("THINKING_SUMMARY_INVALID")
+        updated = self._session.execute(
+            update(AgentModelUsage)
+            .where(AgentModelUsage.usage_id == usage_id, AgentModelUsage.status == "reserved")
+            .values(thinking_summary_json=dict(summary))
             .execution_options(synchronize_session=False)
         )
         self._session.flush()

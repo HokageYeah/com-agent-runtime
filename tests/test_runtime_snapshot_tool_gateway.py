@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.core.tool_security import tool_signature
+from app.runtime.test_harness import LoopbackTestTransport, RuntimeHarnessConfig
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.schemas.agent_package import ToolManifest
 
@@ -44,6 +45,20 @@ def test_gateway_rejects_unsafe_connector_endpoint_at_construction(base_url: str
             {"c": BusinessConnector(base_url, "agent-runtime", "dev", "secret")},
             httpx.Client(),
         )
+
+
+def test_harness_explicitly_allows_loopback_mock_connector() -> None:
+    """生产构造仍拒绝 loopback；只有测试 harness 可显式开启此例外。"""
+    config = RuntimeHarnessConfig(
+        session_factory=object(), trusted_clients={"test": {"keys": {"test": "random"}}},
+        runtime_id="runtime-test", mock_base_url="http://127.0.0.1:8765",
+    )
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://127.0.0.1:8765", "runtime-test", "test", "random")},
+        httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))),
+        test_transport=LoopbackTestTransport(config),
+    )
+    assert gateway is not None
 
 
 def test_gateway_rejects_connector_domain_resolved_to_private_ip(

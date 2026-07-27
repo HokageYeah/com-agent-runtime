@@ -312,6 +312,8 @@ class AgentModelUsage(Base, TimestampMixin):
     # Provider 请求身份只用于核对同一物理 attempt 的迟到计量；不保存响应正文。
     provider_request_id: Mapped[str | None] = mapped_column(String(120))
     capability_snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # 只保存由受控 policy/route 派生的开关和预算，绝不保存隐藏推理或模型原文。
+    thinking_summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     prompt_id: Mapped[str | None] = mapped_column(String(120))
     prompt_version: Mapped[str | None] = mapped_column(String(40))
     provider: Mapped[str | None] = mapped_column(String(80))

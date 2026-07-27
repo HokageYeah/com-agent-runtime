@@ -12,13 +12,16 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
 from app.models import AgentDefinition, AgentModelUsage, AgentRun, AgentStep
 from app.runtime.interfaces import LeaseContext
 from app.runtime.memoir_model_gateway import MemoirModelGatewayAdapter
 from app.runtime.model_gateway import (
     ModelCallContext,
+    ModelCapabilityEvaluator,
     ModelGateway,
+    ModelPolicyRegistry,
     ModelRoute,
     ModelRouteRegistry,
     PermitResult,
@@ -26,6 +29,7 @@ from app.runtime.model_gateway import (
 )
 from app.runtime.policy_engine import PolicyEngine
 from app.runtime.prompt_registry import PromptDefinition
+from app.runtime.state import AgentState
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
 from app.services.lease_service import LeaseService
@@ -246,6 +250,16 @@ def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary(
         def __init__(self) -> None:
             self.prompt: PromptDefinition | None = None
 
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 300
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
         def call(
             self,
             context: ModelCallContext,
@@ -257,11 +271,10 @@ def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary(
             assert context.run_id == "run-1"
             assert context.step_id == "step-1"
             assert route_id == "summary"
-            assert request == {
-                "prompt_id": "highlight-extract",
-                "prompt_version": "v1",
-                "model_policy": "strict",
-            }
+            assert isinstance(request, dict)
+            assert request["messages"][0]["role"] == "system"
+            assert request["messages"][1]["role"] == "human"
+            assert "forged" not in str(request)
             self.prompt = prompt
             return type("Result", (), {"status": "succeeded", "data": {}})()
 
@@ -314,6 +327,37 @@ def test_memoir_adapter_rejects_ambiguous_authoritative_step() -> None:
 
     assert result.status == "aborted_before_send"
     assert gateway.calls == 0
+
+
+def test_memoir_runner_uses_template_when_adapter_capability_is_unavailable_before_provider() -> None:
+    """策略与 route 不匹配必须在适配器边界降级，Provider 不得收到任何请求。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+    provider = RecordingProvider()
+    adapter = MemoirModelGatewayAdapter(
+        session,
+        _gateway(session, RevokingLease([True]), provider),
+        {"extract_highlights": "summary"},
+        lease,
+    )
+    state = AgentState(
+        sanitized_material={"materials": [
+            {"source_ref": "diary:diary-1", "type": "diary", "sensitive": False, "summary": "摘要"},
+        ]},
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=adapter).run_node(
+        {"node_id": "extract_highlights"}, run, state,
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": True}
+    assert state.highlights == {"source_refs": ["diary:diary-1"], "mode": "template"}
+    assert provider.calls == 0
 
 
 def test_cancellation_after_acquire_does_not_call_provider() -> None:
@@ -1376,6 +1420,30 @@ def test_gateway_records_registered_prompt_reference_without_template_body() -> 
     assert usage is not None
     assert usage.prompt_id == "highlight-extract"
     assert usage.prompt_version == "v1"
+    assert usage.thinking_summary_json == {
+        "thinking_enabled": False,
+        "max_output_tokens": 512,
+        "input_token_budget": 7680,
+        "normalization_version": "v1",
+    }
+    assert "private template" not in str(usage.thinking_summary_json)
+
+
+def test_thinking_summary_rejects_reasoning_text_before_persistence() -> None:
+    session, lease = _run_session()
+    usage_id = ModelUsageService(session).create_running(_context(session, lease), _route(), "permit")
+
+    with pytest.raises(ValueError, match="THINKING_SUMMARY_INVALID"):
+        ModelUsageService(session).attach_thinking_summary(usage_id, {
+            "thinking_enabled": True,
+            "max_output_tokens": 512,
+            "input_token_budget": 7680,
+            "normalization_version": "v1",
+            "reasoning": "不得保存的隐藏推理",
+        })
+
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == usage_id))
+    assert usage is not None and usage.thinking_summary_json is None
 
 
 def test_gateway_disables_private_first_prompt_without_private_route_capability() -> None:
@@ -1397,6 +1465,28 @@ def test_gateway_disables_private_first_prompt_without_private_route_capability(
     assert (result.status, result.error_code) == ("capability_disabled", "MODEL_CAPABILITY_UNAVAILABLE")
     assert provider.calls == 0
     assert session.scalar(select(AgentModelUsage)) is None
+
+
+def test_model_capability_evaluator_rejects_residency_window_and_redis_without_side_effects() -> None:
+    """能力发现只计算可信配置；任一前置条件不满足都不能宣称模型可用。"""
+    prompt = PromptDefinition(
+        prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+        input_schema="input", output_schema="output", model_policy="strict",
+        guardrail_policy="private_first", status="active", template="trusted template",
+    )
+    evaluator = ModelCapabilityEvaluator(ModelPolicyRegistry.default())
+    public_route = _route()
+    private_route = ModelRoute(**{
+        **public_route.__dict__,
+        "capabilities": frozenset({"structured_output", "private_residency"}),
+        "data_residency": "private",
+        "max_context_tokens": 520,
+        "max_output_tokens": 512,
+    })
+
+    assert evaluator.available(public_route, prompt, estimated_input_tokens=0, redis_available=True) is False
+    assert evaluator.available(private_route, prompt, estimated_input_tokens=9, redis_available=True) is False
+    assert evaluator.available(private_route, prompt, estimated_input_tokens=8, redis_available=False) is False
 
 
 def test_gateway_disables_prompt_when_trusted_context_exceeds_route_window() -> None:

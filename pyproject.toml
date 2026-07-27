@@ -6,7 +6,7 @@ authors = [
     {name = "yuye",email = "18838280615@163.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<4.0"
 dependencies = [
     "fastapi>=0.103.0",
     "uvicorn>=0.23.2",
@@ -27,6 +27,7 @@ dependencies = [
     "cryptography>=43.0.0",
     # AgentPackage 使用 YAML 描述可信工作流、工具与策略清单。
     "PyYAML>=6.0.0",
+    "langchain-core (>=1.5.1,<2.0.0)",
 ]
 
 [tool.poetry]

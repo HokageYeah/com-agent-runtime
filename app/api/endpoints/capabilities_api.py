@@ -7,12 +7,39 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.contracts.api import CONTRACT_VERSION
 from app.core.security import SignatureError, verify_signature
+from app.runtime.model_gateway import (
+    ModelCapabilityEvaluator,
+    ModelPolicyRegistry,
+    ProviderTrafficController,
+)
 from app.services.agent_package_service import (
     AgentPackageService,
     AgentPackageValidationError,
 )
 
 router = APIRouter(tags=["runtime"])
+
+
+def _model_capability_summary(runtime_settings: object) -> tuple[bool, list[str]]:
+    """只返回逻辑模型能力；配置或 Redis 任一异常都关闭增强能力。"""
+    try:
+        from redis import Redis
+
+        routes = tuple(runtime_settings.model_routes)  # type: ignore[attr-defined]
+        redis_url = runtime_settings.RUNTIME_REDIS_URL  # type: ignore[attr-defined]
+        if not routes or not isinstance(redis_url, str) or not redis_url:
+            return False, []
+        traffic = ProviderTrafficController(Redis.from_url(redis_url))
+        redis_available = any(
+            traffic.preflight_circuit(route).status == "circuit_available" for route in routes
+        )
+        policies = ModelCapabilityEvaluator(ModelPolicyRegistry.default()).available_policy_names(
+            routes, redis_available=redis_available,
+        )
+        return bool(policies), policies
+    except Exception:
+        # capability 响应不得因 Redis/部署配置问题泄露异常或 Provider 细节。
+        return False, []
 
 
 @router.get("/capabilities")
@@ -42,17 +69,18 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
         logging.error("Runtime capabilities 无法加载 MemoirAgent 摘要")
         raise HTTPException(status_code=503, detail="agent package unavailable") from exc
     logging.info("Runtime capability 查询通过 client_id=%s", client_id)
+    model_enhancement_available, model_policies = _model_capability_summary(
+        request.app.state.settings
+    )
     return {
         "contract_version": CONTRACT_VERSION,
         "package_digest": package.package_digest,
         "agents": [{"agent_id": package.agent_id, "version": package.version}],
-        "model_policies": [
-            "reasoning",
-            "balanced",
-            "emotional_writing",
-            "cheap_structured",
-            "strict",
-            "private_first",
-        ],
-        "capabilities": {"workflow_agent": True, "native_sse": False, "media": False},
+        "model_policies": model_policies,
+        "capabilities": {
+            "workflow_agent": True,
+            "native_sse": False,
+            "media": False,
+            "model_enhancement_available": model_enhancement_available,
+        },
     }

@@ -220,6 +220,10 @@ class ModelPolicyRegistry:
         except KeyError as exc:
             raise ValueError("MODEL_POLICY_UNAVAILABLE") from exc
 
+    def values(self) -> tuple[ModelPolicy, ...]:
+        """返回冻结的逻辑策略，不暴露任何 Provider 配置。"""
+        return tuple(self._policies.values())
+
 
 class ModelRouteRegistry:
     """注册时拒绝重复 ID，避免请求通过 route 覆盖安全边界。"""
@@ -241,6 +245,68 @@ class ModelRouteRegistry:
     @classmethod
     def from_config(cls, configured_routes: list[Mapping[str, Any]]) -> ModelRouteRegistry:
         return cls([ModelRoute.from_mapping(route) for route in configured_routes])
+
+
+class ModelCapabilityEvaluator:
+    """无副作用地计算可信 Prompt 能否使用受控 route。
+
+    Redis 可用性由调用边界探测后以布尔值传入，避免能力计算本身触网或泄露 route 细节。
+    """
+
+    def __init__(self, policies: ModelPolicyRegistry) -> None:
+        self._policies = policies
+
+    def available(
+        self,
+        route: ModelRoute,
+        prompt: PromptDefinition | None,
+        *,
+        estimated_input_tokens: int,
+        redis_available: bool,
+    ) -> bool:
+        if not redis_available or prompt is None or estimated_input_tokens < 0:
+            return False
+        try:
+            policies = (
+                self._policies.get(prompt.model_policy),
+                self._policies.get(prompt.guardrail_policy),
+            )
+        except ValueError:
+            return False
+        required_capabilities = frozenset().union(
+            *(policy.required_capabilities for policy in policies),
+        )
+        model_policy = policies[0]
+        if model_policy.thinking_enabled:
+            required_capabilities |= {"thinking"}
+        if model_policy.requires_vision:
+            required_capabilities |= {"vision"}
+        return (
+            required_capabilities.issubset(route.capabilities)
+            and ("private_residency" not in required_capabilities or route.data_residency == "private")
+            and model_policy.max_output_tokens <= route.max_output_tokens
+            and estimated_input_tokens + model_policy.max_output_tokens <= route.max_context_tokens
+        )
+
+    def available_policy_names(
+        self, routes: tuple[ModelRoute, ...], *, redis_available: bool,
+    ) -> list[str]:
+        """生成可公开的逻辑策略名，不返回 route、Provider 或端点。"""
+        if not redis_available:
+            return []
+        return sorted(
+            policy.name
+            for policy in self._policies.values()
+            if any(
+                policy.required_capabilities.issubset(route.capabilities)
+                and ("private_residency" not in policy.required_capabilities or route.data_residency == "private")
+                and policy.max_output_tokens <= route.max_output_tokens
+                and policy.max_output_tokens <= route.max_context_tokens
+                and (not policy.thinking_enabled or "thinking" in route.capabilities)
+                and (not policy.requires_vision or "vision" in route.capabilities)
+                for route in routes
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -474,6 +540,7 @@ class ModelGateway:
         *,
         call_guard: ModelCallGuard | None = None,
         model_policies: ModelPolicyRegistry | None = None,
+        capability_evaluator: ModelCapabilityEvaluator | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -485,6 +552,7 @@ class ModelGateway:
         self._policy = policy_engine
         self._call_guard = call_guard or _AllowModelCalls()
         self._model_policies = model_policies or ModelPolicyRegistry.default()
+        self._capability_evaluator = capability_evaluator or ModelCapabilityEvaluator(self._model_policies)
         self._sleep = sleep
         self._monotonic = monotonic
 
@@ -530,6 +598,28 @@ class ModelGateway:
             )
             route = self._routes.get(fallback_id)
 
+    def context_token_budget(self, route_id: str, prompt: PromptDefinition) -> int:
+        """返回策略冻结后的输入窗口；不满足时在 Provider 前 fail-closed。"""
+        route = self._routes.get(route_id)
+        policy = self._model_policies.get(prompt.model_policy)
+        if policy.max_output_tokens > route.max_output_tokens:
+            raise ValueError("MODEL_CONTEXT_BUDGET_UNAVAILABLE")
+        budget = route.max_context_tokens - policy.max_output_tokens
+        if budget <= 0:
+            raise ValueError("MODEL_CONTEXT_BUDGET_UNAVAILABLE")
+        return budget
+
+    def capability_available(
+        self, route_id: str, prompt: PromptDefinition, estimated_input_tokens: int
+    ) -> bool:
+        """暴露不含 Provider 细节的 Prompt/route 能力判定，供调用前安全降级。"""
+        route = self._routes.get(route_id)
+        traffic_available = self._traffic.preflight_circuit(route).status == "circuit_available"
+        return self._capability_evaluator.available(
+            route, prompt, estimated_input_tokens=estimated_input_tokens,
+            redis_available=traffic_available,
+        )
+
     @classmethod
     def _wait_within_execution_window(
         cls,
@@ -555,7 +645,7 @@ class ModelGateway:
         route_id = route.route_id
         if route_id not in context.allowed_route_ids:
             return ModelGatewayResult("route_not_allowed")
-        if not self._route_supports_prompt(route, context, prompt):
+        if not self._route_supports_prompt(route, context.estimated_input_tokens, prompt):
             logging.info(
                 "模型 route 能力不足 route_id=%s code=MODEL_CAPABILITY_UNAVAILABLE",
                 route_id,
@@ -608,8 +698,19 @@ class ModelGateway:
         # 仅把受注册表校验过的 id/version 关联到预留 usage；禁止写入模板正文。
         if prompt is not None:
             attach_prompt_ref = getattr(self._usage, "attach_prompt_ref", None)
-            if not callable(attach_prompt_ref) or not attach_prompt_ref(
-                usage_id, prompt.prompt_id, prompt.version
+            attach_thinking_summary = getattr(self._usage, "attach_thinking_summary", None)
+            model_policy = self._model_policies.get(prompt.model_policy)
+            thinking_summary = {
+                "thinking_enabled": model_policy.thinking_enabled,
+                "max_output_tokens": model_policy.max_output_tokens,
+                "input_token_budget": route.max_context_tokens - model_policy.max_output_tokens,
+                "normalization_version": "v1",
+            }
+            if (
+                not callable(attach_prompt_ref)
+                or not callable(attach_thinking_summary)
+                or not attach_prompt_ref(usage_id, prompt.prompt_id, prompt.version)
+                or not attach_thinking_summary(usage_id, thinking_summary)
             ):
                 self._usage.cancel_reservation(usage_id)
                 return ModelGatewayResult("aborted_before_send")
@@ -748,32 +849,14 @@ class ModelGateway:
     def _route_supports_prompt(
         self,
         route: ModelRoute,
-        context: ModelCallContext,
+        estimated_input_tokens: int,
         prompt: PromptDefinition | None,
     ) -> bool:
-        """校验可信 Prompt 所需能力和 token 窗口；不匹配时不得尝试其它 Provider。"""
+        """内部调用已完成流控预检；统一复用无副作用 capability 判定。"""
         if prompt is None:
             return True
-        try:
-            model_policy = self._model_policies.get(prompt.model_policy)
-            guardrail_policy = self._model_policies.get(prompt.guardrail_policy)
-        except ValueError:
-            return False
-        required_capabilities = (
-            model_policy.required_capabilities | guardrail_policy.required_capabilities
-        )
-        if model_policy.thinking_enabled:
-            required_capabilities = required_capabilities | {"thinking"}
-        if model_policy.requires_vision:
-            required_capabilities = required_capabilities | {"vision"}
-        if not required_capabilities.issubset(route.capabilities):
-            return False
-        if model_policy.max_output_tokens > route.max_output_tokens:
-            return False
-        # estimated_input_tokens 仅来自权威 Step 摘要；prompt/业务输入无法抬高窗口。
-        return (
-            context.estimated_input_tokens + model_policy.max_output_tokens
-            <= route.max_context_tokens
+        return self._capability_evaluator.available(
+            route, prompt, estimated_input_tokens=estimated_input_tokens, redis_available=True,
         )
 
     @staticmethod
