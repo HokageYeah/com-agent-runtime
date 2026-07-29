@@ -406,7 +406,11 @@ def _generation_status(archive: MemoryArchive) -> str:
     terminal_or_active = {"running", "failed", "partial", "cancelled"}
     if archive.content_status in terminal_or_active:
         return archive.content_status
-    return archive.enhancement_status if archive.enhancement_status != "not_started" else archive.content_status
+    return (
+        archive.enhancement_status
+        if archive.enhancement_status != "disabled"
+        else archive.content_status
+    )
 
 
 def _scene_dto(scene: MemoryScene) -> dict[str, object]:

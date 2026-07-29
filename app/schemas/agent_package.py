@@ -20,6 +20,8 @@ class WorkflowNodeDefinition(PackageSchema):
     next_nodes: list[str] = Field(default_factory=list)
     prompt_ref: str | None = None
     can_wait_for_human: bool = False
+    # partial 只允许由发布完成后的非关键后处理节点触发；默认始终为主链节点。
+    optional: bool = False
 
 
 class ToolManifest(PackageSchema):
@@ -27,6 +29,8 @@ class ToolManifest(PackageSchema):
 
     name: str
     version: str
+    # disabled 契约可随 Package 预留，但 Gateway 必须在解析网络注册前拒绝调用。
+    enabled: bool = True
     connector_id: str | None = None
     method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] | None = None
     relative_path: str | None = None

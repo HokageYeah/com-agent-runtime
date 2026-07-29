@@ -31,3 +31,20 @@ class RunExecutor(Protocol):
     def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult: ...
 
     def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult: ...
+
+
+class TrafficEventRecorder(Protocol):
+    """仅记录固定流量维度；接口刻意不接受 prompt、payload 或异常原文。"""
+
+    def record(
+        self, event_type: str, route_id: str, result_code: str, *, occurred_at: datetime | None = None,
+    ) -> None: ...
+
+
+class NullTrafficEventRecorder:
+    """未装配持久账本的纯单元调用点保持无副作用。"""
+
+    def record(
+        self, event_type: str, route_id: str, result_code: str, *, occurred_at: datetime | None = None,
+    ) -> None:
+        del event_type, route_id, result_code, occurred_at

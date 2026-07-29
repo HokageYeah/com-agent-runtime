@@ -40,13 +40,16 @@ class RunQueueService:
             return False
         result = (
             self._executor.resume(run_id, context)
-            if status == "waiting_human"
+            if status in {"waiting_human", "partial"}
             else self._executor.run(run_id, context)
         )
         terminal_states = {"succeeded", "partial", "failed", "cancelled"}
         if result.status in terminal_states:
             # Task 6 WorkflowExecutor 返回终态时统一由 lease 服务条件收敛。
-            self._lease.finish(result, context)
+            if not self._lease.finish(result, context):
+                # 外部调用在执行中收到 cancel/purge 后，迟到结果不可结算；但同一
+                # fencing token 可释放 claimed 占用，使 Reconciler 立即物理清理。
+                self._lease.finish_after_invalid_boundary(run_id, context)
         elif self._is_draining():
             # 执行器返回代表一个可安全停顿的边界。此时停止续租，由 reaper
             # 回到 queued 后交给下一 Worker；Admission 仍保留到 reaper 原子迁移。

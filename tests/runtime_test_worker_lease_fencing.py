@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentRun, RuntimeOutboxEvent
+from app.models import AgentDefinition, AgentRun, RuntimeOutboxEvent
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.services.lease_service import LeaseService
 from app.services.run_queue_service import RunQueueService
@@ -92,6 +92,39 @@ def test_old_lease_context_cannot_write_after_reaper_fences_it() -> None:
 
     assert lease.can_write("run_fenced", old_context) is False
     assert lease.can_write("run_fenced", new_context) is True
+
+
+def test_revoked_package_cannot_write_with_an_otherwise_valid_lease() -> None:
+    """Package 撤销必须阻断 checkpoint、artifact 与工具结果共用的写闸。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add_all([
+        AgentRun(
+            run_id="revoked-write-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+            authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(minutes=1), run_deadline_at=now + timedelta(days=1),
+        ),
+        AgentDefinition(
+            agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+            definition_json={}, package_digest="sha256:test", contract_version="1.0.0",
+            status="revoked", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+    ])
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker", fencing_token=1,
+        lease_expires_at=now + timedelta(minutes=1), privacy_version=1,
+        authorization_version=1,
+    )
+
+    assert LeaseService(session).can_write("revoked-write-run", context) is False
 
 
 def test_heartbeat_refreshes_the_same_mutable_lease_context() -> None:

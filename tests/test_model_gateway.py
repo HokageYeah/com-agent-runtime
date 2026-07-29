@@ -85,6 +85,14 @@ def _route() -> ModelRoute:
     )
 
 
+def _private_route() -> ModelRoute:
+    return ModelRoute(**{
+        **_route().__dict__,
+        "capabilities": frozenset({"structured_output", "private_residency"}),
+        "data_residency": "private",
+    })
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
@@ -294,6 +302,370 @@ def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary(
         "prompt_version": gateway.prompt.version,
         "model_policy": gateway.prompt.model_policy,
     })
+
+
+def test_memoir_adapter_uses_versioned_repair_prompt_and_untrusted_data_slot() -> None:
+    """原始候选只能短暂进入 repair 的 human data 槽，不能覆盖可信 Prompt。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.prompt: PromptDefinition | None = None
+            self.request: object = None
+
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 300
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            self.prompt = prompt
+            self.request = request
+            return type(
+                "Result",
+                (),
+                {"status": "succeeded", "data": {"source_refs": ["diary:d-1"]}},
+            )()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"extract_highlights": "summary"}, lease,  # type: ignore[arg-type]
+    ).repair(
+        "run-1",
+        "extract_highlights",
+        {
+            "prompt_id": "highlight-extract",
+            "prompt_version": "v1",
+            "model_policy": "strict",
+            "context": {},
+            "input": {"source_refs": ["diary:d-1"]},
+        },
+        "not-json",
+    )
+
+    assert result.status == "succeeded"
+    assert gateway.prompt is not None
+    assert (gateway.prompt.prompt_id, gateway.prompt.version) == (
+        "structured-output-repair",
+        "v1",
+    )
+    assert isinstance(gateway.request, dict)
+    messages = gateway.request["messages"]
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "human"
+
+
+def test_memoir_repair_creates_separate_usage_permit_and_prompt_attempt() -> None:
+    """首次候选与 repair 必须是两个独立物理 attempt，且账本不保存候选正文。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class SequenceProvider(RecordingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self._responses = iter(
+                ["x" * 800, {"source_refs": ["diary:diary-1"]}],
+            )
+
+        def call(
+            self, route: ModelRoute, request: object, *, timeout_seconds: float,
+        ) -> object:
+            self.calls += 1
+            return next(self._responses)
+
+    provider = SequenceProvider()
+    redis = FakeRedis()
+    adapter = MemoirModelGatewayAdapter(
+        session,
+        ModelGateway(
+            ModelRouteRegistry([_private_route()]),
+            ProviderTrafficController(redis),
+            ModelUsageService(session),
+            RevokingLease([True] * 20),
+            provider,
+            PolicyEngine(session),
+        ),
+        {"extract_highlights": "summary"},
+        lease,
+    )
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=adapter).run_node(
+        {"node_id": "extract_highlights"}, run, state,
+    )
+
+    usages = session.scalars(
+        select(AgentModelUsage).order_by(AgentModelUsage.model_attempt),
+    ).all()
+    assert result == {"node_id": "extract_highlights", "fallback": False}
+    assert provider.calls == 2
+    assert [usage.model_attempt for usage in usages] == [1, 2]
+    assert [usage.prompt_id for usage in usages] == [
+        "highlight-extract",
+        "structured-output-repair",
+    ]
+    assert len({usage.permit_id for usage in usages}) == 2
+    assert usages[1].reserved_tokens > usages[0].reserved_tokens
+    assert "not-json" not in str(
+        [
+            usage.capability_snapshot_json
+            | {
+                "prompt_id": usage.prompt_id,
+                "prompt_version": usage.prompt_version,
+                "thinking_summary": usage.thinking_summary_json,
+            }
+            for usage in usages
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda run: setattr(run, "cancel_requested_at", datetime.now(UTC)),
+        lambda run: setattr(run, "privacy_state", "purge_requested"),
+        lambda run: setattr(
+            run,
+            "authorization_version",
+            run.authorization_version + 1,
+        ),
+        lambda run: setattr(run, "fencing_token", run.fencing_token + 1),
+        lambda run: setattr(run, "tenant_id", "other-tenant"),
+        lambda run: setattr(
+            run,
+            "capability_snapshot_json",
+            {
+                **run.capability_snapshot_json,
+                "required_model_data_residency": "public",
+            },
+        ),
+        lambda run: setattr(
+            run,
+            "capability_snapshot_json",
+            {
+                **run.capability_snapshot_json,
+                "allowed_model_route_ids": [],
+            },
+        ),
+    ],
+    ids=(
+        "cancel",
+        "purge",
+        "authorization",
+        "old_lease",
+        "tenant",
+        "residency",
+        "route",
+    ),
+)
+def test_memoir_repair_rechecks_execution_boundary_before_second_attempt(
+    change: object,
+) -> None:
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class InvalidatingProvider(RecordingProvider):
+        def call(
+            self, route: ModelRoute, request: object, *, timeout_seconds: float,
+        ) -> object:
+            self.calls += 1
+            current = session.scalar(
+                select(AgentRun).where(AgentRun.run_id == "run-1"),
+            )
+            assert current is not None
+            change(current)  # type: ignore[operator]
+            session.commit()
+            return "not-json"
+
+    provider = InvalidatingProvider()
+    governed_route = ModelRoute(**{
+        **_private_route().__dict__,
+        "allowed_tenant_ids": frozenset({"tenant"}),
+        "allowed_model_policies": frozenset(
+            {"balanced", "emotional_writing", "strict"},
+        ),
+    })
+    adapter = MemoirModelGatewayAdapter(
+        session,
+        ModelGateway(
+            ModelRouteRegistry([governed_route]),
+            ProviderTrafficController(FakeRedis()),
+            ModelUsageService(session),
+            RevokingLease([True] * 20),
+            provider,
+            PolicyEngine(session),
+        ),
+        {"extract_highlights": "summary"},
+        lease,
+    )
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=adapter).run_node(
+        {"node_id": "extract_highlights"}, run, state,
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": True}
+    assert provider.calls == 1
+    assert len(session.scalars(select(AgentModelUsage)).all()) == 1
+
+
+def test_memoir_repair_respects_call_budget_before_second_permit() -> None:
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    run.capability_snapshot_json = {
+        "allowed_model_route_ids": ["summary"],
+        "model_policy": {"max_model_calls": 1},
+    }
+    step.step_name = "extract_highlights"
+    session.commit()
+    provider = RecordingProvider("not-json")
+    redis = FakeRedis()
+    adapter = MemoirModelGatewayAdapter(
+        session,
+        ModelGateway(
+            ModelRouteRegistry([_private_route()]),
+            ProviderTrafficController(redis),
+            ModelUsageService(session),
+            RevokingLease([True] * 20),
+            provider,
+            PolicyEngine(session),
+        ),
+        {"extract_highlights": "summary"},
+        lease,
+    )
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=adapter).run_node(
+        {"node_id": "extract_highlights"}, run, state,
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": True}
+    assert provider.calls == 1
+    usages = session.scalars(select(AgentModelUsage)).all()
+    assert len(usages) == 1
+    assert redis.operations.count("acquire") == 1
+
+
+def test_memoir_repair_fails_closed_when_redis_breaks_between_attempts() -> None:
+    class BreakAfterFirstAttemptRedis(FakeRedis):
+        def __init__(self) -> None:
+            super().__init__()
+            self.broken = False
+
+        def eval(self, script: str, numkeys: int, *args: object) -> list[object]:
+            if self.broken:
+                raise ConnectionError("redis unavailable")
+            result = super().eval(script, numkeys, *args)
+            if args[0] == "settle":
+                self.broken = True
+            return result
+
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+    provider = RecordingProvider("not-json")
+    redis = BreakAfterFirstAttemptRedis()
+    adapter = MemoirModelGatewayAdapter(
+        session,
+        ModelGateway(
+            ModelRouteRegistry([_private_route()]),
+            ProviderTrafficController(redis),
+            ModelUsageService(session),
+            RevokingLease([True] * 20),
+            provider,
+            PolicyEngine(session),
+        ),
+        {"extract_highlights": "summary"},
+        lease,
+    )
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=adapter).run_node(
+        {"node_id": "extract_highlights"}, run, state,
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": True}
+    assert provider.calls == 1
+    assert len(session.scalars(select(AgentModelUsage)).all()) == 1
 
 
 def test_memoir_adapter_rejects_ambiguous_authoritative_step() -> None:
@@ -1573,6 +1945,129 @@ def test_gateway_uses_allowed_fallback_route_with_a_separate_permit_after_429() 
     assert sorted(usage.model_attempt for usage in usages) == [1, 2]
 
 
+def test_route_governance_rejects_in_trusted_priority_before_provider() -> None:
+    """紧急禁用必须先于租户、逻辑 policy 与部署 route allowlist 生效。"""
+    prompt = PromptDefinition(
+        prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+        input_schema="input", output_schema="output", model_policy="balanced",
+        guardrail_policy="strict", status="active", template="trusted template",
+    )
+    scenarios = [
+        (
+            {
+                "enabled": False,
+                "allowed_tenant_ids": frozenset({"other"}),
+                "allowed_model_policies": frozenset({"strict"}),
+            },
+            {"allowed_model_route_ids": []},
+            ("governance_denied", "MODEL_ROUTE_EMERGENCY_DISABLED"),
+        ),
+        (
+            {
+                "allowed_tenant_ids": frozenset({"other"}),
+                "allowed_model_policies": frozenset({"strict"}),
+            },
+            {"allowed_model_route_ids": []},
+            ("governance_denied", "MODEL_ROUTE_TENANT_DENIED"),
+        ),
+        (
+            {
+                "allowed_tenant_ids": frozenset({"tenant"}),
+                "allowed_model_policies": frozenset({"strict"}),
+            },
+            {"allowed_model_route_ids": []},
+            ("governance_denied", "MODEL_ROUTE_POLICY_DENIED"),
+        ),
+        (
+            {
+                "allowed_tenant_ids": frozenset({"tenant"}),
+                "allowed_model_policies": frozenset({"balanced"}),
+            },
+            {"allowed_model_route_ids": []},
+            ("route_not_allowed", None),
+        ),
+    ]
+
+    for route_overrides, snapshot, expected in scenarios:
+        session, lease = _run_session()
+        run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+        assert run is not None
+        run.capability_snapshot_json = snapshot
+        session.commit()
+        provider = RecordingProvider()
+        route = ModelRoute(**{**_route().__dict__, **route_overrides})
+
+        result = _gateway(
+            session, RevokingLease([True]), provider, route=route
+        ).call(
+            _context(session, lease), "summary", {"request": "private"}, prompt=prompt
+        )
+
+        assert (result.status, result.error_code) == expected
+        assert provider.calls == 0
+        assert session.scalar(select(AgentModelUsage)) is None
+
+
+def test_explicit_fallback_cannot_escape_tenant_or_policy_governance() -> None:
+    """部署 fallback 即使在 Run allowlist 中，也必须重新经过同一治理链。"""
+    class FallbackProvider:
+        def __init__(self) -> None:
+            self.route_ids: list[str] = []
+
+        def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
+            self.route_ids.append(route.route_id)
+            request_obj = httpx.Request("POST", "https://provider.example/v1/chat")
+            response = httpx.Response(
+                429, headers={"Retry-After": "999"}, request=request_obj
+            )
+            raise httpx.HTTPStatusError(
+                "rate limited", request=request_obj, response=response
+            )
+
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    assert run is not None
+    run.capability_snapshot_json = {"allowed_model_route_ids": ["primary", "fallback"]}
+    session.commit()
+    primary = ModelRoute(
+        **{
+            **_route().__dict__,
+            "route_id": "primary",
+            "fallback_route_id": "fallback",
+            "allowed_tenant_ids": frozenset({"tenant"}),
+            "allowed_model_policies": frozenset({"balanced"}),
+        }
+    )
+    fallback = ModelRoute(
+        **{
+            **_route().__dict__,
+            "route_id": "fallback",
+            "rate_limit_key": "provider:fallback",
+            "allowed_tenant_ids": frozenset({"other"}),
+            "allowed_model_policies": frozenset({"balanced"}),
+        }
+    )
+    prompt = PromptDefinition(
+        prompt_id="highlight-extract", version="v1", owner_agent="memoir_agent",
+        input_schema="input", output_schema="output", model_policy="balanced",
+        guardrail_policy="strict", status="active", template="trusted template",
+    )
+    provider = FallbackProvider()
+
+    result = ModelGateway(
+        ModelRouteRegistry([primary, fallback]), ProviderTrafficController(FakeRedis()),
+        ModelUsageService(session), RevokingLease([True] * 8), provider, PolicyEngine(session),
+    ).call(
+        _context(session, lease), "primary", {"request": "private"}, prompt=prompt
+    )
+
+    assert (result.status, result.error_code) == (
+        "governance_denied",
+        "MODEL_ROUTE_TENANT_DENIED",
+    )
+    assert provider.route_ids == ["primary"]
+
+
 def test_gateway_waits_once_within_deadline_then_reacquires_a_new_permit() -> None:
     """429 冷却未超过可信窗口时只等待一次，重试必须使用新的 permit。"""
     class RetryProvider:
@@ -1685,7 +2180,7 @@ def test_model_governance_denial_logs_exclude_request_body(caplog: pytest.LogCap
     assert "secret-token-456" not in caplog.text
 
 
-def test_created_run_freezes_server_routes_and_rejects_command_route_override() -> None:
+def test_created_run_freezes_server_route_and_residency_governance() -> None:
     session, _ = _run_session()
     session.add(AgentDefinition(
         agent_id="created-agent", version="1", runtime_type="workflow",
@@ -1693,11 +2188,23 @@ def test_created_run_freezes_server_routes_and_rejects_command_route_override() 
         package_digest="digest", contract_version="1", status="active",
         status_changed_at=datetime.now(UTC), status_changed_by="test", status_change_reason="fixture",
     ))
-    created = AgentRunService(session, trusted_model_route_ids=("summary",)).create(
+    created = AgentRunService(
+        session,
+        trusted_model_route_ids=("summary",),
+        required_model_data_residency="private",
+    ).create(
         CreateRunCommand(
             agent_id="created-agent", agent_version="1", business_type="memoir",
             business_id="business", start_mode="auto",
-            input={"allowed_model_route_ids": ["other"]}, callback_target_id="callback",
+            input={
+                "allowed_model_route_ids": ["other"],
+                "required_model_data_residency": "public",
+                "provider": "forged",
+                "model": "forged",
+                "base_url": "https://forged.invalid",
+                "key": "forged",
+            },
+            callback_target_id="callback",
             business_connector_id="connector",
         ), "caller", "tenant", "create-server-routes",
     )
@@ -1705,6 +2212,11 @@ def test_created_run_freezes_server_routes_and_rejects_command_route_override() 
     assert run is not None
     assert run.capability_snapshot_json is not None
     assert run.capability_snapshot_json["allowed_model_route_ids"] == ["summary"]
+    assert run.capability_snapshot_json["required_model_data_residency"] == "private"
+    assert all(
+        key not in run.capability_snapshot_json
+        for key in ("provider", "model", "base_url", "key")
+    )
     run.dispatch_state = "claimed"
     run.execution_attempt = 1
     run.lease_owner = "worker"
@@ -1721,7 +2233,13 @@ def test_created_run_freezes_server_routes_and_rejects_command_route_override() 
         authorization_version=1,
     )
     context = ModelCallContext.from_authoritative(session, run.run_id, "created-step", lease)
-    allowed = _route()
+    allowed = ModelRoute(
+        **{
+            **_route().__dict__,
+            "data_residency": "private",
+            "capabilities": frozenset({"structured_output", "private_residency"}),
+        }
+    )
     forbidden = ModelRoute(**{**allowed.__dict__, "route_id": "other"})
     redis = FakeRedis()
     provider = RecordingProvider()

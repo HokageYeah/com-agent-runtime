@@ -1,0 +1,26 @@
+# 仅 Task 12 本机验收使用；禁止用于开发、staging 或生产部署。
+name: agent-runtime-postgres-harness
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      POSTGRES_DB: ${POSTGRES_HARNESS_DB:-test_runtime}
+      POSTGRES_USER: ${POSTGRES_HARNESS_USER:-test_runtime}
+      # 密码只能由当前 shell 注入，禁止提交 .env 或把它写入测试输出。
+      POSTGRES_PASSWORD: ${POSTGRES_HARNESS_PASSWORD:?set POSTGRES_HARNESS_PASSWORD in the current shell}
+    ports:
+      # 只暴露回环端口，Runtime harness 不得访问局域网或生产 PostgreSQL。
+      - "127.0.0.1:${POSTGRES_HARNESS_PORT:-54329}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 5s
+    volumes:
+      - postgres_harness_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_harness_data:

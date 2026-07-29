@@ -20,6 +20,137 @@ git diff --check
 
 预期：pytest、Ruff、Mypy、diff 检查均成功，Alembic 只显示一个 head。
 
+全局运行观测只能读取 Run 状态、受控错误码和已汇总的评测/成本/耗时计数；可以以下命令单独校验这个边界：
+
+```bash
+poetry run pytest -q tests/test_observability_service.py
+```
+
+预期：报告只包含运行状态/错误码，admission/queue/dead-letter/purge/授权/语义失败的计数，以及评测、成本、耗时指标；测试会明确断言 prompt、正文、错误原文和工具载荷不会进入报告。
+
+流量账本的定向自动验证：
+
+```bash
+poetry run pytest -q tests/test_runtime_traffic_events.py tests/test_provider_traffic_controller.py
+```
+
+预期：`RuntimeTrafficEvent` 仅保存 event type、route ID、结果码、时间窗口和计数；SQLite 覆盖并发 UPSERT 与阈值首次告警，Redis 故障仍 fail-closed。显式配置 Docker PostgreSQL harness 后，`tests/test_runtime_postgres_harness.py` 还会用临时 schema 验证同一窗口聚合。
+
+执行接管与优雅停止的定向自动验证：
+
+```bash
+poetry run pytest -q \
+  tests/test_runtime_agent_run_service.py::test_partial_retry_accepts_only_post_publish_failed_optional_nodes \
+  tests/runtime_test_workflow_executor.py::test_executor_partial_resume_retries_only_failed_optional_node \
+  tests/runtime_test_workflow_executor.py::test_executor_draining_after_checkpoint_does_not_start_next_node \
+  tests/runtime_test_workflow_executor.py::test_executor_refuses_revoked_package_before_starting_any_node \
+  tests/runtime_test_worker_lease_fencing.py::test_queue_releases_lease_when_draining_begins_at_executor_safe_boundary \
+  tests/runtime_test_worker_entry.py::test_worker_signal_requests_drain_without_raising_or_terminating_inflight_work
+```
+
+预期：全部通过。`partial` 只能把发布后失败的 optional 节点重新入队；已完成的 `publish_document` 不会再次调用。收到 `SIGTERM/SIGINT` 后 Worker 只进入 draining：当前节点在可信 lease/deadline 窗口内返回，先写受控 Artifact 与加密 checkpoint，随后不启动新模型/工具或下一节点；lease 到期后 reaper 才能以新 fencing token 接管。Package revoked、cancel、privacy、authorization 或旧 fencing 任一失效时都不得启动或写入后续节点，且测试输出不含输入、prompt、模型内容或工具载荷。
+
+迟到副作用与 Tool 生命周期的定向自动验证：
+
+```bash
+poetry run pytest -q \
+  tests/test_memoir_publish_audit.py \
+  tests/test_tool_call_audit_service.py \
+  tests/runtime_test_run_queue_service.py \
+  tests/test_runtime_process_harness.py
+```
+
+预期：全部通过（受限环境不能绑定回环端口时 harness 用例会明确 skip）。业务 `409 IDEMPOTENCY_CONFLICT` 只能经同一稳定逻辑键的 `query_after_commit` 查询，并且返回的 `content_digest` 与本次规范化作品一致时才恢复成功；不一致仅保留 `error_code/error_type/retryable/safe_message` 等受控字段。`AgentToolCall.retention_until` 相对创建时间至少保留 30 天，记录中不含请求/响应正文。cancel/purge 在工具请求已发出后到达时，旧 Worker 仅释放匹配 fencing token 的 claimed 占用，迟到 Artifact、Checkpoint、Step、ToolCall 结果均不能恢复；随后 Reconciler 执行物理 purge。
+
+LangGraph 静态工作流与工具边界验证：
+
+```bash
+poetry run pytest -q \
+  tests/test_runtime_graph_builder.py \
+  tests/runtime_test_workflow_executor.py \
+  tests/test_runtime_snapshot_tool_gateway.py \
+  tests/test_tool_call_audit_service.py
+```
+
+预期：冻结的 `AgentPlan` 只能被编译为线性静态 `StateGraph`；分支、动态边、重复节点和畸形节点均在执行副作用前拒绝。图状态不含 Run 输入、prompt、模型结果或工具结果。副作用 HTTP Business Tool 的 `X-Agent-Tool-Attempt` 仅从已落库的权威 `AgentToolCall.tool_attempt` 生成；只读请求不得伪造该头。它不替代稳定幂等键或 generation/authorization/fencing 校验。Native Tool 只允许固定注册表中的 JSON repair、键名摘要和敏感字段扫描，记录为 `side_effect=false` 且审计不含输入/输出正文。失败审计仅保存 `error_code/error_type/retryable/safe_message/details_visible_to_model=false`。
+
+Task 7/8 授权拒绝审计与可信模型路由治理：
+
+```bash
+poetry run pytest -q \
+  tests/test_callback_service.py \
+  tests/test_runtime_snapshot_tool_gateway.py \
+  tests/test_model_gateway.py \
+  tests/runtime_test_worker_entry.py
+```
+
+预期：callback target 缺失、授权撤销、授权版本变化和 connector 禁用分别写入固定 reason code 的无内容 `RuntimeAuditEvent`；审计只含 Run/状态等受控摘要。模型 route 按“Runtime 紧急禁用 -> 租户/驻留 -> Agent logical policy -> 部署 route -> 显式 fallback”复核，primary 与 fallback 都不能绕过同一治理链；业务请求、Package 输入和 prompt 不能覆盖 provider、model、base URL、key 或 fallback 顺序。
+
+Task 8 结构化输出 one-shot repair 专项：
+
+```bash
+poetry run pytest -q \
+  tests/test_memoir_model_gateway.py \
+  tests/test_model_gateway.py \
+  -k repair
+```
+
+预期：当前为 `14 passed`。首次模型候选在本地 JSON repair、Schema 或确定性语义校验后仍无效时，只允许一次 `structured-output-repair@v1`；成功路径产生新的物理 `model_attempt`、独立 Redis permit 和 `AgentModelUsage`，并按有界 repair request 提高 token/成本预留。repair 前重新复核 cancel、purge、authorization、tenant、驻留、部署 route、旧 lease、调用预算、Redis 和 deadline；任一失效时不发送第二次 Provider 请求，repair 仍无效时直接模板降级。原始模型候选只进入短生命周期 untrusted data 槽，不进入 Store、日志、trace、callback、审计、Artifact、Checkpoint 或测试输出。
+
+Task 6.5/7 归档、Snapshot envelope 与媒体关闭合同：
+
+```bash
+poetry run pytest -q \
+  tests/test_memory_archive_snapshot.py \
+  tests/test_memory_snapshot_materializer.py \
+  tests/test_memory_agent_callback_state.py \
+  tests/test_memory_contract_migration.py \
+  tests/test_memoir_snapshot_runner.py \
+  tests/test_memoir_agent_e2e.py \
+  tests/test_runtime_agent_package_loader.py \
+  tests/test_runtime_snapshot_tool_gateway.py
+poetry run alembic heads
+```
+
+预期：全部测试通过，Alembic 只显示 `20260729_1000 (head)`。旧 `enhancement_status=not_started` 被迁为 `disabled`，未知状态和同一 `archive_id + generation_epoch` 的第二个 RunRef 被数据库拒绝；Archive 固化 partner 昵称/头像资产引用与 bound/unbound 时间，Snapshot 只保存加密的版本化白名单 envelope。发布完整作品只推进 `content_status=succeeded + published_revision`，不得改写 enhancement。`memory.enqueue_tts` 保持 `enabled=false`；`enqueue_media_tasks` 的 AgentStep 为 `skipped`、reason 为 `CAPABILITY_DISABLED`，`media_tasks=[]`，且不会调用 connector。
+
+Snapshot 版本兼容与旧 revision 迟到媒体可单独快速回归：
+
+```bash
+poetry run pytest -q tests/test_memory_archive_snapshot.py \
+  -k "snapshot_service_migrates or snapshot_service_rejects or late_media"
+```
+
+预期：`4 passed`。旧的无版本 `diaries/bets` 密文负载只在读取结果中单向投影为 `1.0.0` envelope，数据库中的密文和 digest 不发生 writeback；未知未来 `schema_major` 在读取和发布共用授权入口返回固定 `MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED`。旧 document 的迟到媒体即使落库，也不会被当前 `published_revision` 的播放器查询拼入。
+
+迁移前先在隔离数据库备份并检查旧状态分布：
+
+```sql
+SELECT content_status, enhancement_status, COUNT(*)
+FROM memory_archives
+GROUP BY content_status, enhancement_status
+ORDER BY content_status, enhancement_status;
+```
+
+预期：升级前除历史 `not_started` 外不应出现计划枚举之外的状态；若存在未知状态，停止升级并先清理数据，不能把未知值猜成 `disabled`。升级后重新执行查询，只应看到 `content_status` 的 `baseline/pending/running/waiting_human/succeeded/failed/cancelled` 与 `enhancement_status` 的 `disabled/pending/running/succeeded/partial/failed`。
+
+## Redis 与延迟 Provider 本机回归
+
+以下命令只使用回环 Docker Redis 和测试 Provider mock；不要复用开发或生产 Redis。
+
+```bash
+docker compose -f docker-compose.redis-harness.yml up -d --wait
+export AGENT_RUNTIME_TEST_REDIS_URL="redis://127.0.0.1:56379/15"
+poetry run pytest -q \
+  tests/test_runtime_redis_harness.py \
+  tests/test_runtime_delayed_provider_mock.py \
+  tests/test_model_gateway.py
+unset AGENT_RUNTIME_TEST_REDIS_URL
+docker compose -f docker-compose.redis-harness.yml down -v
+```
+
+预期：Redis harness 不再 skip；两个 `ProviderTrafficController` 共享并发 permit 与 `Retry-After` 冷却，Redis 故障仍返回 fail-closed。延迟 Provider mock 先报告一次已收到模型请求的无正文聚合状态，cancel/purge 或 lease 失效后的响应只能被 Gateway 丢弃并结算无内容 usage，不能恢复 Artifact、Checkpoint、Step、ToolCall 或业务 revision。`down -v` 后容器与测试数据均不存在。
+
 ## 隔离运行验证
 
 1. 以临时数据库运行 `poetry run alembic upgrade head`。
@@ -33,3 +164,107 @@ git diff --check
 ## 进程回收
 
 测试 harness 必须为每个子进程设置有限超时；无论成功、失败或断言失败，都在 finally 中 terminate、wait，并清理临时目录。超时视为失败，禁止留下后台进程或复用临时数据库。
+
+## Docker PostgreSQL 进程级验收
+
+SQLite 仅用于 API、mock 与单进程装配测试；它不具备 reconciler 多 Session fencing 所需的锁语义。Task 12 使用 [docker-compose.postgres-harness.yml](docker-compose.postgres-harness.yml) 在 `127.0.0.1:54329` 提供独立 PostgreSQL 17，绝不使用 Homebrew 或宿主机 PostgreSQL。
+
+1. 验证 Python 驱动与 Docker：
+
+```bash
+poetry run python -c "import psycopg; print(psycopg.__version__)"
+docker compose version
+```
+
+预期：两条命令均成功；不要在终端输出、截图、日志或文档中写入测试密码。
+
+2. 在当前 shell 交互设置一次测试密码并启动 PostgreSQL 与隔离 Redis：
+
+```bash
+read -s POSTGRES_HARNESS_PASSWORD
+export POSTGRES_HARNESS_PASSWORD
+docker compose -f docker-compose.postgres-harness.yml up -d --wait
+docker compose -f docker-compose.redis-harness.yml up -d --wait
+docker compose -f docker-compose.postgres-harness.yml ps
+```
+
+第一条命令会等待输入：由操作者输入任意仅本机测试使用的**URL 安全**随机密码（只用字母、数字、`_`、`-`）后按回车，终端不会回显字符；它不是项目预置密码，也不应写入命令历史或仓库。第二条命令仅把该值导出给当前 shell，Compose 用它创建 `test_runtime` 数据库用户。若曾以其他密码启动过该 Compose 项目，必须先执行第 4 步的 `down -v`，否则旧 volume 会保留原密码。
+
+预期：`postgres` 状态为 `running (healthy)`；端口仅映射为 `127.0.0.1:54329`。Compose 固定使用 `test_runtime` 用户与数据库，密码不写入仓库。执行 `down -v` 后数据库 volume 被删除，下次启动可设置新密码。
+
+3. 运行 PostgreSQL harness（含真实 API、Worker、Reconciler 与回环业务 mock 的闭环）：
+
+```bash
+export PGPASSWORD="${POSTGRES_HARNESS_PASSWORD}"
+export AGENT_RUNTIME_TEST_POSTGRES_DSN="postgresql+psycopg://test_runtime@127.0.0.1:54329/test_runtime"
+export AGENT_RUNTIME_TEST_REDIS_URL="redis://127.0.0.1:56379/15"
+poetry run pytest -q \
+  tests/test_runtime_postgres_harness.py \
+  tests/test_runtime_process_harness.py \
+  tests/test_runtime_redis_harness.py
+unset AGENT_RUNTIME_TEST_POSTGRES_DSN AGENT_RUNTIME_TEST_REDIS_URL PGPASSWORD POSTGRES_HARNESS_PASSWORD
+```
+
+预期：PostgreSQL 与 Redis 用例不再 skip，当前完整 harness 为 `35 passed`。验证范围包括旧 Memory 表真实迁移、状态/Run 代际约束、Archive 时间/用户快照、加密 Snapshot envelope、旧 Snapshot 只读迁移、未来 major 拒绝写回、旧 revision 迟到媒体隔离、schema 创建/删除、真实 `ReconcilerRunner` lease 单轮、两个独立 Session 对同一 queued Run 的竞争（仅一个 Worker 获得 attempt/fencing），以及同一临时 schema 的 `held -> bind -> start -> publish -> skipped media -> callback -> purge -> reconcile`。真实 Worker 在 callback target 缺失或当前授权撤销时不触网，并持久化固定 reason code 的无内容审计；Redis primary 的 429 冷却不污染显式 fallback 的独立 permit 分区。Worker/Reconciler 终态仅输出 `{"event":"completed","role":"...","result_code":"completed|failed"}`，不得附带 stderr、DSN、prompt 或 payload；迟到测试应先等待该事件，不能依赖退出时序。迟到副作用回归会先让回环 mock 阻塞一次 publish，在请求已到达后并发 cancel 与 purge、再释放响应；最终 `published_revision` 仍为 `0`，且 Artifact/Checkpoint/Step/ToolCall 的私密摘要均未被旧 lease 恢复。迟到模型与迟到 one-shot repair 回归都会在 Provider 请求已发出后并发 cancel/purge、再释放响应；首次 attempt 与 repair attempt 使用不同 permit/usage，迟到 attempt 只允许无内容 `outcome_unknown/aborted_before_send` 结算，不能恢复任何 checkpoint、step、artifact、tool call 或业务 revision。测试进程只连接回环 mock；子进程配置文件只保存无凭据 loopback DSN，测试密码仅通过受限子进程环境传递；每次创建的 `agent_runtime_test_*` schema 在退出后不存在。
+
+4. 停止并彻底删除测试数据库数据：
+
+```bash
+docker compose -f docker-compose.postgres-harness.yml down -v
+docker compose -f docker-compose.redis-harness.yml down -v
+```
+
+预期：容器和命名 volume 均被删除。
+
+## uni-app 回忆录手动验证
+
+前端工作区：`/Users/yuye/YeahWork/Python项目/uni-com-project-template`。前端只调用情侣日记业务 API；不要配置或访问 Runtime URL。
+
+```bash
+cd /Users/yuye/YeahWork/Python项目/uni-com-project-template
+npm run dev:mp-weixin
+```
+
+预期：微信开发者工具可以打开 `uni_modules/diary/pages/memoir/index`。先设置 4～6 位数字密码，再重新输入密码解锁；凭证只存在于当前运行内存，重启应用后必须再次解锁。
+
+逐项观察：
+
+1. 解锁前列表不出现作品正文、摘要、私有媒体 URL 或 Runtime 内部字段。
+2. 置顶、取消置顶、重试和删除均经情侣日记业务 API；删除必须显示二次确认，成功后当前播放器与轮询停止。
+3. 作品只按 `published_revision` 播放；未知 schema major 与空 scenes 显示静态降级，不能执行动态 Action。
+4. 连续五次输入错误密码后，解锁按钮显示十分钟倒计时并不可点击；倒计时仅保存在当前页面内存，重新进入仍以服务端冷却结果为准。
+5. 无 actions 时可用上一张/下一张或在作品卡上左右滑动按场景顺序切换；静态/未知 schema 作品只展示安全场景卡，不能执行动态 Action。切后台、离开页面或到达终态后轮询停止。
+6. 控制台、Pinia、Storage 与分享参数中不得出现解锁凭证、prompt、模型原文、工具载荷、签名 URL 或私有正文。
+7. 在开发者工具断开网络后打开详情，应显示“回忆作品暂不可读取，请稍后重试”和“重新读取作品”；恢复网络点击重试后可重新加载，不需要重新进入页面。
+8. 在另一已授权测试会话删除当前正在查看的 archive，再让当前页面重新读取详情；当前页面应返回列表，停止轮询并清空场景、Action、错误态和短期图片 URL。
+9. 使用隔离测试 fixture 注入同 major 未知可选 Action 时，控制台只出现 `MEMOIR_ACTION_UNSUPPORTED`，作品继续播放其余安全 Action，控制台不得出现 Action payload。
+10. 使用隔离测试 fixture 注入失效图片时显示柔和占位图并继续展示文字；仅含音频引用的场景保持静音，Network 面板不应出现该音频资产的访问请求。第一版正常业务数据媒体能力关闭，因此无测试 fixture 时以自动化媒体策略测试为验收证据。
+
+定向前端逻辑测试可在同一工作区运行（产物仅放临时目录）：
+
+```bash
+test_dir=$(mktemp -d /private/tmp/memoir-unit-test.XXXXXX)
+./node_modules/.bin/tsc --module commonjs --target es2022 --esModuleInterop --skipLibCheck --outDir "$test_dir" tests/memoir-action-runner.test.ts tests/memoir-schema.test.ts tests/memoir-polling.test.ts tests/memoir-unlock-cooldown.test.ts tests/memoir-error-recovery.test.ts tests/memoir-media-fallback.test.ts src/uni_modules/diary/memoir/hooks/memoir-action-runner.ts src/uni_modules/diary/memoir/hooks/memoir-schema.ts src/uni_modules/diary/memoir/hooks/memoir-types.ts src/uni_modules/diary/memoir/hooks/use-memoir-polling.ts src/uni_modules/diary/memoir/hooks/memoir-unlock-cooldown.ts src/uni_modules/diary/memoir/hooks/memoir-detail-recovery.ts src/uni_modules/diary/memoir/hooks/memoir-media-policy.ts
+node --test "$test_dir"/tests/memoir-*.test.js
+```
+
+预期：当前为 `16 passed`。除动作白名单、默认场景切换、schema major 静态降级、终态停止轮询与密码冷却外，还覆盖同 major 未知 Action 的固定无内容告警、媒体引用校验、图片失败占位、音频零请求、详情显式重试、远端删除安全返回列表，以及页面后台停止对在途轮询响应的 fencing。
+
+业务 API 回环集成测试（不启动 Runtime）：
+
+```bash
+test_dir=$(mktemp -d /private/tmp/memoir-loopback.XXXXXX)
+./node_modules/.bin/tsc --module commonjs --target es2022 --esModuleInterop --skipLibCheck --outDir "$test_dir" tests/memoir-business-client.integration.test.ts src/uni_modules/diary/memoir/hooks/memoir-business-client.ts src/uni_modules/diary/memoir/hooks/memoir-types.ts src/uni_modules/diary/memoir/hooks/memoir-schema.ts src/uni_modules/diary/memoir/hooks/memoir-action-runner.ts
+node --test "$test_dir/tests/memoir-business-client.integration.test.js"
+```
+
+预期：回环业务 fixture 依次验证 baseline、生成状态轮询、`published_revision` 详情与场景播放；所有请求路径以 `/api/v1/memory/` 开头，不包含 Runtime，且不记录或持久化凭证、私有 URL、prompt 或工具载荷。
+
+前端工程类型治理已完成：`vue-tsc`、Vue 运行时声明和编译期 WXS 文件范围已对齐；`npm run type-check` 与 `npm run type-check:diary` 都是发布门禁。运行：
+
+```bash
+npm run type-check:diary
+npm run type-check
+```
+
+预期：两条命令均以退出码 0 结束，且不输出 TypeScript 错误。上述定向测试与类型检查共同构成 Task 11 当前可重复的自动门禁；真实小程序交互仍按本节的手动步骤验收。

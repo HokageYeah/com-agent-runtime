@@ -29,11 +29,18 @@ class MemoryGenerationStatusService:
         if archive is None:
             raise ValueError("MEMORY_ARCHIVE_UNAVAILABLE")
         active_run: dict[str, Any] | None = None
+        status_version = 0
+        updated_at = archive.updated_at
+        retry_after_ms = 0
         if archive.active_run_id:
             ref = self._session.scalar(
                 select(MemoryAgentRunRef).where(MemoryAgentRunRef.run_id == archive.active_run_id)
             )
             if ref is not None:
+                status_version = ref.status_version
+                updated_at = ref.updated_at
+                # 轮询仅在未终态 Run 存在时继续；页面依据 status_version 不变自行退避。
+                retry_after_ms = 2000 if ref.status in {"pending", "running", "waiting_human"} else 0
                 active_run = {
                     "run_id": ref.run_id,
                     "status": ref.status,
@@ -49,5 +56,8 @@ class MemoryGenerationStatusService:
             "enhancement_status": archive.enhancement_status,
             "generation_epoch": archive.generation_epoch,
             "published_revision": archive.published_revision,
+            "status_version": status_version,
+            "updated_at": updated_at.isoformat(),
+            "retry_after_ms": retry_after_ms,
             "active_run": active_run,
         }

@@ -100,6 +100,9 @@ def test_create_captures_safe_capability_snapshot_from_package_definition() -> N
         "package_digest": "sha256:test",
         "business_connector_id": "couple_diary_backend",
         "allowed_model_route_ids": [],
+        "execution_policy": {},
+        "model_policy": {},
+        "ui_trace": {"mode": "status_only"},
     }
 
 

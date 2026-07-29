@@ -109,6 +109,70 @@ def test_publish_http_5xx_persists_failed_audit_record() -> None:
     assert state.publish_result is None
 
 
+def test_publish_idempotency_conflict_reconciles_matching_digest_without_replay() -> None:
+    """业务端已提交同一逻辑键时，409 只能经安全摘要对账恢复。"""
+    document = {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}
+    digest = hashlib.sha256(json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+    class Gateway:
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            request = httpx.Request("POST", "http://business")
+            raise httpx.HTTPStatusError(
+                "conflict", request=request, response=httpx.Response(409, request=request)
+            )
+
+        def get_publish_result(self, *args: object) -> dict[str, object]:
+            return {"revision": 7, "content_digest": digest}
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    state = AgentState(playback_document=document)
+
+    assert MemoirNodeRunner(Gateway(), ToolCallAuditService(session)).run_node(
+        {"node_id": "publish_document"}, _run(), state
+    ) == {"node_id": "publish_document", "published": True}
+    record = session.scalar(select(AgentToolCall))
+    assert record is not None and record.status == "succeeded"
+    assert record.output_summary == {"revision": 7, "content_digest": digest}
+
+
+def test_publish_idempotency_conflict_rejects_different_digest_without_body_leak(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """409 返回其他作品的 digest 不得被视为本次发布成功。"""
+    sensitive = "完整播放文档 prompt 私有URL"
+
+    class Gateway:
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            request = httpx.Request("POST", "http://business")
+            raise httpx.HTTPStatusError(
+                sensitive, request=request, response=httpx.Response(409, request=request)
+            )
+
+        def get_publish_result(self, *args: object) -> dict[str, object]:
+            return {"revision": 7, "content_digest": "different-digest"}
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    state = AgentState(playback_document={
+        "schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": [],
+    })
+
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="TOOL_IDEMPOTENCY_CONFLICT"):
+        MemoirNodeRunner(Gateway(), ToolCallAuditService(session)).run_node(
+            {"node_id": "publish_document"}, _run(), state
+        )
+    record = session.scalar(select(AgentToolCall))
+    assert record is not None and (record.status, record.error_code) == (
+        "failed", "TOOL_IDEMPOTENCY_CONFLICT"
+    )
+    assert sensitive not in caplog.text
+
+
 def test_publish_timeout_persists_unknown_audit_record() -> None:
     class Gateway:
         def publish_playback_document(self, *args: object) -> dict[str, object]:

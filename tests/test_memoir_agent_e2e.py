@@ -14,7 +14,13 @@ from sqlalchemy.orm import sessionmaker
 import app.models  # noqa: F401
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
-from app.models import AgentDefinition, AgentRun, CallbackEvent, MemorySnapshot
+from app.models import (
+    AgentDefinition,
+    AgentRun,
+    AgentStep,
+    CallbackEvent,
+    MemorySnapshot,
+)
 from app.runtime.artifact import ArtifactStore
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
@@ -29,6 +35,7 @@ from app.services.memory_archive_service import (
 )
 from app.services.memory_player_service import MemoryPlayerService
 from app.services.run_queue_service import RunQueueService
+from app.services.tool_call_audit_service import ToolCallAuditService
 
 
 class _MemoryToolFixture:
@@ -54,6 +61,7 @@ class _MemoryToolFixture:
         epoch: int,
         document: dict[str, object],
         _idempotency_key: str,
+        _tool_call: object,
     ) -> dict[str, object]:
         assert (archive_id, snapshot_id) == (self._archive_id, self._snapshot_id)
         snapshot = self._session.scalar(
@@ -112,13 +120,22 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
         definition_json={
             "allowed_business_types": ["couple_memory"],
             "workflow_nodes": [
-                {"node_id": node_id, "node_type": node_type}
+                {
+                    "node_id": node_id,
+                    "node_type": node_type,
+                    **(
+                        {"optional": True}
+                        if node_id == "enqueue_media_tasks"
+                        else {}
+                    ),
+                }
                 for node_id, node_type in (
                     ("load_snapshot", "tool"), ("sanitize_materials", "deterministic"),
                     ("compute_stats", "deterministic"), ("extract_highlights", "model"),
                     ("plan_chapters", "model"), ("generate_scenes", "model"),
                     ("generate_actions", "deterministic"), ("safety_review", "guardrail"),
                     ("publish_document", "tool"),
+                    ("enqueue_media_tasks", "deterministic"),
                 )
             ],
         },
@@ -145,6 +162,7 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
             _MemoryToolFixture(
                 session, archive.archive_id, snapshot.snapshot_id, snapshot_payload
             ),
+            ToolCallAuditService(session),
             model_gateway=_InvalidModelFixture(),
         ),
         CheckpointStore(session, FernetCheckpointCipher.generate()),
@@ -171,6 +189,17 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
     # 发布的引用只能来自当前冻结 manifest，Document 不保存 fixture 的素材正文。
     assert all(set(scene.source_refs_json) <= allowed_refs for scene in published.scenes)
     assert "content" not in json.dumps(published.document.document_json, ensure_ascii=False)
+    media_step = session.scalar(
+        select(AgentStep).where(
+            AgentStep.run_id == created.run_id,
+            AgentStep.step_name == "enqueue_media_tasks",
+        )
+    )
+    assert media_step is not None
+    assert (media_step.status, media_step.output_summary) == (
+        "skipped",
+        {"node_id": "enqueue_media_tasks", "status": "skipped"},
+    )
     callbacks = list(session.scalars(
         select(CallbackEvent).where(CallbackEvent.run_id == created.run_id).order_by(CallbackEvent.event_seq)
     ))

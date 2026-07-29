@@ -139,6 +139,7 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
             session,
             _admission_limits(request),
             trusted_model_route_ids=(route.route_id for route in request.app.state.settings.model_routes),
+            required_model_data_residency=authorization.model_data_residency(caller),
         ).create(
             command, caller, tenant, request.headers["Idempotency-Key"],
             authorization_version=authorization.authorization_version(caller),

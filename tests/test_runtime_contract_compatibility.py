@@ -67,5 +67,6 @@ def test_create_request_and_tool_manifest_keep_contract_extension_points() -> No
     assert request.start_mode == "held"
     assert request.contract_version == CONTRACT_VERSION
     assert tool.mcp_server_id is None
+    assert tool.enabled is True
     assert tool.model_dump(mode="json")["relative_path"].startswith("/")
     assert AgentRunStatus.PENDING.value == "pending"

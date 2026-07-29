@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.contracts.tools import ToolError
 from app.models import AgentToolCall
 from app.runtime.interfaces import LeaseContext
 from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
@@ -46,6 +47,41 @@ class ToolCallAuditService:
         幂等键必须完全一致。这里提前拒绝漂移，避免重试意外执行另一项业务操作。
         调用方只能传入已脱敏的摘要，正文、prompt 和完整播放文档均不应进入本表。
         """
+        return self._begin(
+            run_id=run_id, execution_attempt=execution_attempt, step_id=step_id,
+            tool_name=tool_name, tool_version=tool_version, transport=transport,
+            logical_key=logical_key, idempotency_key=idempotency_key,
+            request_digest=request_digest, input_summary=input_summary, side_effect=True,
+        )
+
+    def begin_native(
+        self, *, run_id: str, execution_attempt: int, step_id: str,
+        tool_name: str, logical_key: str, request_digest: str,
+    ) -> AgentToolCall:
+        """Native Tool 同样受冻结工具预算与无正文物理 attempt 审计约束。"""
+        return self._begin(
+            run_id=run_id, execution_attempt=execution_attempt, step_id=step_id,
+            tool_name=tool_name, tool_version="1.0.0", transport="native",
+            logical_key=logical_key, idempotency_key=logical_key,
+            request_digest=request_digest, input_summary={"operation": tool_name}, side_effect=False,
+        )
+
+    def _begin(
+        self,
+        *,
+        run_id: str,
+        execution_attempt: int,
+        step_id: str,
+        tool_name: str,
+        tool_version: str | None,
+        transport: str,
+        logical_key: str,
+        idempotency_key: str,
+        request_digest: str,
+        input_summary: Mapping[str, object],
+        side_effect: bool,
+    ) -> AgentToolCall:
+        """写入物理 attempt；Native 与 HTTP 共用预算，但副作用语义不可混淆。"""
         try:
             self._policy.assert_tool_call_allowed(run_id, step_id)
         except ExecutionBudgetExceeded as exc:
@@ -62,8 +98,6 @@ class ToolCallAuditService:
             or item.request_digest != request_digest
             for item in existing
         ):
-            # 不同 digest/key 不能通过更换重试身份绕过既有副作用；审计只写
-            # 受控结论，禁止记录请求摘要之外的工具正文。
             self._audit.append(RuntimeAuditEvent(
                 audit_id=str(uuid4()), actor_type="system", actor_id="tool_gateway",
                 action="tool_call_operation_conflict", resource_type="agent_run",
@@ -74,39 +108,26 @@ class ToolCallAuditService:
             self._session.commit()
             logging.warning(
                 "拒绝冲突的工具逻辑操作 run_id=%s step_id=%s tool=%s",
-                run_id,
-                step_id,
-                tool_name,
+                run_id, step_id, tool_name,
             )
             raise ValueError("TOOL_CALL_OPERATION_CONFLICT")
 
+        created_at = datetime.now(UTC)
         record = AgentToolCall(
-            tool_call_id=str(uuid4()),
-            run_id=run_id,
-            step_id=step_id,
-            tool_name=tool_name,
-            tool_version=tool_version,
-            transport=transport,
-            side_effect=True,
-            idempotency_key=idempotency_key,
-            logical_operation_key=logical_key,
-            request_digest=request_digest,
-            execution_attempt=execution_attempt,
-            status="running",
-            input_summary=dict(input_summary),
-            created_at=datetime.now(UTC),
+            tool_call_id=str(uuid4()), run_id=run_id, step_id=step_id,
+            tool_name=tool_name, tool_version=tool_version, transport=transport,
+            side_effect=side_effect, idempotency_key=idempotency_key,
+            logical_operation_key=logical_key, request_digest=request_digest,
+            execution_attempt=execution_attempt, tool_attempt=len(existing) + 1,
+            status="running", input_summary=dict(input_summary), created_at=created_at,
+            retention_until=created_at + timedelta(days=30),
         )
         self._session.add(record)
         self._session.flush()
-        # 副作用发送前同步提交；复用 Worker Session，避免共享连接上的第二个
-        # Session 回滚 Workflow ORM 状态。此处也是 publish 节点的安全提交边界。
         self._session.commit()
         logging.info(
-            "写副作用工具审计开始 run_id=%s tool_call_id=%s step_id=%s tool=%s",
-            run_id,
-            record.tool_call_id,
-            step_id,
-            tool_name,
+            "写工具审计开始 run_id=%s tool_call_id=%s step_id=%s tool=%s",
+            run_id, record.tool_call_id, step_id, tool_name,
         )
         return record
 
@@ -160,14 +181,22 @@ class ToolCallAuditService:
 
     def fail(
         self, record: AgentToolCall, error_code: str, *, retryable: bool,
+        error_type: str = "tool_request_failed",
         lease_context: LeaseContext | None = None,
     ) -> bool:
-        """记录已确认失败；错误码可观测，错误正文禁止进入数据库。"""
+        """记录只含受控字段的结构化错误，禁止错误正文进入数据库。"""
+        safe_error = ToolError(
+            error_code=error_code,
+            error_type=error_type,
+            retryable=retryable,
+            safe_message="TOOL_REQUEST_REJECTED",
+            details_visible_to_model=False,
+        )
         persisted = self._persist_result(
             record,
             status="failed",
             error_code=error_code,
-            output_summary={"retryable": retryable},
+            output_summary=safe_error.model_dump(),
             lease_context=lease_context,
         )
         if not persisted:

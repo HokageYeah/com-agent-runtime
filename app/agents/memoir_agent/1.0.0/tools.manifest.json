@@ -20,5 +20,17 @@
     "output_to": "publish_result",
     "side_effect": true,
     "cancellation_behavior": "query_after_commit"
+  },
+  {
+    "name": "memory.enqueue_tts",
+    "version": "1.0.0",
+    "enabled": false,
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/memory.enqueue_tts",
+    "input_from": "playback_document",
+    "output_to": "media_tasks",
+    "side_effect": true,
+    "cancellation_behavior": "query_after_commit"
   }
 ]

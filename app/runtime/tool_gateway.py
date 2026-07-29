@@ -16,10 +16,22 @@ from urllib.parse import urlsplit
 import httpx
 
 from app.core.tool_security import tool_signature
+from app.models import AgentToolCall
 from app.runtime.interfaces import LeaseContext
+from app.runtime.native_tools import (
+    contains_sensitive_identifier,
+    repair_json_once,
+    summarize_keys,
+)
 from app.runtime.state import AgentState
 from app.runtime.test_harness import LoopbackTestTransport
 from app.schemas.agent_package import ToolManifest
+from app.schemas.audit import (
+    AUTHORIZATION_REVOKED,
+    CONNECTOR_DISABLED,
+    RUNTIME_REJECTION_REASON_CODES,
+)
+from app.services.tool_call_audit_service import ToolCallAuditService
 
 # 工具注册表属于 Runtime 代码，而非可变 AgentPackage。即使 package 文件被错误更新，
 # 也不能改变业务 host、接口路径或运行上下文的取值方式。
@@ -40,6 +52,12 @@ _FIXED_HTTP_TOOLS: dict[str, tuple[str, str, str, str, bool, str]] = {
         True,
         "query_after_commit",
     ),
+}
+# Native Tool 同样只能由 Runtime 代码注册；Package、模型或业务请求不能声明函数名。
+_FIXED_NATIVE_TOOLS: dict[str, tuple[tuple[str, ...], Callable[..., object]]] = {
+    "runtime.repair_json_once": (("value",), repair_json_once),
+    "runtime.summarize_keys": (("value", "max_items"), summarize_keys),
+    "runtime.contains_sensitive_identifier": (("value",), contains_sensitive_identifier),
 }
 _TOOL_OUTPUT_SENSITIVE = re.compile(r"(?<!\d)(?:1[3-9]\d{9}|\d{17}[\dXx])(?!\d)")
 
@@ -65,7 +83,9 @@ class ToolGateway:
         is_draining: Callable[[], bool] = lambda: False,
         deadline_at: Callable[[], datetime | None] = lambda: None,
         lease_expires_at: Callable[[], datetime | None] = lambda: None,
-        authorization_permitted: Callable[[str], bool] = lambda run_id: True,
+        authorization_permitted: Callable[[str], str | bool | None] = lambda run_id: None,
+        execution_permitted: Callable[[str], bool] = lambda run_id: True,
+        audit_rejection: Callable[[str, str], None] = lambda run_id, code: None,
         peer_ip_provider: Callable[[], str | None] | None = None,
         reset_peer_ip: Callable[[], None] | None = None,
         test_transport: LoopbackTestTransport | None = None,
@@ -87,6 +107,11 @@ class ToolGateway:
         self._lease_expires_at = lease_expires_at
         # 由 Worker 注入的权威 Run 版本复核；工具输入不能影响该决策。
         self._authorization_permitted = authorization_permitted
+        # 外部副作用前必须实时复核 lease/fencing、cancel、privacy 与 Package 状态；
+        # Gateway 只接受布尔结论，不能把 Run 或私密输入写入日志。
+        self._execution_permitted = execution_permitted
+        # 拒绝审计只接收 Run ID 与固定错误码，绝不允许 connector、URL 或请求内容穿透。
+        self._audit_rejection = audit_rejection
         # 生产 Worker 必须注入真实 socket 对端读取器；MockTransport 测试没有 TCP 连接，
         # 因而不强制该字段，避免测试伪造一套网络栈。
         self._peer_ip_provider = peer_ip_provider
@@ -106,6 +131,8 @@ class ToolGateway:
         从 Worker 已验证的 ``runtime_context`` 提取。输出不合格或包含可识别敏感
         标识符时直接拒绝，不把响应正文写入日志或审计摘要。
         """
+        if not manifest.enabled:
+            raise ValueError("TOOL_CAPABILITY_DISABLED")
         registration = _FIXED_HTTP_TOOLS.get(manifest.name)
         if registration is None:
             raise ValueError("TOOL_MANIFEST_NOT_ALLOWED")
@@ -138,6 +165,42 @@ class ToolGateway:
             idempotency_key,
             retry_transport=not side_effect,
         )
+
+    def call_native(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, object],
+        *,
+        audit_service: ToolCallAuditService,
+        run_id: str,
+        execution_attempt: int,
+        step_id: str,
+        logical_key: str,
+        request_digest: str,
+    ) -> object:
+        """执行固定 Native Tool，并只把安全摘要结算到权威物理 attempt。
+
+        Native Tool 不能成为绕过 policy、预算或审计的旁路。输入和完整输出只留在
+        当前调用栈；审计记录仅保留操作名、受控 digest 与无正文结果摘要。
+        """
+        registration = _FIXED_NATIVE_TOOLS.get(tool_name)
+        if registration is None:
+            raise ValueError("NATIVE_TOOL_NOT_ALLOWED")
+        names, handler = registration
+        if set(arguments) != set(names):
+            raise ValueError("NATIVE_TOOL_INPUT_INVALID")
+        record = audit_service.begin_native(
+            run_id=run_id, execution_attempt=execution_attempt, step_id=step_id,
+            tool_name=tool_name, logical_key=logical_key, request_digest=request_digest,
+        )
+        try:
+            result = handler(**dict(arguments))
+        except (TypeError, ValueError):
+            audit_service.fail(record, "NATIVE_TOOL_INPUT_INVALID", retryable=False,
+                               error_type="native_tool_rejected")
+            raise ValueError("NATIVE_TOOL_INPUT_INVALID") from None
+        audit_service.succeed(record, self._native_output_summary(tool_name, result))
+        return result
 
     @staticmethod
     def apply_result(
@@ -188,14 +251,18 @@ class ToolGateway:
 
     def publish_playback_document(
         self, connector_id: str, archive_id: str, run_id: str, snapshot_id: str, generation_epoch: int,
-        document: dict[str, Any], idempotency_key: str | None = None,
+        document: dict[str, Any], idempotency_key: str, tool_call: AgentToolCall | None = None,
     ) -> dict[str, Any]:
         """发布完整作品；调用方只能传受信任 run 上下文与已校验作品结构。"""
+        if tool_call is None:
+            raise ValueError("TOOL_ATTEMPT_REQUIRED")
+        if tool_call.run_id != run_id or tool_call.side_effect is not True:
+            raise ValueError("TOOL_ATTEMPT_INVALID")
         return self._call(
             connector_id,
             "/api/v1/internal/agent-tools/memory.publish_playback_document",
             {"archive_id": archive_id, "run_id": run_id, "snapshot_id": snapshot_id, "generation_epoch": generation_epoch, "document": document},
-            "memory.publish_playback_document", idempotency_key,
+            "memory.publish_playback_document", idempotency_key, tool_call=tool_call,
         )
 
     def get_publish_result(self, connector_id: str, archive_id: str, run_id: str, idempotency_key: str) -> dict[str, Any] | None:
@@ -224,27 +291,56 @@ class ToolGateway:
         *,
         retry_transport: bool = False,
         allow_during_draining: bool = False,
+        tool_call: AgentToolCall | None = None,
     ) -> dict[str, Any]:
         """签名后调用固定工具；写操作超时结果交给上层幂等对账。"""
         connector = self._connectors.get(connector_id)
         if connector is None:
+            run_id = input_data.get("run_id")
+            if isinstance(run_id, str):
+                self._audit_rejection(run_id, CONNECTOR_DISABLED)
             raise ValueError("BUSINESS_CONNECTOR_UNAVAILABLE")
         connector_origin = self._connector_origins[connector_id]
         content = httpx.Request("POST", "http://tool.local", json={"input": input_data}).content
         timestamp = str(int(time.time()))
         headers = {"X-Agent-Runtime-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret)}
+        if tool_call is not None:
+            attempt = tool_call.tool_attempt
+            if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+                raise ValueError("TOOL_ATTEMPT_INVALID")
+            headers["X-Agent-Tool-Attempt"] = str(attempt)
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         attempts = 2 if retry_transport else 1
         for attempt in range(attempts):
             run_id = input_data.get("run_id")
-            if not isinstance(run_id, str) or not self._authorization_permitted(run_id):
+            authorization_rejection = (
+                self._authorization_permitted(run_id)
+                if isinstance(run_id, str)
+                else AUTHORIZATION_REVOKED
+            )
+            if authorization_rejection is None or authorization_rejection is True:
+                reason_code = None
+            elif authorization_rejection in RUNTIME_REJECTION_REASON_CODES:
+                reason_code = str(authorization_rejection)
+            else:
+                reason_code = AUTHORIZATION_REVOKED
+            if not isinstance(run_id, str) or reason_code is not None:
+                if isinstance(run_id, str):
+                    self._audit_rejection(run_id, reason_code or AUTHORIZATION_REVOKED)
                 logging.info(
                     "工具调用在发送前中止 tool=%s code=%s",
                     tool_name,
                     "TOOL_AUTHORIZATION_REVOKED",
                 )
                 raise ValueError("TOOL_AUTHORIZATION_REVOKED")
+            if not self._execution_permitted(run_id):
+                logging.info(
+                    "工具调用在发送前中止 tool=%s code=%s",
+                    tool_name,
+                    "TOOL_EXECUTION_CONTEXT_INVALID",
+                )
+                raise ValueError("TOOL_EXECUTION_CONTEXT_INVALID")
             if self._is_draining() and not allow_during_draining:
                 # 每次物理发送前实时复核，读取重试也不能穿透 draining。
                 logging.info(
@@ -454,6 +550,26 @@ class ToolGateway:
             raise ValueError("TOOL_OUTPUT_INVALID")
 
         walk(output)
+
+    @staticmethod
+    def _native_output_summary(tool_name: str, result: object) -> dict[str, object]:
+        """Native 结果摘要禁止包含待修复 JSON 或待扫描正文。"""
+        if tool_name == "runtime.contains_sensitive_identifier":
+            return {"matched": bool(result)}
+        if tool_name == "runtime.summarize_keys" and isinstance(result, dict):
+            keys = result.get("keys")
+            count = result.get("item_count")
+            if isinstance(keys, list) and isinstance(count, int):
+                return {"keys": list(keys), "item_count": count}
+        if tool_name == "runtime.repair_json_once":
+            if result is None:
+                return {"result": "none"}
+            summary = summarize_keys(result, max_items=32)
+            keys, count = summary["keys"], summary["item_count"]
+            if not isinstance(keys, list) or not isinstance(count, int):
+                raise ValueError("NATIVE_TOOL_OUTPUT_INVALID")
+            return {"keys": list(keys), "item_count": count}
+        raise ValueError("NATIVE_TOOL_OUTPUT_INVALID")
 
     @staticmethod
     def _validate_output_schema(schema: dict[str, Any], output: object) -> None:

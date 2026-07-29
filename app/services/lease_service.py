@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.models import AgentRun
+from app.models import AgentDefinition, AgentRun
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.services.admission_service import AdmissionService
 from app.services.outbox_service import OutboxService
@@ -103,6 +103,16 @@ class LeaseService:
         """
         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
         now = datetime.now(UTC)
+        definition = (
+            self._session.scalar(
+                select(AgentDefinition).where(
+                    AgentDefinition.agent_id == run.agent_id,
+                    AgentDefinition.version == run.agent_version,
+                )
+            )
+            if run is not None
+            else None
+        )
         allowed = bool(
             run
             and run.dispatch_state == "claimed"
@@ -116,6 +126,9 @@ class LeaseService:
             and _as_utc(run.lease_expires_at) > now
             and _as_utc(context.lease_expires_at) > now
             and _as_utc(run.run_deadline_at) > now
+            # 测试可只构造 Run/Plan；真实创建路径保证定义存在。若定义已撤销，
+            # 所有复用 can_write 的 checkpoint/artifact/tool/model 写入一律停止。
+            and (definition is None or definition.status != "revoked")
         )
         if not allowed:
             logging.warning("Worker 写入被 fencing/状态边界拒绝 run_id=%s", run_id)
@@ -152,6 +165,35 @@ class LeaseService:
         run.lease_expires_at = datetime.now(UTC)
         self._session.commit()
         logging.warning("draining 主动释放 lease run_id=%s", run_id)
+        return True
+
+    def finish_after_invalid_boundary(self, run_id: str, context: LeaseContext) -> bool:
+        """在 cancel/purge 已使旧结果失效后，按 fencing 条件释放 claimed 归属。
+
+        这不是对旧 Worker 结果的采纳：仅允许与原 lease 完全匹配且已发生
+        cancel/privacy 屏障的 Run 进入 cancelled/finished，避免 90 秒租约阻塞
+        purge。之后任何迟到 checkpoint、artifact 或工具结算仍会被 can_write 拒绝。
+        """
+        run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+        if (
+            run is None
+            or run.dispatch_state != "claimed"
+            or run.lease_owner != context.lease_owner
+            or run.fencing_token != context.fencing_token
+            or run.execution_attempt != context.execution_attempt
+            or (run.cancel_requested_at is None and run.privacy_state == "active")
+        ):
+            return False
+        run.status = "cancelled"
+        run.dispatch_state = "finished"
+        run.lease_owner = None
+        run.lease_expires_at = None
+        run.finished_at = datetime.now(UTC)
+        run.status_version += 1
+        AdmissionService(self._session).transition_run(run, "claimed", "finished")
+        OutboxService(self._session).append_callback(run, "cancelled")
+        self._session.commit()
+        logging.warning("旧 lease 在取消/清理边界后释放 run_id=%s", run_id)
         return True
 
     def pause_for_human(

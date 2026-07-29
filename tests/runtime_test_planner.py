@@ -28,7 +28,9 @@ def test_memoir_static_plan_uses_package_workflow_nodes() -> None:
         "generate_actions",
         "safety_review",
         "publish_document",
+        "enqueue_media_tasks",
     ]
+    assert plan.steps[-1]["optional"] is True
     assert plan.stop_conditions["max_estimated_cost"] == 2.0
     assert plan.stop_conditions["max_wall_clock_seconds"] == 172_800
     assert plan.fallback_policy["media"] == "skipped(capability_disabled)"

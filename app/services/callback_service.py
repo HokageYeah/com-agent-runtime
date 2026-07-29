@@ -12,7 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AgentRun, CallbackEvent, RuntimeOutboxEvent
-from app.schemas.audit import RuntimeAuditEvent
+from app.schemas.audit import (
+    AUTHORIZATION_REVOKED,
+    CALLBACK_TARGET_MISSING,
+    RUNTIME_REJECTION_REASON_CODES,
+    RuntimeAuditEvent,
+)
 from app.services.audit_service import AuditService
 
 
@@ -30,10 +35,10 @@ class CallbackDeliveryService:
         session: Session,
         sender: CallbackSender,
         *,
-        authorize_target: Callable[[AgentRun], bool] | None = None,
+        authorize_target: Callable[[AgentRun], str | bool | None] | None = None,
     ) -> None:
         self._session, self._sender = session, sender
-        self._authorize_target = authorize_target or (lambda run: True)
+        self._authorize_target = authorize_target or (lambda run: None)
 
     def send(self, outbox: RuntimeOutboxEvent) -> None:
         """兼容既有 Dispatcher handler 名称。"""
@@ -54,15 +59,24 @@ class CallbackDeliveryService:
         if run is None or run.privacy_state != "active":
             logging.warning("callback 投递被私密状态拒绝 run_id=%s", callback.run_id)
             raise ValueError("CALLBACK_RUN_NOT_ACTIVE")
-        if target_id != run.callback_target_id or not self._authorize_target(run):
+        authorization_rejection = self._authorize_target(run)
+        if target_id != run.callback_target_id:
+            reason_code = CALLBACK_TARGET_MISSING
+        elif authorization_rejection is None or authorization_rejection is True:
+            reason_code = None
+        elif authorization_rejection in RUNTIME_REJECTION_REASON_CODES:
+            reason_code = str(authorization_rejection)
+        else:
+            reason_code = AUTHORIZATION_REVOKED
+        if reason_code is not None:
             # 授权撤销不是普通网络错误：Dispatcher 将其留在 outbox，待管理员恢复授权后按原身份投递。
             AuditService(session=self._session).append(
                 RuntimeAuditEvent(
                     audit_id=str(uuid4()), actor_type="system", actor_id="callback_dispatcher",
                     action="callback_authorization_rejected", resource_type="agent_run",
-                    resource_id=run.run_id, reason_code="AUTHORIZATION_CHANGED", outcome="rejected",
+                    resource_id=run.run_id, reason_code=reason_code, outcome="rejected",
                     occurred_at=datetime.now(UTC), trace_id=run.trace_id,
-                    metadata_summary={"status": run.status},
+                    metadata_summary={"run_id": run.run_id, "status": run.status},
                 )
             )
             raise ValueError("CALLBACK_TARGET_REVOKED")

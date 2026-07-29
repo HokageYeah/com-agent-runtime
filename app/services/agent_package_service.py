@@ -213,6 +213,14 @@ class AgentPackageService:
             and policy.waiting_human_fallback_node not in node_ids
         ):
             raise AgentPackageValidationError("waiting_human fallback 节点不存在")
+        optional_positions = [index for index, node in enumerate(nodes) if node.optional]
+        if optional_positions:
+            publish_positions = [
+                index for index, node in enumerate(nodes)
+                if node.node_id == "publish_document"
+            ]
+            if len(publish_positions) != 1 or min(optional_positions) <= publish_positions[0]:
+                raise AgentPackageValidationError("可选节点必须位于 publish_document 之后")
 
     def _validate_prompts(self, package_dir: Path, prompts: list[str]) -> list[str]:
         for prompt_ref in prompts:

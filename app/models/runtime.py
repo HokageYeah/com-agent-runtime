@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import (
@@ -233,6 +233,14 @@ class AgentToolCall(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # 逻辑键是副作用去重与 query-after-commit 对账依据，至少保留 30 天；
+    # 仅保存摘要与受控错误码，不保留工具正文或上游响应。
+    retention_until: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+        default=lambda: datetime.now(UTC) + timedelta(days=30),
+    )
 
 
 class AgentEvaluation(Base):
@@ -422,3 +430,18 @@ class RuntimeAuditRecord(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), index=True, nullable=False
     )
+
+
+class RuntimeTrafficEvent(Base):
+    """按固定窗口聚合的 Runtime 流量事实；绝不保存请求或模型内容。"""
+
+    __tablename__ = "runtime_traffic_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    route_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    result_code: Mapped[str] = mapped_column(String(80), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # 包含事件维度和窗口起点的受控键，唯一约束让并发追加安全地聚合到同一行。
+    window_key: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

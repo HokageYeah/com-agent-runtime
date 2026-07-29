@@ -16,6 +16,7 @@ class RuntimeHarnessConfig:
     runtime_id: str
     mock_base_url: str
     timeout_seconds: float = 2.0
+    provider_base_url: str | None = None
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.mock_base_url)
@@ -25,6 +26,14 @@ class RuntimeHarnessConfig:
             raise ValueError("TEST_HARNESS_TIMEOUT_INVALID")
         if not self.runtime_id or not self.trusted_clients:
             raise ValueError("TEST_HARNESS_IDENTITY_INVALID")
+        if self.provider_base_url is not None:
+            provider = urlsplit(self.provider_base_url)
+            if (
+                provider.scheme != "http"
+                or provider.hostname not in {"127.0.0.1", "::1", "localhost"}
+                or not provider.port
+            ):
+                raise ValueError("TEST_HARNESS_LOOPBACK_REQUIRED")
 
 
 class TransportVerifier(Protocol):
@@ -58,3 +67,4 @@ class RuntimeDependencies:
     callback_client: Any
     tool_client: Any
     transport_verifier: TransportVerifier
+    provider_adapter: Any | None = None

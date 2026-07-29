@@ -1,0 +1,15 @@
+# 仅 Task 8 本机验收使用；独立 DB 且仅绑定 loopback，禁止接入生产 Redis。
+name: agent-runtime-redis-harness
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: "no"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:${REDIS_HARNESS_PORT:-56379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

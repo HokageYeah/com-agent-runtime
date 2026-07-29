@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from app.core.tool_security import tool_signature
+from app.runtime.test_harness import LoopbackTestTransport
 from app.schemas.callback import CallbackPayload
 
 
@@ -27,8 +28,15 @@ class CallbackTarget:
 class CallbackGateway:
     """向固定 callback target 发起签名请求，禁止自动跟随重定向。"""
 
-    def __init__(self, targets: dict[str, CallbackTarget], client: httpx.Client) -> None:
+    def __init__(
+        self,
+        targets: dict[str, CallbackTarget],
+        client: httpx.Client,
+        *,
+        test_transport: LoopbackTestTransport | None = None,
+    ) -> None:
         self._targets, self._client = targets, client
+        self._test_transport = test_transport
 
     def has_target(self, target_id: str) -> bool:
         """仅已装配的预注册 target 可被 Dispatcher 投递。"""
@@ -56,6 +64,8 @@ class CallbackGateway:
         url = httpx.URL(target.url)
         if url.scheme not in {"http", "https"} or not url.host:
             raise ValueError("CALLBACK_TARGET_INVALID")
+        if self._test_transport is not None and not self._test_transport.allows(str(url)):
+            raise ValueError("TEST_HARNESS_LOOPBACK_REQUIRED")
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         timestamp = str(int(time.time()))
         headers = {

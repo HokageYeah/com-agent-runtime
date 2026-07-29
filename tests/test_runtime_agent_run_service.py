@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
 from app.models import (
+    AgentCheckpoint,
     AgentDefinition,
     AgentPlan,
     AgentRun,
@@ -218,6 +219,60 @@ def test_auto_retry_budget_is_scoped_to_the_current_step() -> None:
     service.record_auto_retry("step-retry-run", "step-b")
     with pytest.raises(Exception, match="自动重试次数已耗尽"):
         service.record_auto_retry("step-retry-run", "step-a")
+
+
+def test_partial_retry_accepts_only_post_publish_failed_optional_nodes() -> None:
+    """partial retry 的控制面不能把已经提交的主作品重新放回队列。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="partial-control-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="partial", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest=run.package_digest,
+            contract_version=run.contract_version, status="active", status_changed_at=now,
+            status_changed_by="test", status_change_reason="fixture",
+        ),
+        AgentPlan(
+            plan_id="partial-control-plan", run_id=run.run_id, strategy="static_workflow",
+            steps_json=[
+                {"node_id": "publish_document", "node_type": "tool"},
+                {"node_id": "enqueue_media", "node_type": "tool", "optional": True},
+            ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        ),
+        AgentCheckpoint(
+            checkpoint_id="partial-control-checkpoint", run_id=run.run_id,
+            checkpoint_key="attempt:1", state_schema_version="1",
+            data_classification="restricted", privacy_version=1,
+            encrypted_state_blob=b"safe", state_summary={
+                "completed_node_ids": ["publish_document"],
+            }, content_digest="sha256:checkpoint", expires_at=now, created_at=now,
+        ),
+        AgentStep(
+            step_id="published-step", run_id=run.run_id, step_name="publish_document",
+            step_type="tool", status="succeeded", execution_attempt=1,
+        ),
+        AgentStep(
+            step_id="optional-failed-step", run_id=run.run_id, step_name="enqueue_media",
+            step_type="tool", status="failed", execution_attempt=1,
+        ),
+    ])
+    session.commit()
+
+    result = AgentRunService(session).retry(run.run_id, "caller")
+
+    assert (result.status, result.dispatch_state) == ("pending", "queued")
+    assert run.manual_retry_count == 1
 
 
 def test_cancel_persists_desensitized_runtime_audit_record() -> None:

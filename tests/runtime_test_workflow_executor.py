@@ -13,6 +13,7 @@ from app.db.sqlalchemy_db import Base
 from app.models import (
     AgentArtifact,
     AgentCheckpoint,
+    AgentDefinition,
     AgentPlan,
     AgentRun,
     AgentStep,
@@ -59,6 +60,24 @@ class RetryOnceNodeRunner(DeterministicNodeRunner):
         if self.calls == 1:
             raise RetryableWorkflowNodeError("TRANSIENT_NODE_FAILURE")
         return super().run_node(node, run, state)
+
+
+class OptionalFailureThenSuccessRunner(RecordingNodeRunner):
+    """仅模拟发布后的可选媒体步骤首次失败。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.optional_calls = 0
+
+    def run_node(
+        self, node: dict[str, object], run: AgentRun, state: AgentState
+    ) -> dict[str, object]:
+        self.node_ids.append(str(node["node_id"]))
+        if node["node_id"] == "enqueue_media":
+            self.optional_calls += 1
+            if self.optional_calls == 1:
+                raise RuntimeError("MEDIA_QUEUE_UNAVAILABLE")
+        return {"node_id": node["node_id"], "result": "ok"}
 
 
 class SnapshotNodeRunner(DeterministicNodeRunner):
@@ -241,6 +260,84 @@ def test_executor_retries_retryable_node_with_frozen_step_budget() -> None:
     assert runner.calls == 3
     assert run.auto_retry_count == 1
     assert steps[0].step_attempt == 2
+
+
+def test_executor_refuses_revoked_package_before_starting_any_node() -> None:
+    """已撤销 Package 不能在旧 lease 下继续启动模型、工具或其它节点。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(session, "revoked-package-run")
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+            definition_json={}, package_digest="sha256:test", contract_version="1.0.0",
+            status="revoked", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = _executor(session, runner).run("revoked-package-run", _lease_context(now))
+
+    assert (result.status, result.error_code) == ("cancelled", "PACKAGE_REVOKED")
+    assert runner.node_ids == []
+
+
+def test_executor_partial_resume_retries_only_failed_optional_node() -> None:
+    """partial 只能发生在主发布后；恢复不得再次执行发布副作用。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="partial-retry-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    )
+    session.add_all([
+        run,
+        AgentPlan(
+            plan_id="partial-retry-plan", run_id=run.run_id, strategy="static_workflow",
+            steps_json=[
+                {"node_id": "load_snapshot", "node_type": "tool"},
+                {"node_id": "publish_document", "node_type": "tool"},
+                {"node_id": "enqueue_media", "node_type": "tool", "optional": True},
+            ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        ),
+    ])
+    session.commit()
+    context = _lease_context(now)
+    runner = OptionalFailureThenSuccessRunner()
+    store = CheckpointStore(session, FernetCheckpointCipher.generate())
+    executor = WorkflowExecutor(session, runner, store, ArtifactStore(session))
+
+    first = executor.run(run.run_id, context)
+    assert first.status == "partial"
+    assert runner.node_ids == ["load_snapshot", "publish_document", "enqueue_media"]
+    failed = session.scalar(select(AgentStep).where(AgentStep.step_name == "enqueue_media"))
+    assert failed is not None and failed.status == "failed"
+
+    # 模拟 retry 已重新认领的新 execution attempt；checkpoint 仍是权威恢复边界。
+    run.status, run.dispatch_state = "pending", "claimed"
+    run.execution_attempt, run.fencing_token = 2, 2
+    run.lease_owner = "worker-b"
+    run.lease_expires_at = now + timedelta(seconds=60)
+    session.commit()
+    second_context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1,
+        authorization_version=1,
+    )
+    second = executor.resume(run.run_id, second_context)
+
+    assert second.status == "succeeded"
+    assert runner.node_ids == ["load_snapshot", "publish_document", "enqueue_media", "enqueue_media"]
 
 
 def test_executor_heartbeats_same_context_before_and_after_every_node(

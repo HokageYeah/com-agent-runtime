@@ -121,3 +121,23 @@ class RuntimeObservabilityReport:
             "hallucination_rate": self.hallucination_rate,
             "emotional_safety_pass_rate": self.emotional_safety_pass_rate,
         }
+
+
+@dataclass(frozen=True)
+class GlobalRuntimeObservabilityReport:
+    """跨 Run 的受控总览；仅允许状态、错误码和既有数值指标。"""
+
+    run_count: int
+    status_counts: dict[str, int]
+    error_code_counts: dict[str, int]
+    operational_counts: dict[str, int]
+    metrics: RuntimeObservabilityReport
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "run_count": self.run_count,
+            "status_counts": dict(self.status_counts),
+            "error_code_counts": dict(self.error_code_counts),
+            "operational_counts": dict(self.operational_counts),
+            "metrics": self.metrics.as_dict(),
+        }

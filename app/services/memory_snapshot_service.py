@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,6 +14,8 @@ from app.models.memory_agent_run_ref import MemoryAgentRunRef
 from app.models.memory_archive import MemoryArchive
 from app.models.memory_snapshot import MemorySnapshot
 from app.services.memory_archive_service import FernetSnapshotCipher
+
+_SUPPORTED_SNAPSHOT_SCHEMA_MAJOR = 1
 
 
 class MemorySnapshotService:
@@ -28,6 +32,7 @@ class MemorySnapshotService:
             archive_id, snapshot_id, run_id, generation_epoch,
         )
         payload = self._cipher.decrypt_json(snapshot.encrypted_payload)
+        payload = self._normalize_payload(payload, archive_id)
         logging.info(
             "Runtime 已读取冻结快照 archive_id=%s snapshot_id=%s run_id=%s",
             archive_id, snapshot_id, run_id,
@@ -60,7 +65,75 @@ class MemorySnapshotService:
                 archive_id, snapshot_id, run_id, generation_epoch,
             )
             raise ValueError("MEMORY_SNAPSHOT_UNAVAILABLE")
+        if snapshot.schema_major != _SUPPORTED_SNAPSHOT_SCHEMA_MAJOR:
+            logging.warning(
+                "Runtime 快照版本被拒绝 archive_id=%s snapshot_id=%s run_id=%s "
+                "schema_major=%s code=MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED",
+                archive_id,
+                snapshot_id,
+                run_id,
+                snapshot.schema_major,
+            )
+            raise ValueError("MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED")
         return snapshot
+
+    def _normalize_payload(
+        self, payload: dict[str, Any], archive_id: str,
+    ) -> dict[str, Any]:
+        """把历史无版本负载只迁移到内存；任何读取均不改写原密文或摘要。"""
+        version = payload.get("schema_version")
+        if version is None:
+            return self._migrate_legacy_payload(payload, archive_id)
+        if (
+            not isinstance(version, str)
+            or not re.fullmatch(r"[1-9]\d*\.\d+\.\d+", version)
+            or int(version.split(".", 1)[0]) != _SUPPORTED_SNAPSHOT_SCHEMA_MAJOR
+        ):
+            raise ValueError("MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED")
+        return payload
+
+    def _migrate_legacy_payload(
+        self, payload: dict[str, Any], archive_id: str,
+    ) -> dict[str, Any]:
+        """将旧 ``diaries/bets`` 结构投影为当前白名单 envelope。"""
+        diaries = payload.get("diaries", [])
+        bets = payload.get("bets", [])
+        if not isinstance(diaries, list) or not isinstance(bets, list):
+            raise ValueError("MEMORY_SNAPSHOT_SCHEMA_INVALID")
+        archive = self._session.scalar(
+            select(MemoryArchive).where(
+                MemoryArchive.archive_id == archive_id,
+                MemoryArchive.deleted_at.is_(None),
+            )
+        )
+        if archive is None:
+            raise ValueError("MEMORY_SNAPSHOT_UNAVAILABLE")
+        user_snapshots = [
+            {"user_id": archive.owner_user_id, "nickname": None, "avatar_ref": None},
+            {
+                "user_id": archive.partner_user_id,
+                "nickname": archive.partner_nickname_snapshot,
+                "avatar_ref": archive.partner_avatar_snapshot,
+            },
+        ]
+        user_snapshots.sort(key=lambda item: int(item["user_id"]))
+        return {
+            "schema_version": "1.0.0",
+            "source_range": {
+                "relationship_id": archive.relationship_id,
+                "space_id": archive.space_id,
+                "relationship_segment_no": archive.relationship_segment_no,
+                "bound_at": _iso_utc(archive.bound_at),
+                "unbound_at": _iso_utc(archive.unbound_at),
+                "user_snapshots": user_snapshots,
+            },
+            "diary_items": diaries,
+            "bet_items": bets,
+            "stats": {
+                "diary_count": len(diaries),
+                "bet_count": len(bets),
+            },
+        }
 
     @staticmethod
     def validate_document_references(
@@ -89,3 +162,11 @@ class MemorySnapshotService:
         # 媒体生成尚未启用，拒绝未知 storage key；启用后必须按 document 资产表逐项校验。
         if document.get("media_manifest") != []:
             raise ValueError("MEMORY_DOCUMENT_MEDIA_INVALID")
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    """数据库可能丢失 tzinfo；历史归档时间按 UTC 恢复为稳定 envelope 字符串。"""
+    if value is None:
+        return None
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat()

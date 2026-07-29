@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -23,6 +23,8 @@ def test_publish_audit_keeps_stable_keys_and_safe_result_only():
     assert saved is not None and saved.status == "succeeded"
     assert saved.logical_operation_key == saved.idempotency_key == "run-1:publish"
     assert saved.output_summary == {"revision": 3, "content_digest": "content-digest"}
+    assert saved.retention_until is not None
+    assert timedelta(days=29, hours=23) < saved.retention_until - saved.created_at <= timedelta(days=30, minutes=1)
 
 
 def test_publish_audit_marks_retryable_failure_and_unknown_outcome_safely():
@@ -40,6 +42,13 @@ def test_publish_audit_marks_retryable_failure_and_unknown_outcome_safely():
         ("failed", "HTTP_503"), ("outcome_unknown", "HTTP_TIMEOUT"),
     ]
     assert all(item.error_message is None for item in records)
+    assert failed.output_summary == {
+        "error_code": "HTTP_503",
+        "error_type": "tool_request_failed",
+        "retryable": True,
+        "safe_message": "TOOL_REQUEST_REJECTED",
+        "details_visible_to_model": False,
+    }
 
 
 def test_side_effect_audit_records_generic_tool_metadata_and_safe_output() -> None:
@@ -71,6 +80,22 @@ def test_side_effect_audit_records_generic_tool_metadata_and_safe_output() -> No
     assert saved.tool_name == "memory.get_snapshot"
     assert saved.output_summary == {"snapshot_digest": "snapshot-digest", "diary_count": 2}
     assert saved.error_message is None
+
+
+def test_native_tool_uses_frozen_budget_and_safe_physical_attempt_audit() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    record = ToolCallAuditService(session).begin_native(
+        run_id="run-1", execution_attempt=1, step_id="repair",
+        tool_name="runtime.repair_json_once", logical_key="run-1:repair:1",
+        request_digest="native-input-digest",
+    )
+
+    assert (record.transport, record.side_effect, record.tool_attempt) == (
+        "native", False, 1,
+    )
+    assert record.input_summary == {"operation": "runtime.repair_json_once"}
 
 
 def test_side_effect_audit_rejects_conflicting_stable_operation() -> None:

@@ -23,7 +23,11 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.runtime.interfaces import LeaseContext
+from app.runtime.interfaces import (
+    LeaseContext,
+    NullTrafficEventRecorder,
+    TrafficEventRecorder,
+)
 from app.runtime.policy_engine import PolicyEngine
 from app.runtime.prompt_registry import PromptDefinition
 
@@ -63,6 +67,10 @@ class ModelRoute:
     data_residency: str = "public"
     max_context_tokens: int = 8192
     max_output_tokens: int = 4096
+    enabled: bool = True
+    # 空集合只用于直接构造的兼容测试；部署 JSON 必须显式提供租户与逻辑 policy。
+    allowed_tenant_ids: frozenset[str] = frozenset()
+    allowed_model_policies: frozenset[str] = frozenset()
     # 仅允许部署配置的候选 route；为空表示失败后直接交给节点模板 fallback。
     fallback_route_id: str | None = None
 
@@ -105,6 +113,17 @@ class ModelRoute:
             raise ValueError("启用熔断时 circuit_open_seconds 必须为正数")
         if not self.route_config_version or not self.pricing_config_version:
             raise ValueError("route_config_version 与 pricing_config_version 不能为空")
+        if not isinstance(self.enabled, bool):
+            raise ValueError("enabled 必须是布尔值")
+        for field_name, values in (
+            ("allowed_tenant_ids", self.allowed_tenant_ids),
+            ("allowed_model_policies", self.allowed_model_policies),
+        ):
+            if (
+                not isinstance(values, frozenset)
+                or any(not isinstance(value, str) or not value for value in values)
+            ):
+                raise ValueError(f"{field_name} 必须是字符串集合")
         if self.fallback_route_id is not None and (
             not isinstance(self.fallback_route_id, str)
             or not self.fallback_route_id
@@ -140,9 +159,18 @@ class ModelRoute:
         if not isinstance(capabilities, list):
             raise ValueError("部署 route 必须显式配置 capabilities 数组")
         route["capabilities"] = frozenset(capabilities)
+        for field in ("allowed_tenant_ids", "allowed_model_policies"):
+            values = route.get(field)
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(value, str) or not value for value in values)
+            ):
+                raise ValueError(f"部署 route 必须显式配置非空 {field} 数组")
+            route[field] = frozenset(values)
         required = {
             "route_config_version", "pricing_config_version", "data_residency",
-            "max_context_tokens", "max_output_tokens",
+            "max_context_tokens", "max_output_tokens", "enabled",
         }
         if missing := sorted(required - set(route)):
             raise ValueError(f"部署 route 缺少治理字段: {','.join(missing)}")
@@ -282,7 +310,12 @@ class ModelCapabilityEvaluator:
         if model_policy.requires_vision:
             required_capabilities |= {"vision"}
         return (
-            required_capabilities.issubset(route.capabilities)
+            route.enabled
+            and (
+                not route.allowed_model_policies
+                or model_policy.name in route.allowed_model_policies
+            )
+            and required_capabilities.issubset(route.capabilities)
             and ("private_residency" not in required_capabilities or route.data_residency == "private")
             and model_policy.max_output_tokens <= route.max_output_tokens
             and estimated_input_tokens + model_policy.max_output_tokens <= route.max_context_tokens
@@ -298,7 +331,12 @@ class ModelCapabilityEvaluator:
             policy.name
             for policy in self._policies.values()
             if any(
-                policy.required_capabilities.issubset(route.capabilities)
+                route.enabled
+                and (
+                    not route.allowed_model_policies
+                    or policy.name in route.allowed_model_policies
+                )
+                and policy.required_capabilities.issubset(route.capabilities)
                 and ("private_residency" not in policy.required_capabilities or route.data_residency == "private")
                 and policy.max_output_tokens <= route.max_output_tokens
                 and policy.max_output_tokens <= route.max_context_tokens
@@ -330,6 +368,8 @@ class ModelCallContext:
     estimated_input_tokens: int = 0
     request_deadline_at: datetime | None = None
     allowed_route_ids: frozenset[str] = frozenset()
+    tenant_id: str = ""
+    required_data_residency: str | None = None
 
     def __init__(
         self,
@@ -342,6 +382,8 @@ class ModelCallContext:
         estimated_input_tokens: int,
         request_deadline_at: datetime | None,
         allowed_route_ids: frozenset[str],
+        tenant_id: str,
+        required_data_residency: str | None,
     ) -> None:
         if _factory is not _CONTEXT_FACTORY:
             raise TypeError("ModelCallContext 必须由 from_authoritative 构造")
@@ -352,6 +394,8 @@ class ModelCallContext:
         object.__setattr__(self, "estimated_input_tokens", estimated_input_tokens)
         object.__setattr__(self, "request_deadline_at", request_deadline_at)
         object.__setattr__(self, "allowed_route_ids", allowed_route_ids)
+        object.__setattr__(self, "tenant_id", tenant_id)
+        object.__setattr__(self, "required_data_residency", required_data_residency)
 
     @classmethod
     def from_authoritative(
@@ -418,6 +462,43 @@ class ModelCallContext:
             estimated_input_tokens=estimated_input_tokens,
             request_deadline_at=request_deadline_at,
             allowed_route_ids=cls.allowed_routes_from_snapshot(run.capability_snapshot_json),
+            tenant_id=run.tenant_id,
+            required_data_residency=cls.required_residency_from_snapshot(
+                run.capability_snapshot_json
+            ),
+        )
+
+    @classmethod
+    def with_minimum_estimated_input_tokens(
+        cls,
+        context: ModelCallContext,
+        minimum_tokens: int,
+    ) -> ModelCallContext:
+        """从既有权威上下文派生更保守的输入预留，禁止调用方降低原估算。
+
+        repair 请求包含首次候选的有界 untrusted data；它必须按实际短生命周期
+        Provider request 提高 TPM/成本预留，但不能改写 lease、路由或授权身份。
+        """
+        if (
+            isinstance(minimum_tokens, bool)
+            or not isinstance(minimum_tokens, int)
+            or minimum_tokens < 0
+        ):
+            raise ValueError("MODEL_INPUT_TOKEN_ESTIMATE_INVALID")
+        return cls(
+            _factory=_CONTEXT_FACTORY,
+            run_id=context.run_id,
+            step_id=context.step_id,
+            model_attempt=context.model_attempt,
+            lease_context=context.lease_context,
+            estimated_input_tokens=max(
+                context.estimated_input_tokens,
+                minimum_tokens,
+            ),
+            request_deadline_at=context.request_deadline_at,
+            allowed_route_ids=context.allowed_route_ids,
+            tenant_id=context.tenant_id,
+            required_data_residency=context.required_data_residency,
         )
 
     @staticmethod
@@ -431,6 +512,14 @@ class ModelCallContext:
         ):
             return frozenset()
         return frozenset(route_ids)
+
+    @staticmethod
+    def required_residency_from_snapshot(snapshot: object) -> str | None:
+        """驻留约束只能来自创建 Run 时冻结的服务端能力快照。"""
+        if not isinstance(snapshot, Mapping):
+            return None
+        value = snapshot.get("required_model_data_residency")
+        return value if value in {"public", "private"} else None
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
@@ -541,6 +630,7 @@ class ModelGateway:
         call_guard: ModelCallGuard | None = None,
         model_policies: ModelPolicyRegistry | None = None,
         capability_evaluator: ModelCapabilityEvaluator | None = None,
+        traffic_event_recorder: TrafficEventRecorder | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -553,8 +643,24 @@ class ModelGateway:
         self._call_guard = call_guard or _AllowModelCalls()
         self._model_policies = model_policies or ModelPolicyRegistry.default()
         self._capability_evaluator = capability_evaluator or ModelCapabilityEvaluator(self._model_policies)
+        self._traffic_event_recorder = traffic_event_recorder or NullTrafficEventRecorder()
         self._sleep = sleep
         self._monotonic = monotonic
+
+    def record_validation_rejection(self, route_id: str, error_codes: tuple[str, ...]) -> None:
+        """记录模型结果的受控拒绝码；错误明细和模型输出均不进入流量账本。"""
+        if not error_codes:
+            return
+        try:
+            self._traffic_event_recorder.record(
+                "semantic_validation_rejected", route_id, "SEMANTIC_VALIDATION_FAILED",
+            )
+            if {"FORBIDDEN_CONTROL_FIELD", "TOOL_PARAMETERS_FORBIDDEN"}.intersection(error_codes):
+                self._traffic_event_recorder.record(
+                    "prompt_injection_rejected", route_id, "INDIRECT_PROMPT_INJECTION",
+                )
+        except Exception:
+            logging.warning("Runtime 语义拒绝流量账本写入失败 route_id=%s", route_id)
 
     def call(
         self,
@@ -643,8 +749,16 @@ class ModelGateway:
     ) -> ModelGatewayResult:
         """执行单一受信任候选 route；每个候选独立创建 usage 与 Redis permit。"""
         route_id = route.route_id
-        if route_id not in context.allowed_route_ids:
+        governance_error = self._route_governance_error(context, route, prompt)
+        if governance_error == "MODEL_ROUTE_NOT_DEPLOYED":
             return ModelGatewayResult("route_not_allowed")
+        if governance_error is not None:
+            logging.info(
+                "模型 route 治理拒绝 route_id=%s code=%s",
+                route_id,
+                governance_error,
+            )
+            return ModelGatewayResult("governance_denied", error_code=governance_error)
         if not self._route_supports_prompt(route, context.estimated_input_tokens, prompt):
             logging.info(
                 "模型 route 能力不足 route_id=%s code=MODEL_CAPABILITY_UNAVAILABLE",
@@ -736,6 +850,32 @@ class ModelGateway:
         return self._send_activated_attempt(
             context, route, request, usage_id, permit_id,
         )
+
+    @staticmethod
+    def _route_governance_error(
+        context: ModelCallContext,
+        route: ModelRoute,
+        prompt: PromptDefinition | None,
+    ) -> str | None:
+        """按固定可信顺序判定 route；fallback 候选也必须重新走完整链。"""
+        if not route.enabled:
+            return "MODEL_ROUTE_EMERGENCY_DISABLED"
+        if (
+            route.allowed_tenant_ids
+            and "*" not in route.allowed_tenant_ids
+            and context.tenant_id not in route.allowed_tenant_ids
+        ) or (
+            context.required_data_residency is not None
+            and route.data_residency != context.required_data_residency
+        ):
+            return "MODEL_ROUTE_TENANT_DENIED"
+        if route.allowed_model_policies and (
+            prompt is None or prompt.model_policy not in route.allowed_model_policies
+        ):
+            return "MODEL_ROUTE_POLICY_DENIED"
+        if route.route_id not in context.allowed_route_ids:
+            return "MODEL_ROUTE_NOT_DEPLOYED"
+        return None
 
     def _send_activated_attempt(
         self,
@@ -1072,7 +1212,11 @@ if op == 'circuit_failure' then
 end
 if op == 'circuit_success' then
   local route_id = ARGV[6]
-  redis.call('DEL', 'model_gateway:circuit_failures:'..route_id, 'model_gateway:circuit_open:'..route_id)
+  local failures = 'model_gateway:circuit_failures:'..route_id
+  local circuit_open = 'model_gateway:circuit_open:'..route_id
+  local recovered = redis.call('EXISTS', failures) == 1 or redis.call('EXISTS', circuit_open) == 1
+  redis.call('DEL', failures, circuit_open)
+  if recovered then return {'circuit_recovered', 0} end
   return {'circuit_reset', 0}
 end
 if op == 'started' then
@@ -1106,33 +1250,52 @@ return {'invalid_operation', 0}
 class ProviderTrafficController:
     """Redis 是唯一共享流控真相；Redis 故障时一律拒绝。"""
 
-    def __init__(self, redis: RedisEvaluator, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, redis: RedisEvaluator, *, clock: Callable[[], float] = time.time,
+        recorder: TrafficEventRecorder | None = None,
+    ) -> None:
         self._redis = redis
         self._clock = clock
+        self._recorder = recorder or NullTrafficEventRecorder()
 
     def acquire(self, route: ModelRoute, permit_id: str, *, estimated_tokens: int = 0) -> PermitResult:
         if not permit_id or estimated_tokens < 0:
             raise ValueError("permit_id 不能为空且 estimated_tokens 不可为负")
-        return self._run(
+        result = self._run(
             "acquire", route, permit_id, route.max_concurrency, route.permit_ttl_seconds,
             route.rpm_limit, route.tpm_limit, estimated_tokens, route.route_id,
             route.circuit_failure_threshold,
         )
+        if result.status == "redis_unavailable":
+            self._record("redis_fail_closed", route, result.status)
+        elif result.status != "acquired":
+            self._record("permit_rejected", route, result.status)
+        return result
 
     def record_circuit_failure(self, route: ModelRoute) -> PermitResult:
         """仅记录已确认的 Provider 失败；Redis 故障由调用方安全忽略结果。"""
         if route.circuit_failure_threshold == 0:
             return PermitResult("circuit_disabled")
-        return self._run(
+        result = self._run(
             "circuit_failure", route, "", route.circuit_failure_threshold,
             route.circuit_open_seconds, route.route_id,
         )
+        if result.status == "circuit_opened":
+            self._record("circuit_opened", route, result.status)
+        elif result.status == "redis_unavailable":
+            self._record("redis_fail_closed", route, result.status)
+        return result
 
     def record_circuit_success(self, route: ModelRoute) -> PermitResult:
         """仅在可交付的成功响应后清除 route 的连续失败计数。"""
         if route.circuit_failure_threshold == 0:
             return PermitResult("circuit_disabled")
-        return self._run("circuit_success", route, "", route.route_id)
+        result = self._run("circuit_success", route, "", route.route_id)
+        if result.status == "circuit_recovered":
+            self._record("circuit_recovered", route, result.status)
+        elif result.status == "redis_unavailable":
+            self._record("redis_fail_closed", route, result.status)
+        return result
 
     def preflight_circuit(self, route: ModelRoute) -> PermitResult:
         """在 usage 预留前只读检查 route 熔断；Redis 故障一律拒绝。"""
@@ -1148,7 +1311,19 @@ class ProviderTrafficController:
     def settle(self, route: ModelRoute, permit_id: str, *, retry_after_seconds: float = 0) -> PermitResult:
         if retry_after_seconds < 0:
             raise ValueError("retry_after_seconds 不可为负")
-        return self._run("settle", route, permit_id, retry_after_seconds, route.route_id)
+        result = self._run("settle", route, permit_id, retry_after_seconds, route.route_id)
+        if retry_after_seconds > 0 and result.status in {"settled", "already_settled"}:
+            self._record("retry_after_applied", route, "rate_limited")
+        elif result.status == "redis_unavailable":
+            self._record("redis_fail_closed", route, result.status)
+        return result
+
+    def _record(self, event_type: str, route: ModelRoute, result_code: str) -> None:
+        try:
+            self._recorder.record(event_type, route.route_id, result_code)
+        except Exception:
+            # 流量观测不能携带内容，也不能让记录器异常把 Redis 的 fail-closed 语义改为放行。
+            logging.warning("Runtime 流量账本写入失败 event_type=%s route_id=%s", event_type, route.route_id)
 
     def _run(self, operation: str, route: ModelRoute, permit_id: str, *values: object) -> PermitResult:
         route_key = f"model_gateway:route:{route.rate_limit_key}"

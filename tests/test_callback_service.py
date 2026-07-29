@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentRun, CallbackEvent, RuntimeOutboxEvent
+from app.models import AgentRun, CallbackEvent, RuntimeAuditRecord, RuntimeOutboxEvent
 from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.services.callback_service import CallbackDeliveryService
 from app.services.outbox_service import OutboxService
@@ -80,6 +80,70 @@ def test_callback_delivery_rechecks_target_authorization_before_send() -> None:
 
     with pytest.raises(ValueError, match="CALLBACK_TARGET_REVOKED"):
         CallbackDeliveryService(session, gateway, authorize_target=lambda current: False).deliver(event)
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    [
+        "AUTHORIZATION_REVOKED",
+        "AUTHORIZATION_VERSION_CHANGED",
+    ],
+)
+def test_callback_delivery_persists_fixed_contentless_authorization_reason(
+    reason_code: str,
+) -> None:
+    """授权拒绝必须保留细分固定码，审计不得携带 target、URL 或 callback body。"""
+    session = _session()
+    run = _run()
+    session.add(run)
+    OutboxService(session).append_callback_event(run, "run_started")
+    session.commit()
+    event = session.scalar(select(RuntimeOutboxEvent))
+    assert event is not None
+    gateway = CallbackGateway(
+        {"memory": CallbackTarget("https://business.local/callback", "runtime", "key", "secret")},
+        httpx.Client(transport=httpx.MockTransport(lambda request: pytest.fail("must not send"))),
+    )
+
+    with pytest.raises(ValueError, match="CALLBACK_TARGET_REVOKED"):
+        CallbackDeliveryService(
+            session,
+            gateway,
+            authorize_target=lambda current: reason_code,
+        ).deliver(event)
+    session.commit()
+
+    audit = session.scalar(select(RuntimeAuditRecord))
+    assert audit is not None
+    assert audit.reason_code == reason_code
+    assert audit.metadata_summary == {"run_id": run.run_id, "status": run.status}
+    serialized = str(audit.metadata_summary)
+    assert all(value not in serialized for value in ("business.local", "secret", "run_started"))
+
+
+def test_callback_delivery_persists_target_missing_reason_without_content() -> None:
+    """事件中的 target 不再等于权威 Run target 时，必须写缺失码且不发送。"""
+    session = _session()
+    run = _run()
+    session.add(run)
+    OutboxService(session).append_callback_event(run, "run_started")
+    session.commit()
+    event = session.scalar(select(RuntimeOutboxEvent))
+    assert event is not None
+    event.payload_json = {**event.payload_json, "target_id": "removed-target"}
+    session.commit()
+
+    with pytest.raises(ValueError, match="CALLBACK_TARGET_REVOKED"):
+        CallbackDeliveryService(
+            session,
+            CallbackGateway({}, httpx.Client()),
+        ).deliver(event)
+    session.commit()
+
+    audit = session.scalar(select(RuntimeAuditRecord))
+    assert audit is not None
+    assert audit.reason_code == "CALLBACK_TARGET_MISSING"
+    assert audit.metadata_summary == {"run_id": run.run_id, "status": run.status}
 
 
 def test_callback_event_is_immutable_after_persistence() -> None:

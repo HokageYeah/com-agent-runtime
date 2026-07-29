@@ -61,6 +61,15 @@ class MemorySnapshotMaterializer:
             source_manifest={"diary_ids": [item["id"] for item in diary_items], "bet_ids": [item["id"] for item in bet_items]},
             snapshot_payload={"diaries": diary_items, "bets": bet_items},
             privacy_filter_version="v1",
+            bound_at=(
+                _as_utc(relationship.bound_at)
+                if relationship.bound_at is not None
+                else None
+            ),
+            stats={
+                "diary_count": len(diary_items),
+                "bet_count": len(bet_items),
+            },
         )
 
 

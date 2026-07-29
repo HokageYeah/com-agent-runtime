@@ -45,3 +45,12 @@ prompts:
     model_policy: cheap_structured
     guardrail_policy: private_first
     status: active
+  - prompt_id: structured-output-repair
+    version: v1
+    file: structured-output-repair.v1.md
+    owner_agent: memoir_agent
+    input_schema: structured_output_repair_input
+    output_schema: structured_output_repair_output
+    model_policy: strict
+    guardrail_policy: private_first
+    status: active

@@ -38,6 +38,8 @@ def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> 
     cipher = FernetSnapshotCipher(Fernet.generate_key())
     service = MemoryArchiveService(session, cipher)
 
+    bound_at = datetime(2025, 3, 14, tzinfo=UTC)
+    unbound_at = datetime(2026, 7, 15, tzinfo=UTC)
     archives = service.create_archives_for_relationship(
         FrozenMemoryInput(
             relationship_id=42,
@@ -45,10 +47,13 @@ def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> 
             relationship_segment_no=3,
             owner_user_ids=(1001, 1002),
             partner_names={1001: "小林", 1002: "小周"},
-            snapshot_cutoff_at=datetime(2026, 7, 15, tzinfo=UTC),
+            snapshot_cutoff_at=unbound_at,
             source_manifest={"diary_ids": [1, 2], "bet_ids": []},
-            snapshot_payload={"diaries": [{"id": 1, "content": "私密日记"}]},
+            snapshot_payload={"diaries": [{"id": "d-1"}], "bets": []},
             privacy_filter_version="v1",
+            bound_at=bound_at,
+            partner_avatars={1001: "avatar-1001", 1002: "avatar-1002"},
+            stats={"diary_count": 1, "bet_count": 0},
         )
     )
     session.commit()
@@ -57,6 +62,14 @@ def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> 
     assert {archive.owner_user_id for archive in archives} == {1001, 1002}
     assert all(archive.published_revision == 0 for archive in archives)
     assert all(archive.content_status == "baseline" for archive in archives)
+    assert all(archive.enhancement_status == "disabled" for archive in archives)
+    by_owner = {archive.owner_user_id: archive for archive in archives}
+    assert (
+        by_owner[1001].partner_nickname_snapshot,
+        by_owner[1001].partner_avatar_snapshot,
+    ) == ("小周", "avatar-1002")
+    assert by_owner[1001].bound_at.replace(tzinfo=UTC) == bound_at
+    assert by_owner[1001].unbound_at.replace(tzinfo=UTC) == unbound_at
 
     snapshot = session.scalar(
         select(MemorySnapshot).where(
@@ -64,11 +77,23 @@ def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> 
         )
     )
     assert snapshot is not None
-    assert snapshot.encrypted_payload != (
-        '{"diaries":[{"id":1,"content":"私密日记"}]}'.encode()
-    )
+    assert b"d-1" not in snapshot.encrypted_payload
     assert cipher.decrypt_json(snapshot.encrypted_payload) == {
-        "diaries": [{"id": 1, "content": "私密日记"}]
+        "schema_version": "1.0.0",
+        "source_range": {
+            "relationship_id": 42,
+            "space_id": "space-42",
+            "relationship_segment_no": 3,
+            "bound_at": "2025-03-14T00:00:00+00:00",
+            "unbound_at": "2026-07-15T00:00:00+00:00",
+            "user_snapshots": [
+                {"user_id": 1001, "nickname": "小林", "avatar_ref": "avatar-1001"},
+                {"user_id": 1002, "nickname": "小周", "avatar_ref": "avatar-1002"},
+            ],
+        },
+        "diary_items": [{"id": "d-1"}],
+        "bet_items": [],
+        "stats": {"diary_count": 1, "bet_count": 0},
     }
     assert snapshot.source_manifest_hash
 
@@ -81,6 +106,36 @@ def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> 
     assert document is not None
     assert document.is_published is True
     assert session.scalars(select(MemoryArchive)).all()
+
+
+def test_create_archives_rejects_url_as_avatar_snapshot() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    service = MemoryArchiveService(
+        session,
+        FernetSnapshotCipher(Fernet.generate_key()),
+    )
+
+    with pytest.raises(ValueError, match="MEMORY_AVATAR_REF_INVALID"):
+        service.create_archives_for_relationship(
+            FrozenMemoryInput(
+                relationship_id=22,
+                space_id="space-private-avatar",
+                relationship_segment_no=1,
+                owner_user_ids=(1001, 1002),
+                partner_names={1001: "小林", 1002: "小周"},
+                snapshot_cutoff_at=datetime(2026, 7, 29, tzinfo=UTC),
+                source_manifest={"diary_ids": []},
+                snapshot_payload={"diaries": [], "bets": []},
+                privacy_filter_version="privacy-v1",
+                bound_at=datetime(2026, 7, 1, tzinfo=UTC),
+                partner_avatars={
+                    1002: "https://private.example/avatar/1002",
+                },
+                stats={"diary_count": 0, "bet_count": 0},
+            )
+        )
 
 
 def test_atomic_publish_advances_only_archive_published_revision() -> None:
@@ -104,6 +159,7 @@ def test_atomic_publish_advances_only_archive_published_revision() -> None:
     )[0]
     session.commit()
     service = MemoryArchiveService(session, cipher)
+    archive.enhancement_status = "pending"
 
     published = service.publish_playback_document(
         archive.archive_id,
@@ -128,7 +184,12 @@ def test_atomic_publish_advances_only_archive_published_revision() -> None:
     refreshed = session.scalar(
         select(MemoryArchive).where(MemoryArchive.archive_id == archive.archive_id)
     )
-    assert refreshed is not None and (refreshed.published_revision, refreshed.content_status) == (1, "succeeded")
+    assert refreshed is not None
+    assert (
+        refreshed.published_revision,
+        refreshed.content_status,
+        refreshed.enhancement_status,
+    ) == (1, "succeeded", "pending")
 
 
 def test_snapshot_service_only_reads_snapshot_bound_to_archive() -> None:
@@ -146,9 +207,12 @@ def test_snapshot_service_only_reads_snapshot_bound_to_archive() -> None:
         archive.archive_id, "snapshot-read-run", 0, snapshot_id=snapshot.snapshot_id,
     )
     ref.status = "pending"
-    assert MemorySnapshotService(session, cipher).read_for_runtime(
+    runtime_snapshot = MemorySnapshotService(session, cipher).read_for_runtime(
         archive.archive_id, snapshot.snapshot_id, "snapshot-read-run", 0,
-    ) == {"diaries": ["私密正文"]}
+    )
+    assert runtime_snapshot["schema_version"] == "1.0.0"
+    assert runtime_snapshot["diary_items"] == ["私密正文"]
+    assert runtime_snapshot["bet_items"] == []
     try:
         MemorySnapshotService(session, cipher).read_for_runtime(
             "other", snapshot.snapshot_id, "snapshot-read-run", 0,
@@ -157,6 +221,161 @@ def test_snapshot_service_only_reads_snapshot_bound_to_archive() -> None:
         assert str(exc) == "MEMORY_SNAPSHOT_UNAVAILABLE"
     else:
         raise AssertionError("跨 archive 快照读取必须被拒绝")
+
+
+def test_snapshot_service_migrates_legacy_payload_in_memory_without_writeback() -> None:
+    """旧结构只在读取结果中单向迁移，原密文与摘要不得被旧服务覆盖。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(
+            31,
+            "space-legacy",
+            2,
+            (101, 102),
+            {101: "用户甲", 102: "用户乙"},
+            datetime(2026, 7, 15, tzinfo=UTC),
+            {"diary_ids": ["legacy-1"], "bet_ids": []},
+            {"diaries": [], "bets": []},
+            "v1",
+            bound_at=datetime(2026, 7, 1, tzinfo=UTC),
+        )
+    )[0]
+    snapshot = session.scalar(
+        select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id)
+    )
+    assert snapshot is not None
+    snapshot.encrypted_payload = cipher.encrypt_json(
+        {"diaries": [{"id": "legacy-1"}], "bets": []}
+    )
+    snapshot.content_digest = "legacy-digest"
+    MemoryAgentBindingService(session).bind(
+        archive.archive_id,
+        "legacy-snapshot-run",
+        0,
+        snapshot_id=snapshot.snapshot_id,
+    ).status = "pending"
+    session.commit()
+    original_ciphertext = snapshot.encrypted_payload
+
+    migrated = MemorySnapshotService(session, cipher).read_for_runtime(
+        archive.archive_id,
+        snapshot.snapshot_id,
+        "legacy-snapshot-run",
+        0,
+    )
+
+    assert migrated == {
+        "schema_version": "1.0.0",
+        "source_range": {
+            "relationship_id": 31,
+            "space_id": "space-legacy",
+            "relationship_segment_no": 2,
+            "bound_at": "2026-07-01T00:00:00+00:00",
+            "unbound_at": "2026-07-15T00:00:00+00:00",
+            "user_snapshots": [
+                {"user_id": 101, "nickname": None, "avatar_ref": None},
+                {"user_id": 102, "nickname": "用户乙", "avatar_ref": None},
+            ],
+        },
+        "diary_items": [{"id": "legacy-1"}],
+        "bet_items": [],
+        "stats": {"diary_count": 1, "bet_count": 0},
+    }
+    session.refresh(snapshot)
+    assert snapshot.encrypted_payload == original_ciphertext
+    assert snapshot.content_digest == "legacy-digest"
+
+
+def test_snapshot_service_rejects_unknown_future_major_without_writeback() -> None:
+    """旧服务不能读取或覆盖未来 major 的快照 envelope。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(
+            32,
+            "space-future",
+            1,
+            (201, 202),
+            {},
+            datetime(2026, 7, 15, tzinfo=UTC),
+            {},
+            {},
+            "v1",
+        )
+    )[0]
+    snapshot = session.scalar(
+        select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id)
+    )
+    assert snapshot is not None
+    snapshot.schema_major = 2
+    snapshot.encrypted_payload = cipher.encrypt_json(
+        {"schema_version": "2.0.0", "future_field": "opaque"}
+    )
+    MemoryAgentBindingService(session).bind(
+        archive.archive_id,
+        "future-snapshot-run",
+        0,
+        snapshot_id=snapshot.snapshot_id,
+    ).status = "pending"
+    session.commit()
+    original_ciphertext = snapshot.encrypted_payload
+
+    with pytest.raises(ValueError, match="MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED"):
+        MemorySnapshotService(session, cipher).read_for_runtime(
+            archive.archive_id,
+            snapshot.snapshot_id,
+            "future-snapshot-run",
+            0,
+        )
+
+    session.refresh(snapshot)
+    assert snapshot.encrypted_payload == original_ciphertext
+
+
+def test_snapshot_service_rejects_future_major_before_publish_authorization() -> None:
+    """发布工具复用的授权入口也必须拒绝未来 major，不能只保护读取路径。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(
+            34,
+            "space-future-publish",
+            1,
+            (401, 402),
+            {},
+            datetime(2026, 7, 15, tzinfo=UTC),
+            {},
+            {},
+            "v1",
+        )
+    )[0]
+    snapshot = session.scalar(
+        select(MemorySnapshot).where(MemorySnapshot.archive_id == archive.archive_id)
+    )
+    assert snapshot is not None
+    snapshot.schema_major = 2
+    MemoryAgentBindingService(session).bind(
+        archive.archive_id,
+        "future-publish-run",
+        0,
+        snapshot_id=snapshot.snapshot_id,
+    ).status = "pending"
+    session.commit()
+
+    with pytest.raises(ValueError, match="MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED"):
+        MemorySnapshotService(session, cipher).authorize_runtime(
+            archive.archive_id,
+            snapshot.snapshot_id,
+            "future-publish-run",
+            0,
+        )
 
 
 def test_binding_rejects_second_run_and_old_epoch_publish() -> None:
@@ -454,3 +673,62 @@ def test_memory_media_asset_database_contract_rejects_unknown_enums() -> None:
 
     with pytest.raises(IntegrityError):
         session.flush()
+
+
+def test_late_media_for_old_revision_is_not_joined_to_current_playback() -> None:
+    """旧作品的迟到媒体即使落库，也不能被当前 published revision 读取。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    cipher = FernetSnapshotCipher(Fernet.generate_key())
+    archive = MemoryArchiveService(session, cipher).create_archives_for_relationship(
+        FrozenMemoryInput(
+            33,
+            "space-late-media",
+            1,
+            (301, 302),
+            {},
+            datetime(2026, 7, 15, tzinfo=UTC),
+            {},
+            {},
+            "v1",
+        )
+    )[0]
+    service = MemoryArchiveService(session, cipher)
+    first = service.publish_playback_document(
+        archive.archive_id,
+        expected_generation_epoch=0,
+        document={
+            "schema_version": "1.0.0",
+            "scenes": [],
+            "actions": [],
+            "media_manifest": [],
+        },
+    )
+    second = service.publish_playback_document(
+        archive.archive_id,
+        expected_generation_epoch=0,
+        document={
+            "schema_version": "1.0.0",
+            "scenes": [],
+            "actions": [],
+            "media_manifest": [],
+        },
+    )
+    session.add(
+        MemoryMediaAsset(
+            asset_id="late-old-revision",
+            archive_id=archive.archive_id,
+            document_id=first.document_id,
+            media_type="image",
+            source_type="default_asset",
+            status="ready",
+            storage_key="private/old-revision",
+        )
+    )
+    session.commit()
+
+    playback = MemoryPlayerService(session).get_published_playback(archive.archive_id)
+
+    assert playback.document.document_id == second.document_id
+    assert playback.media_assets == []

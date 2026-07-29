@@ -1,5 +1,11 @@
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+import app.models  # noqa: F401
 from app.agents.memoir_agent.runner import MemoirNodeRunner
+from app.db.sqlalchemy_db import Base
 from app.runtime.state import AgentState
+from app.services.tool_call_audit_service import ToolCallAuditService
 
 
 def test_load_snapshot_writes_only_runtime_memory_state():
@@ -16,9 +22,12 @@ def test_publish_document_writes_only_publish_result():
     class Gateway:
         def publish_playback_document(self, *args):
             return {"revision": 1, "content_digest": "digest"}
-    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 1}, "business_connector_id": "c", "run_id": "r"})()
+    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 1}, "business_connector_id": "c", "run_id": "r", "execution_attempt": 1})()
     state = AgentState(playback_document={"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []})
-    assert MemoirNodeRunner(Gateway()).run_node({"node_id": "publish_document"}, run, state) == {"node_id": "publish_document", "published": True}
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    assert MemoirNodeRunner(Gateway(), ToolCallAuditService(session)).run_node({"node_id": "publish_document"}, run, state) == {"node_id": "publish_document", "published": True}
     assert state.publish_result == {"revision": 1, "content_digest": "digest"}
 
 
@@ -31,6 +40,56 @@ def test_compute_stats_uses_snapshot_counts_and_empty_fallback():
     empty = AgentState(snapshot={})
     runner.run_node({"node_id": "compute_stats"}, run, empty)
     assert empty.stats == {"diary_count": 0, "bet_count": 0, "has_material": False}
+
+
+def test_snapshot_envelope_is_consumed_without_copying_control_fields():
+    """Runner 只消费版本化素材槽，冻结关系元数据不得进入模型素材摘要。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "schema_version": "1.0.0",
+            "source_range": {
+                "relationship_segment_no": 3,
+                "user_snapshots": [{"user_id": 1, "nickname": "snapshot-name"}],
+            },
+            "diary_items": [{"id": "d1", "content": "safe fixture"}],
+            "bet_items": [{"id": "b1", "content": "safe fixture"}],
+            "stats": {"diary_count": 1, "bet_count": 1},
+        }
+    )
+
+    runner.run_node({"node_id": "compute_stats"}, run, state)
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    assert state.stats == {"diary_count": 1, "bet_count": 1, "has_material": True}
+    assert [item["source_ref"] for item in state.sanitized_material["materials"]] == [
+        "diary:d1",
+        "bet:b1",
+    ]
+    assert "snapshot-name" not in str(state.sanitized_material)
+
+
+def test_disabled_media_node_is_skipped_without_calling_gateway():
+    """第一版媒体节点必须显式跳过，不能借预留 TTS 契约触网。"""
+
+    class NoNetworkGateway:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"disabled media must not call {name}")
+
+    state = AgentState()
+    result = MemoirNodeRunner(NoNetworkGateway()).run_node(
+        {"node_id": "enqueue_media_tasks"},
+        type("Run", (), {"run_id": "r"})(),
+        state,
+    )
+
+    assert result == {
+        "node_id": "enqueue_media_tasks",
+        "skipped": True,
+        "reason_code": "CAPABILITY_DISABLED",
+    }
+    assert state.media_tasks == []
 
 
 def test_sanitize_materials_redacts_identifiers_and_keeps_safe_reference():

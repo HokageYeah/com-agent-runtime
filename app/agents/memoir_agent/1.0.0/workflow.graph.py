@@ -41,5 +41,15 @@ WORKFLOW_NODES = [
         "prompt_ref": "safety-review.v1.md",
         "next_nodes": ["publish_document"],
     },
-    {"node_id": "publish_document", "node_type": "tool", "next_nodes": []},
+    {
+        "node_id": "publish_document",
+        "node_type": "tool",
+        "next_nodes": ["enqueue_media_tasks"],
+    },
+    {
+        "node_id": "enqueue_media_tasks",
+        "node_type": "deterministic",
+        "next_nodes": [],
+        "optional": True,
+    },
 ]

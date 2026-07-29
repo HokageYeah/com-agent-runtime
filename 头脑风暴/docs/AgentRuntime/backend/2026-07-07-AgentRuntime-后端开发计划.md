@@ -763,24 +763,24 @@ unique(client_id, idempotency_key, scope)
 - [✅] 校验 `business_type` 属于 AgentPackage 允许范围。
 - [✅] 从凭据推导 caller/tenant，校验 Agent、business_type、callback target、business connector、数据域和 Admission 配额。
 - [✅] create held/auto、start、retry、human approval/fallback 恢复在同一数据库事务中执行配额预留、状态条件更新和 run_dispatch outbox；429 保持原状态且不完成 IdempotencyRecord，cancel/purge 不受 Admission 阻塞。
-- [ ] `AdmissionService` 以 `dispatch_state` 映射占用：held/queued/claimed 分别对应 held/queued/running，finished 不占用；从认证身份生成规范 scope key，以方言安全的幂等 upsert 确保 bucket 存在，再按固定 scope 顺序锁定，先校验目标上限后原子增减。幂等命中、条件写失败和事务回滚都不得留下计数变化。
+- [✅] `AdmissionService` 以 `dispatch_state` 映射占用：held/queued/claimed 分别对应 held/queued/running，finished 不占用；从认证身份生成规范 scope key，以方言安全的幂等 upsert 确保 bucket 存在，再按固定 scope 顺序锁定，先校验目标上限后原子增减。幂等命中、条件写失败和事务回滚都不得留下计数变化。
 - [✅] 固定容量迁移矩阵：create `none -> held|queued`、start `held -> queued`、retry/approval/fallback `none -> queued`、直接 cancel/终止 `held|queued -> none`；claimed run 的释放由 Worker 安全终止事务执行，API 的 cancel/purge 请求本身不等待也不受 Admission 拒绝。
 - [✅] 创建 held run，设置 `held_expires_at`、package digest、contract、authorization version 和 capability snapshot；相同 key 与 request hash 的重复创建重放首次创建响应，当前 run 状态由 AgentRun 查询接口返回。
-- [ ] `/start` 条件更新 held -> queued，并在同一事务完成 Admission `held -> queued`、写 `queued_at`、run_dispatch outbox 和幂等响应；相同 key/hash 重放首次响应，使用新 key 请求已 queued/claimed 的 run 时返回当前安全摘要且不重复迁移配额或写 outbox。held 超时、已取消/结束、package revoked、privacy 非 active 或授权失效时拒绝。
+- [✅] `/start` 条件更新 held -> queued，并在同一事务完成 Admission `held -> queued`、写 `queued_at`、run_dispatch outbox 和幂等响应；相同 key/hash 重放首次响应，使用新 key 请求已 queued/claimed 的 run 时返回当前安全摘要且不重复迁移配额或写 outbox。held 超时、已取消/结束、package revoked、privacy 非 active 或授权失效时拒绝。
 - [✅] 相同 `Idempotency-Key` 的 method、normalized path 或 body hash 任一项不一致时返回 HTTP `409 Conflict`，错误码 `IDEMPOTENCY_CONFLICT`；不同 `run_id` 不能因空 body 相同而复用旧结果。
 - [✅] auto create 才在创建事务写 run_dispatch outbox；任何 HTTP 请求都不执行 workflow。
 - [✅] 查询接口返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version/privacy_purge_requested_at/private_data_purged_at/updated_at`、progress、current_step、public_trace 和安全错误摘要，不返回 lease/fencing、私密 payload 或内部错误堆栈。
 - [✅] 取消与 retry/approval 互斥：`pending + held/queued` 或 `waiting_human + finished` 在 API 事务内直接写 `cancel_requested_at/status=cancelled/dispatch_state=finished`、递增 `status_version` 并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，迟到 dispatch 认领失败。
 - [✅] 重试接口只允许原 caller 或内部审计身份调用，且只允许 `failed/partial`、存在 checkpoint、`manual_retry_count < 3` 的 run 重新入队。
-- [ ] `partial` retry 只执行 Runtime 未完成的可选步骤，复用已发布 revision，不重新执行主作品发布；业务媒体 worker 失败不触发 AgentRun retry。（依赖 Task 6/10 写入步骤状态、可选节点与 checkpoint 语义。）
-- [ ] retry 创建新 execution attempt，复用逻辑副作用键；package revoked 或 privacy 非 active 时拒绝。
+- [✅] `partial` retry 只执行 Runtime 未完成的可选步骤，复用已发布 revision，不重新执行主作品发布；业务媒体 worker 失败不触发 AgentRun retry。（依赖 Task 6/10 写入步骤状态、可选节点与 checkpoint 语义。）
+- [✅] retry 创建新 execution attempt，复用逻辑副作用键；package revoked 或 privacy 非 active 时拒绝。
 - [✅] human approval 只接受 `status=waiting_human AND dispatch_state=finished` 的 run，携带 `decision=approve|reject`、当前 `expected_status_version` 和独立幂等键；approve 只条件更新 `dispatch_state: finished -> queued`、递增 `status_version` 并同事务写 dispatch outbox，run 状态保持 `waiting_human`，由重新取得 lease 的 worker 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或明确终结为 `failed/cancelled`。
-- [ ] purge API 在同一事务写 tombstone/version 并请求取消，提交后立即返回 `202 + privacy_state=purge_requested + privacy_version`，不等待物理清理；清理 worker 完成后才由 AgentRun 查询返回 `privacy_state=purged`。相同 key 与 request hash 的重复 POST 重放首次接受响应，不改写 `IdempotencyRecord.response_json`，也不创建第二个清理任务；当前状态只通过 AgentRun 查询。清理失败保持写屏障，由 reconciler 重试并告警，purge 后禁止 retry/resume。
+- [✅] purge API 在同一事务写 tombstone/version 并请求取消，提交后立即返回 `202 + privacy_state=purge_requested + privacy_version`，不等待物理清理；清理 worker 完成后才由 AgentRun 查询返回 `privacy_state=purged`。相同 key 与 request hash 的重复 POST 重放首次接受响应，不改写 `IdempotencyRecord.response_json`，也不创建第二个清理任务；当前状态只通过 AgentRun 查询。清理失败保持写屏障，由 reconciler 重试并告警，purge 后禁止 retry/resume。
 - [✅] IdempotencyService 以 `client_id + scope + key` 锁定记录：未过期时复用/冲突，过期时原子换代；purge 记录在清理完成前不得过期或复用。
 - [✅] 事务接受前的 429、连接失败和可重试 5xx 不完成 IdempotencyRecord。
 - [✅] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，与手动 run 级重试计数隔离。
 - [✅] approval/cancel/retry/purge 接受事务成功后写 RuntimeAuditEvent，actor 从服务凭据推导，metadata 只含版本、scope、结果和标准错误码。
-- [ ] 测试 held/start 握手、重复 create 在 run 状态变化后仍重放首次创建响应且 GET 返回当前状态、同 key start 重放首次响应、新 key start 命中 queued/claimed 时不重复迁移 Admission 或写 outbox、同 key 指向不同 run 返回幂等冲突、held 超时、Admission 429、合法签名的 GET/steps 不带幂等键可查询、读接口签名缺失或越权被拒绝、写接口缺少幂等键被拒绝、查询字段可完成 callback 与 purge 对账、签名/key 轮换、target/connector 越权、幂等冲突/过期换代、stale approval status version、retry/cancel 竞态、purge 接受时返回 202/requested、查询确认 purged、清理完成后重复 POST 仍重放首次接受响应且不重复清理、清理失败不撤销写屏障及 purge 禁止恢复。
+- [✅] 测试 held/start 握手、create/start 幂等重放、queued/claimed 不重复 Admission/outbox、幂等冲突/过期换代、held 超时与 429、签名读写边界、callback/purge 查询对账、key 轮换、target/connector 越权、stale approval、retry/cancel 竞态及 purge 写屏障/终态重放。
 
 ### Task 4.5: Runtime 任务队列与 Worker
 
@@ -806,17 +806,17 @@ unique(client_id, idempotency_key, scope)
 - [✅] auto create、start、retry、人工确认或 fallback 恢复在状态事务内写 `RuntimeOutboxEvent(event_type=run_dispatch)`。
 - [✅] dispatcher 使用独立 lease 认领 outbox，可投递 Arq；投递重复或 Redis 丢失不改变数据库中的 run 真相。
 - [✅] dispatcher 的认领查询只选择已启用且已注册 handler 的 `event_type`；未启用/缺 handler 的事件保持 pending、不增加 attempt、不进入 dead letter。readiness 校验部署声明启用的类型都有 handler，run_dispatch/callback 分类型轮询、指标和告警，避免头阻塞。
-- [ ] Worker 启动时加载配置、数据库、Redis、AgentPackage 根目录。
+- [✅] Worker 启动时加载配置、数据库、Redis、AgentPackage 根目录。
 - [✅] Worker 收到 `run_id` 后使用数据库条件写认领 `dispatch_state=queued` 且 status 为 `pending` 或经审批/fallback 恢复的 `waiting_human` run，实现 queued -> claimed，递增 execution attempt 与 fencing token，并写 lease owner/expiry；cancelled run 和带取消请求的 run 不能被认领。
-- [ ] Worker claim 在同一事务调用 AdmissionService 执行 `queued -> running`；进入 `waiting_human` 或任一终态时执行 `running -> none`，计数迁移与 AgentRun/status_version/callback outbox 同事务。
+- [✅] Worker claim 在同一事务调用 AdmissionService 执行 `queued -> running`；进入 `waiting_human` 或任一终态时执行 `running -> none`，计数迁移与 AgentRun/status_version/callback outbox 同事务。
 - [✅] Worker 只依赖注入的 RunExecutor 协议，不导入 MemoirAgent 或尚未实现的 WorkflowExecutor；调度测试使用 deterministic fake executor。
-- [ ] heartbeat 续租失败后 Worker 停止模型、工具、Checkpoint、Artifact 和状态写入。
+- [✅] heartbeat 续租失败后 Worker 停止模型、工具、Checkpoint、Artifact 和状态写入。
 - [✅] reaper 回收失效 lease，在同一事务执行 claimed -> queued、Admission `running -> queued` 并创建新的 run_dispatch；旧 worker 迟到写入被 fencing 拒绝。
-- [ ] 所有状态、Checkpoint、Artifact、ToolCall 写入校验 fencing、cancel、package、privacy 和 authorization version。
+- [✅] 所有状态、Checkpoint、Artifact、ToolCall 写入复用 LeaseService 的 fencing、cancel、Package revoked、privacy、authorization 和 deadline 条件闸；模型/工具的物理发送前另行实时复核同一无内容结论。
 - [✅] 实例进入 draining 后立即停止认领新 run，readiness 返回 503、liveness 保持成功；在执行器安全返回边界条件更新当前 lease 为到期，Admission running 占用保留到 reaper 在 `claimed -> queued` 事务中迁移，接管 Worker 创建新的 execution attempt。
-- [ ] 在途 Worker 宽限期内继续 heartbeat、先持久化 checkpoint 后停止全部写入，以及宽限期耗尽时停止新的模型/工具调用。（依赖 Task 6/10 的真实执行器、CheckpointStore、ModelGateway 与 ToolGateway。）
-- [ ] 测试重复 dispatch、Redis 丢失、双 worker 竞争、heartbeat 失效、旧 worker 迟到写、cancel 传播、Admission claim/reaper 计数，以及 draining 期间 lease 持续续租、宽限期内完成、宽限期耗尽后单次 reaper 接管和优雅停机。
-- [ ] 测试未启用/缺 handler 的 callback 保持 pending 且 attempt 不变、readiness 对错误启用配置返回 503，以及 callback 积压不阻塞 run_dispatch。
+- [✅] `SIGTERM/SIGINT` 仅切换 Worker draining；当前同步节点的网络窗口受 lease/deadline 限制，节点边界 heartbeat 后先持久化安全 Artifact/checkpoint，随后不启动模型/工具或后续节点写入，主动让 lease 到期并只由 reaper 创建一个新 fencing attempt。
+- [✅] 测试重复 dispatch、Redis 丢失、双 worker 竞争、heartbeat/旧 fencing、cancel、Admission claim/reaper，以及 draining 安全边界、单次接管和优雅停机；真实 PostgreSQL/Redis harness 覆盖跨 Session/进程路径。
+- [✅] 测试未启用/缺 handler 的 callback 保持 pending 且 attempt 不变、readiness 对错误启用配置返回 503，以及 callback 积压不阻塞 run_dispatch。
 
 ### Task 5: 静态 Planner 与 AgentPlan 落库
 
@@ -832,7 +832,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 写入 stop conditions：step/model/tool/cost、活跃执行预算、held/queue/approval TTL 和 wall clock deadline。
 - [✅] 写入每个节点的 fallback policy。
 - [✅] 落库 `AgentPlan`。
-- [ ] 测试计划包含 `load_snapshot` 到 `publish_playback_document`；媒体关闭时节点 skipped，二期启用后只对“媒体任务入队失败”允许 partial。
+- [✅] 测试计划包含 `load_snapshot` 到 `publish_playback_document`，以及发布后的 optional `enqueue_media_tasks`；第一版能力关闭时节点为 skipped，未创建媒体任务或触网。
 
 ### Task 6: LangGraph Workflow Executor
 
@@ -848,14 +848,14 @@ unique(client_id, idempotency_key, scope)
 
 > 阶段完成基础（不新增计划任务）：已实现可注入的 mock `WorkflowExecutor` 验证链路，按静态 AgentPlan 写 `AgentStep.running/succeeded` 与安全 checkpoint 进度摘要；每次节点写入前复用 LeaseService 拒绝失效 fencing context。原有 Task 6 条目仍按完整验收语义逐项标记。
 - [✅] 定义 `AgentState`，包含 `run_input`、`snapshot`、`sanitized_material`、`stats`、`highlights`、`chapter_plan`、`scenes`、`actions`、`playback_document`、`publish_result`、`media_tasks`、`safety_report`、`trust_metadata`、`errors`、`fallback_flags`。
-- [ ] 将 workflow 节点映射到 LangGraph Python 节点。
-- [ ] 每个节点执行前校验 fencing、cancel、package status、privacy version 和 authorization version。
-- [ ] 每个节点开始前写 `AgentStep.running`。
-- [ ] 每个节点结束后写 `AgentStep.succeeded/failed` 和安全摘要。
-- [ ] 生成版本化 RuntimeEvent；第一版把详细事件落到 Step/ModelUsage/ToolCall/Evaluation 权威记录，业务 callback 仅接收确定性映射后的安全摘要。
-- [ ] 节点失败时根据 planner fallback 进入 fallback 节点或标记 failed。
-- [ ] 每次 worker 接管写新的 execution attempt；节点自身重试只递增 step attempt。
-- [ ] 测试 deterministic mock workflow、非法状态转换、旧 fencing 写入、取消中止和 attempt 审计。
+- [✅] 将已冻结 `AgentPlan.steps_json` 编译为受控 LangGraph `StateGraph`；第一版仅允许线性静态 DAG，图状态只保存已访问 node ID，拒绝分支、动态节点和动态边，真实节点仍由 Executor 复用 fencing/privacy/cancel 等条件闸执行。
+- [✅] 每个节点执行前校验 fencing、cancel、privacy version、authorization version 与 Package revoked 状态；任一失效不启动新节点，撤销只写无内容审计结论。
+- [✅] 每个节点开始前写 `AgentStep.running`。
+- [✅] 每个节点结束后写 `AgentStep.succeeded/failed` 和安全摘要。
+- [✅] 生成版本化 RuntimeEvent；第一版把详细事件落到 Step/ModelUsage/ToolCall/Evaluation 权威记录，业务 callback 仅接收确定性映射后的安全摘要。
+- [✅] 节点失败时根据 planner fallback 进入 fallback 节点或标记 failed。
+- [✅] 每次 worker 接管写新的 execution attempt；节点自身重试只递增 step attempt。
+- [✅] 测试 deterministic mock workflow、非法状态转换、旧 fencing 写入、取消中止和 attempt 审计。
 
 ### Task 7: ToolGateway 与 HTTP Business Tool
 
@@ -876,25 +876,25 @@ unique(client_id, idempotency_key, scope)
 - Produces: `ToolGateway.call(tool_name, run, step, state) -> ToolResult`。
 - Consumes: Task 4 的 Connector Registry、AuthorizationService、签名验证和 AuditService；本任务只增加出站工具解析、签名和逐次授权能力。
 
-- [ ] 根据 `tools.manifest.json` 校验工具在 allowlist 内。
-- [ ] 实现少量 Native Tool：JSON repair、摘要压缩和敏感字段扫描；它们同样经过 ToolGateway 策略、计数和审计。
+- [✅] 根据 `tools.manifest.json` 校验工具在 allowlist 内。
+- [✅] 实现固定注册的 Native Tool：JSON repair、键名摘要和敏感字段扫描；它们经 ToolGateway 进入冻结工具预算、无正文 `AgentToolCall` 审计和受控错误边界，且始终标记为 `side_effect=false`。
 - [✅] 将 UnifiedToolDefinition 包装为 LangChain StructuredTool/BaseTool；adapter 只转换 schema/结果，实际执行必须回到 `ToolGateway.call()`，不得自行请求 connector。
-- [ ] 由预注册 `connector_id + relative path` 解析 endpoint；禁止 AgentPackage 或模型提供完整 URL，并执行协议/host/port/DNS/IP allowlist、私网阻断和禁止重定向。
-- [ ] 根据 `input_from` 从 trusted run/manifest/deterministic state 组装 identity、权限、generation token 和 side effect 参数；模型只提供 schema 允许的候选字段。
-- [ ] 工具结果通过 output schema、敏感字段扫描和 `output_to` allowlist 后写入 AgentState；禁止覆盖 run identity、authorization、connector、generation/version token 或 operation key。
-- [ ] 使用 connector 独立 secret 和 `X-Agent-Key-Id` 生成 HMAC；对原始 body bytes 计算 hash，验签使用恒定时间比较，只在密钥轮换窗口接受新旧 key。
-- [ ] 发送 `X-Agent-Tool-Attempt` 作为非权威审计字段；业务后端不得用它替代稳定幂等键、authorization version 或 generation epoch。
-- [ ] side effect 工具生成 `{run_id}:{logical_step_key}:{tool_name}:{operation_key}`；attempt 只写审计 header。
-- [ ] 使用 httpx 调业务工具接口，支持 timeout 和 retry。
-- [ ] 每个物理调用使用独立 `tool_call_id/execution_attempt/tool_attempt`。side effect 请求先条件写 `AgentToolCall.running`、稳定 logical operation key、业务幂等键和规范签名 body 的 `request_digest`，提交成功后才允许发送 HTTP 请求；重试与接管复用相同 logical key、幂等键和 digest。
+- [✅] 由预注册 `connector_id + relative path` 解析 endpoint；禁止 AgentPackage 或模型提供完整 URL，并执行协议/host/port/DNS/IP allowlist、私网阻断和禁止重定向。
+- [✅] 根据 `input_from` 从 trusted run/manifest/deterministic state 组装 identity、权限、generation token 和 side effect 参数；模型只提供 schema 允许的候选字段。
+- [✅] 工具结果通过 output schema、敏感字段扫描和 `output_to` allowlist 后写入 AgentState；禁止覆盖 run identity、authorization、connector、generation/version token 或 operation key。
+- [✅] 使用 connector 独立 secret 和 `X-Agent-Key-Id` 生成 HMAC；对原始 body bytes 计算 hash，验签使用恒定时间比较，只在密钥轮换窗口接受新旧 key。
+- [✅] 仅从已落库的权威物理 `AgentToolCall.tool_attempt` 发送 `X-Agent-Tool-Attempt` 作为非权威审计字段；只读调用不得伪造该头，业务后端不得用它替代稳定幂等键、authorization version 或 generation epoch。
+- [✅] side effect 工具生成 `{run_id}:{logical_step_key}:{tool_name}:{operation_key}`；attempt 只写审计 header。
+- [✅] 使用 httpx 调业务工具接口，支持 timeout 和 retry。
+- [✅] 每个物理调用使用独立 `tool_call_id/execution_attempt/tool_attempt`。side effect 请求先条件写 `AgentToolCall.running`、稳定 logical operation key、业务幂等键和规范签名 body 的 `request_digest`，提交成功后才允许发送 HTTP 请求；重试与接管复用相同 logical key、幂等键和 digest。
 - [✅] 工具返回后只在 fencing、privacy 和 authorization 条件仍有效时把 ToolCall/AgentState 推进为 succeeded/failed；条件失效或结果不确定时保留 running 供对账用原幂等键查询，禁止用迟到结果推进 run。
-- [ ] 结构化处理业务工具错误：`error_code`、`error_type`、`retryable`、`safe_message`、`details_visible_to_model`；默认不把 details、堆栈、内部地址或私密字段放入模型上下文。
-- [ ] side effect 工具业务幂等结果默认保留 30 天；HTTP retry、resume 和 worker 接管复用原逻辑键。
-- [ ] 业务端返回 `409 IDEMPOTENCY_CONFLICT` 时校验本次 digest 与已记录 digest，按不可重试契约/实现错误终止并写安全审计，不能生成新 key 绕过冲突。
-- [ ] 按 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 传播取消；不可中止或已提交工具只用原逻辑幂等键查询结果，不允许旧 fencing/privacy version 推进状态。
-- [ ] 每次调用前复核 authorization version；业务服务按当前 archive/owner/generation epoch 二次鉴权。
-- [ ] authorization version 变化、撤销拒绝和 connector/target 授权失败写 RuntimeAuditEvent，不记录凭据、endpoint secret 或业务 payload。
-- [ ] 测试 `memory.get_snapshot` 和 `memory.publish_playback_document` 参数映射、key 轮换、稳定幂等、超时/接管、SSRF、权限撤销和 `GENERATION_SUPERSEDED`。
+- [✅] 结构化处理业务工具错误：`error_code`、`error_type`、`retryable`、`safe_message`、`details_visible_to_model`；默认 false，不把 details、堆栈、内部地址或私密字段放入模型上下文。
+- [✅] side effect 工具业务幂等结果默认保留 30 天；HTTP retry、resume 和 worker 接管复用原逻辑键。
+- [✅] 业务端返回 `409 IDEMPOTENCY_CONFLICT` 时校验本次 digest 与已记录 digest，按不可重试契约/实现错误终止并写安全审计，不能生成新 key 绕过冲突。
+- [✅] 按 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 传播取消；不可中止或已提交工具只用原逻辑幂等键查询结果，不允许旧 fencing/privacy version 推进状态。
+- [✅] 每次调用前复核 authorization version；业务服务按当前 archive/owner/generation epoch 二次鉴权。
+- [✅] authorization version 变化、撤销拒绝和 connector/target 授权失败写 RuntimeAuditEvent，不记录凭据、endpoint secret 或业务 payload。
+- [✅] 测试 `memory.get_snapshot` 和 `memory.publish_playback_document` 参数映射、key 轮换、稳定幂等、超时/接管、SSRF、权限撤销和 `GENERATION_SUPERSEDED`。
 
 ### Task 8: ModelGateway、PromptRegistry、ContextManager、结构化输出
 
@@ -931,26 +931,26 @@ unique(client_id, idempotency_key, scope)
 - [✅] 每个部署 route 强制配置流控、permit、circuit、`route_config_version/pricing_config_version`、统一价格单位、能力、驻留和 token 窗口；业务请求不得覆盖。
 - [✅] route 注册校验 `permit_ttl_seconds >= timeout_seconds + settle_margin_seconds`，HTTP timeout 截断到 route、Run deadline、lease 的最小窗口；非法配置拒绝加载。
 - [✅] Runtime 使用 `usd_per_1k_tokens`，并将 route 的 `pricing_config_version`、价格和 cost unit 冻结至每个 usage attempt；缺少部署治理字段的 route 不可用。
-- [ ] ModelGateway 根据 `model_policy.yaml` 解析 `max_output_tokens`、capability requirements 和显式 template fallback；provider/model/temperature 参数治理仍待后续 Provider 扩展。
-- [ ] 路由顺序固定为 Runtime 紧急禁用/驻留/租户策略 -> Agent logical policy -> 部署映射 -> 显式 fallback；业务请求不能覆盖 provider/model/base URL/key。
-- [ ] ProviderTrafficController 使用 Redis 原子操作检查共享 blocked_until、熔断、并发 semaphore、RPM 和 TPM；按输入估算加 max_output_tokens 预留 token。拒绝时不调用上游，返回 retry_after 供 policy 在剩余 deadline 内等待或 fallback。
+- [✅] ModelGateway 根据 `model_policy.yaml` 解析 `max_output_tokens`、capability requirements 和显式 template fallback；provider/model/endpoint 仅来自部署 route，第一版不向业务请求、Package 或 prompt 暴露 temperature/provider 覆盖入口。
+- [✅] 路由顺序固定为 Runtime 紧急禁用/驻留/租户策略 -> Agent logical policy -> 部署映射 -> 显式 fallback；业务请求不能覆盖 provider/model/base URL/key。
+- [✅] ProviderTrafficController 使用 Redis 原子操作检查共享 blocked_until、熔断、并发 semaphore、RPM 和 TPM；按输入估算加 max_output_tokens 预留 token。拒绝时不调用上游，返回 retry_after 供 policy 在剩余 deadline 内等待或 fallback。
 - [✅] permit 在 Redis 中使用 `acquired -> started -> settled` 状态机；发送边界复核后先以 CAS 执行 `mark_started`，成功后才能开始 HTTP。settle 使用 CAS 且幂等，重复/非法转换不重复增减计数。
-- [ ] 每次候选模型请求独立 acquire，并在 finally settle。只有 acquired permit 可用 `aborted_before_send` 回滚并发槽与 RPM/TPM 预留；started permit 用实际 usage 结算 TPM，无 usage 或结果未知时保留 RPM/TPM 预留到窗口过期。acquired permit TTL 回收时回滚未发送预留，started permit TTL 回收只释放并发槽；重试等待期间不持有 permit。
-- [ ] 上游 429 的 Retry-After 写共享 blocked_until，其他 Worker 随后 acquire 时同步退避；fallback route 使用独立 permit。共享流量控制不可用时 fail closed，按 policy provider fallback、模板 fallback 或安全失败，不得降级为单进程 limiter。
+- [✅] 每次候选模型请求独立 acquire，并在 finally settle。只有 acquired permit 可用 `aborted_before_send` 回滚并发槽与 RPM/TPM 预留；started permit 用实际 usage 结算 TPM，无 usage 或结果未知时保留 RPM/TPM 预留到窗口过期。acquired permit TTL 回收时回滚未发送预留，started permit TTL 回收只释放并发槽；重试等待期间不持有 permit。
+- [✅] 上游 429 的 Retry-After 写共享 blocked_until，其他 Worker 随后 acquire 时同步退避；fallback route 使用独立 permit。共享流量控制不可用时 fail closed，按 policy provider fallback、模板 fallback 或安全失败，不得降级为单进程 limiter。
 - [✅] Gateway 对 429 只在 Retry-After 未超过 route/Run/lease 最小窗口时等待一次，等待期间不持有 permit；重试和 fallback 都重新 acquire 独立 permit。fallback 只认部署 route 的 `fallback_route_id` 与 Run 快照 allowlist，不能从请求选择 Provider。
 - [✅] permit 等待计入 active elapsed，acquire deadline 取节点 timeout、剩余 max_run_seconds 和 run_deadline_at 的最小值；超出 deadline 不继续睡眠或请求上游。
-- [ ] `ModelCallContext` 固定包含 `run_id/step_id/execution_attempt/lease_owner_id/fencing_token/privacy_version/authorization_version/deadline_at`，只由 Executor 从有效 LeaseContext 构造，禁止从 prompt、业务 input、AgentState 或模型输出覆盖。
+- [✅] `ModelCallContext` 固定包含 `run_id/step_id/execution_attempt/lease_owner_id/fencing_token/privacy_version/authorization_version/deadline_at`，只由 Executor 从有效 LeaseContext 构造，禁止从 prompt、业务 input、AgentState 或模型输出覆盖。
 - [✅] `acquire` 返回后重新校验 lease/fencing、cancel、package、privacy、authorization、route/capability 和 deadline；等待期间失效时 settle permit 为 `aborted_before_send`，不写 usage、不请求 provider。
-- [ ] 二次校验通过后，先由 ModelUsageService 按 ModelCallContext 条件写 `AgentModelUsage.running`，保存当前 execution/model attempt、permit、prompt 引用、capability snapshot 和保守 token/成本预留；提交后、真正发送 HTTP 前再次执行发送边界复核。此时失效则把既有 usage 与 acquired permit 结算为 `aborted_before_send`；复核通过后也必须成功 `mark_started` 才能发送。每次 retry/fallback 新建独立候选 attempt。
+- [✅] 二次校验通过后，先由 ModelUsageService 按 ModelCallContext 条件写 `AgentModelUsage.running`，保存当前 execution/model attempt、permit、prompt 引用、capability snapshot 和保守 token/成本预留；提交后、真正发送 HTTP 前再次执行发送边界复核。此时失效则把既有 usage 与 acquired permit 结算为 `aborted_before_send`；复核通过后也必须成功 `mark_started` 才能发送。每次 retry/fallback 新建独立候选 attempt。
 - [✅] provider 返回或抛错时，在 finally 中分别 settle permit 与同一 usage；响应后再次校验 ModelCallContext，失效时只允许结算无内容 token/成本/状态并丢弃输出，不能更新 AgentRun、AgentStep、Checkpoint、Artifact 或工作流状态。
 - [✅] 请求超时、进程崩溃或响应归属无法确认时不写零 usage；对账将过期 running/started 标为 `outcome_unknown` 并保留预留成本。迟到 usage 只允许对同一 `usage_id` 做幂等、单调结算。
-- [ ] 记录 route config version、capability snapshot，以及 permit wait/reject/TTL recovery/shared cooldown/circuit 指标；普通日志不写 route secret 或 prompt。
+- [✅] 记录 route config version、capability snapshot，以及 permit wait/reject/TTL recovery/shared cooldown/circuit 指标；普通日志不写 route secret 或 prompt。
 - [✅] `ModelCapabilityEvaluator` 只在 ProviderTrafficController 可用且 route/policy/驻留/窗口完整时宣告对应模型增强可用；`/runtime/capabilities` 仅返回安全布尔值和逻辑 policy，Redis 异常时关闭模型增强，业务 baseline 和模板能力保持可用。
-- [ ] provider endpoint 只从管理员注册表解析；自定义 base URL 执行协议/host/port allowlist、DNS/IP 校验、私网阻断和逐跳重定向复检。
+- [✅] provider endpoint 只从管理员注册表解析；自定义 base URL 执行协议/host/port allowlist、DNS/IP 校验、私网阻断和逐跳重定向复检。
 - [✅] Provider Adapter 每次 HTTP 发送前重新 DNS 预检，使用无代理、无 keep-alive 的受控 Transport 读取真实 TCP 对端；响应解析前仅接受本轮公网解析集合中的 peer，缺失/非法/不匹配均 fail-closed，且拒绝重定向。
 - [✅] `private_first` 未配置合规私有 provider 时返回 `capability_disabled`，Memoir 节点仅执行 policy 明确的模板 fallback，不静默切换任意云 provider。
-- [ ] 调用前校验 structured output、vision、上下文长度、数据驻留和 thinking 参数；能力不满足时只走当前 policy 明示 fallback，无匹配路由时返回配置错误。
-- [ ] 调 LiteLLM 或 Provider Adapter。
+- [✅] 调用前校验 structured output、vision、上下文长度、数据驻留和 thinking 参数；能力不满足时只走当前 policy 明示 fallback，无匹配路由时返回配置错误。
+- [✅] 调 LiteLLM 或 Provider Adapter。
 - [✅] 使用 LangChain `ChatPromptTemplate` 拼装受信任模板与脱敏不可信数据槽，使用 Pydantic/structured output parser，并在 ModelGateway 调用边界接入 ContextManager、usage 和安全摘要；不启用动态 createAgent。
 - [✅] ContextManager 使用 Prompt 的 model_policy 与 route 的 context/output 窗口计算 fail-closed 输入预算，再按 `extract_highlights/plan_chapters/generate_scenes` 的受控节点 cap 收紧；素材与工具键名/数量摘要共享同一窗口，未知节点或无效预算拒绝。
 - [✅] ContextManager 对素材分块、长日记摘录与工具结果摘要压缩：固定预算下按顺序截取素材，工具结果只进入键名/数量摘要，原始 payload 不进入模型上下文。
@@ -958,12 +958,14 @@ unique(client_id, idempotency_key, scope)
 - [✅] ContextManager 只保存上下文摘要，不保存完整私密原文。
 - [✅] 解析 JSON 输出并用 Pydantic schema 校验。
 - [✅] schema 后统一校验 material/source ID 与冻结 owner scope、scene/action 引用和覆盖、数量、时长、统计及 action enum；`owner_id` 等控制字段和任意 `tool_params` fail-closed，语义越权只返回受控错误码并走模板 fallback。
-- [✅] 解析失败时执行一次无执行能力的 JSON repair；one-shot repair prompt 尚待接入受控模型调用链。
+- [✅] 解析失败时先执行一次无执行能力的 JSON repair；Schema 或确定性语义校验仍失败时，最多调用一次版本化 `structured-output-repair@v1`。Repair 候选只进入有界 untrusted data 槽，第二次调用重新执行预算、Redis permit、usage、lease/fencing、cancel、privacy、authorization、tenant/驻留、route/capability 与 deadline 校验，仍失败立即 template fallback。
 - [✅] `AgentModelUsage` 不保存 prompt、模型原文、工具 payload 或签名 URL；privacy purge 后删除 checkpoint 并清空 Run/Step/ToolCall/Artifact 的可承载内容字段，同时对历史或异常直写的 usage JSON 做白名单净化，仅保留 status、route、token、成本、Provider 请求身份与严格 thinking summary 等无内容治理字段。
 - [✅] `thinking_summary_json` 只持久化由可信 model policy/route 派生的能力开关、输入/输出预算与固定归一化版本；持久化 service 严格拒绝 hidden reasoning、模型原文和任意自由字段。
 - [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计禁止记录完整 prompt、私密素材、模型原文、隐藏推理、工具 payload、签名 URL 和密钥；安全边界仅允许受控 ID、计数、状态、错误码、预算和版本摘要。
+- [✅] `RuntimeTrafficEvent` 以 event/route/result 的唯一分钟窗口原子聚合 permit 拒绝、Retry-After、熔断开闭、Redis fail-closed 与提示/语义拒绝；仅首次跨阈写无内容 `RuntimeAuditEvent`，SQLite 并发与 PostgreSQL harness 均有覆盖。
+- [✅] PostgreSQL 真实子进程与隔离 Redis 回归已验证：Worker 仅以 `completed + role + result_code` 无内容终态通知测试；迟到 publish 及迟到模型响应均在 cancel/purge 后释放，旧 lease 不能恢复业务 revision、Artifact、Checkpoint、Step 或 ToolCall；两个 Controller 共享真实 Redis permit 与 429 冷却。
 - [✅] 覆盖模型成功、语义非法 schema 合法的模板 fallback、Provider 异常、脏 JSON 与 privacy purge 后查询/对账的敏感字段阻断；Provider、日志、trace、callback、checkpoint、artifact 与审计均 fail-closed 或完成清除。
-- [ ] 测试多 Worker 不突破共享并发/RPM/TPM、acquired/started 两类 TTL 回收、permit TTL/请求超时配置拒绝、实际 token 结算、`mark_started` 与 settle 重复调用幂等、`aborted_before_send` 只回滚 acquired permit、共享 Retry-After、fallback 分区和 Redis 不可用 fail closed。
+- [✅] 测试多 Worker 不突破共享并发/RPM/TPM、acquired/started 两类 TTL 回收、permit TTL/请求超时配置拒绝、实际 token 结算、`mark_started` 与 settle 重复调用幂等、`aborted_before_send` 只回滚 acquired permit、共享 Retry-After、fallback 分区和 Redis 不可用 fail closed。
 
 ### Task 9: Evaluator、Guardrails、PolicyEngine
 
@@ -1007,15 +1009,16 @@ unique(client_id, idempotency_key, scope)
 - Produces: `CheckpointStore.save(run_id, step_name, state, lease_context)`、`CheckpointStore.load_latest(run_id, actor, reason_code) -> CheckpointState`、`WorkflowExecutor.resume(run_id, lease_context) -> AgentRunResult`；读写均复用 Task 4.5 的 fencing/privacy/authorization 上下文，读取必须产生审计事件。
 - Produces: `ArtifactStore.save(envelope, lease_context) -> AgentArtifactRef`、`ArtifactStore.purge_private(run_id, privacy_version) -> PurgeResult`；默认只保存摘要、digest 和业务资源引用。
 
-- [ ] 每个节点成功后保存 checkpoint。
-- [ ] checkpoint 只保存恢复必需状态，使用加密 blob/storage ref、schema version、classification、TTL、content digest 和 privacy version。
-- [ ] Checkpoint/Artifact/模型工具临时结果使用 `privacy_state=active AND privacy_version=expected AND fencing_token=expected` 条件写。
-- [ ] Checkpoint 每次解密读取都通过 AuditService 记录 actor/action/reason/outcome；列表、public trace 和普通运维查询禁止解密 payload。
-- [ ] workflow 决策为 `human_review` 时，先持久化恢复 checkpoint；成功后由持有有效 fencing token 的 Worker 在状态事务中设置 `status=waiting_human`、`waiting_expires_at=min(now + approval_ttl_seconds, run_deadline_at)`、`dispatch_state=finished`，释放 lease，并同步完成 Admission `running -> none`、`status_version` 递增和 callback outbox。
-- [ ] retry 时读取最近失败节点前的 checkpoint。
-- [ ] 工具 side effect 节点恢复前检查幂等键。
-- [ ] 实现 `template_highlights`、`template_chapters`、`template_scenes`、`default_actions` fallback。
-- [ ] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
+- [✅] 每个节点成功后保存 checkpoint。
+- [✅] checkpoint 只保存恢复必需状态，使用加密 blob/storage ref、schema version、classification、TTL、content digest 和 privacy version。
+- [✅] Checkpoint/Artifact/模型工具临时结果使用 `privacy_state=active AND privacy_version=expected AND fencing_token=expected` 条件写。
+- [✅] Checkpoint 每次解密读取都通过 AuditService 记录 actor/action/reason/outcome；列表、public trace 和普通运维查询禁止解密 payload。
+- [✅] workflow 决策为 `human_review` 时，先持久化恢复 checkpoint；成功后由持有有效 fencing token 的 Worker 在状态事务中设置 `status=waiting_human`、`waiting_expires_at=min(now + approval_ttl_seconds, run_deadline_at)`、`dispatch_state=finished`，释放 lease，并同步完成 Admission `running -> none`、`status_version` 递增和 callback outbox。
+- [✅] retry/resume 读取最近兼容 checkpoint；`partial` 仅重做 checkpoint 未完成的 optional 节点，已成功发布节点和已提交副作用不会重放。
+- [✅] PostgreSQL 真实迟到模型回归在 Provider 请求已发出后并发 cancel/purge、再释放响应；仅允许无内容 `AgentModelUsage` 结算，不能复活 checkpoint、step、artifact、tool call 或业务 revision。
+- [✅] 工具 side effect 节点恢复前检查幂等键。
+- [✅] 实现 `template_highlights`、`template_chapters`、`template_scenes`、`default_actions` fallback。
+- [✅] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
 
 ### Task 11: Callback Dispatcher 与 Public Trace
 
@@ -1101,7 +1104,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 构建完整 `MemoryPlaybackDocument + scenes + actions + media_manifest`，执行引用、数量、时长和 schema 语义校验；每个 AI Scene 的 `source_refs_json` 只保留由当前 snapshot allowlist 归一化通过的 material/source ID，并随发布 payload 原样提交。第一版媒体能力关闭时生成必填空清单，不省略契约字段。
 - [✅] 实现 `publish_playback_document` 调 `memory.publish_playback_document`，单次传完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定逻辑幂等键；业务后端按 scenes/actions/`media_manifest` 的规范化内容计算或复核 digest，Runtime 接收并保存 `revision/content_digest` 到 `publish_result`。
 - [✅] 只有发布成功后才允许 AgentRun 进入 succeeded/partial；`GENERATION_SUPERSEDED` 停止旧 run 的剩余副作用。
-- [✅] 第一版 `enqueue_media_tasks` 在 capability 关闭时返回 skipped；运行状态只由 Runtime callback 推送，发布工具只拥有作品 revision。
+- [✅] 第一版预留 `enabled=false` 的 `memory.enqueue_tts` 契约；`enqueue_media_tasks` 在 capability 关闭时确定性返回 `skipped(CAPABILITY_DISABLED)`，不创建媒体任务或触网。业务 callback 只推进未发布内容运行/失败态，发布工具独占 `content_status=succeeded + published_revision`，enhancement 保持 `disabled`。
 - [✅] 测试无素材、只有日记、只有赌局、`source_refs_json` 丢失或含已删除/未知/跨 owner/跨关系段引用、强制拉黑表达、缺失/非法 `media_manifest` 被拒绝、媒体关闭时空 `media_manifest` 被接受、digest 不一致、发布与删除/新一轮生成竞态及原子回滚。
 
 ### Task 13: 最小评测集与端到端测试
@@ -1130,6 +1133,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 输出 schema/语义校验通过率、素材引用正确率、编造率、情绪安全通过率、fallback 率，以及按 execution/model attempt 聚合的 aborted_before_send、实际成本、预留成本、未知结果和耗时。
 - [✅] 断言日志、trace 和评测结果不含 prompt、日记正文、工具原始 payload、签名媒体 URL、隐藏推理和 Checkpoint 内容。
 - [✅] 断言 package 生命周期变更、Checkpoint 解密读取、authorization 变化、approval/cancel/retry/purge 和敏感调试访问均产生不含私密 payload 的 RuntimeAuditEvent；生产缺少持久 audit sink 时 readiness 失败。
+- [✅] 断言 RuntimeTrafficEvent 在 SQLite 的唯一窗口、并发聚合、阈值首次告警与 Redis fail-closed 下均不保存敏感字段；PostgreSQL harness 使用同一 UPSERT 契约验证聚合。
 - [✅] 外部 OTel/LangSmith/调试样本 exporter 默认关闭；启用配置必须显式声明数据分级、采样字段、区域/跨境、保留期、审计权限和 privacy purge 删除能力，并测试脱敏失败时拒绝导出。
 - [✅] 运行 `ruff check .`、`mypy app`、`pytest`。
 

@@ -12,9 +12,10 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AgentPlan, AgentRun, AgentStep
+from app.models import AgentDefinition, AgentPlan, AgentRun, AgentStep
 from app.runtime.artifact import ArtifactError, ArtifactStore
 from app.runtime.checkpoint import CheckpointError, CheckpointStore
+from app.runtime.graph_builder import StaticWorkflowGraph, StaticWorkflowGraphError
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.runtime.policy_engine import ExecutionBudgetExceeded, PolicyEngine
 from app.runtime.state import AgentState
@@ -120,6 +121,11 @@ class WorkflowExecutor:
                 execution_attempt=lease_context.execution_attempt,
                 error_code="WORKFLOW_PLAN_NOT_FOUND",
             )
+        try:
+            static_nodes = StaticWorkflowGraph.build(plan.steps_json).ordered_nodes()
+        except StaticWorkflowGraphError:
+            # 不记录 plan 原文或图编译异常；静态图无法验证时绝不退回动态循环。
+            return self._fail(run, lease_context, "STATIC_GRAPH_INVALID")
         fallback_requested = run.error_code == "WAITING_HUMAN_FALLBACK"
         if fallback_requested:
             fallback_node_id = plan.fallback_policy_json.get(
@@ -146,13 +152,6 @@ class WorkflowExecutor:
         else:
             # 人工 approve 即使 checkpoint 带有 fallback 目标，也只能线性恢复。
             resume_from_node_id = None
-        if not self._lease.can_write(run_id, lease_context):
-            return AgentRunResult(
-                run_id=run_id,
-                status="failed",
-                execution_attempt=lease_context.execution_attempt,
-                error_code="LEASE_CONTEXT_INVALID",
-            )
         if self._authorization_changed(run):
             run.cancel_requested_at = datetime.now(UTC)
             self._record_authorization_change(run)
@@ -160,6 +159,24 @@ class WorkflowExecutor:
                 run_id=run_id, status="cancelled",
                 execution_attempt=lease_context.execution_attempt,
                 error_code="AUTHORIZATION_CHANGED",
+            )
+        if self._package_revoked(run):
+            run.cancel_requested_at = datetime.now(UTC)
+            self._record_package_revoked(run)
+            return AgentRunResult(
+                run_id=run_id,
+                status="cancelled",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="PACKAGE_REVOKED",
+            )
+        # Package/authorization 是 can_write 的一部分，但要先返回受控的业务
+        # 结论，不能把已撤销 Package 伪装成泛化 lease 错误。
+        if not self._lease.can_write(run_id, lease_context):
+            return AgentRunResult(
+                run_id=run_id,
+                status="failed",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="LEASE_CONTEXT_INVALID",
             )
         # draining 不接管 Run 状态；RunQueueService 会在这个安全边界释放 lease。
         if self._is_draining():
@@ -183,10 +200,11 @@ class WorkflowExecutor:
             )
             state.completed_node_ids = sorted(completed_node_ids)
         skipping = resume_from_node_id is not None
+        partial_optional_failure = False
         # 只在本次实际执行范围计时；held/queued/waiting_human 从未进入此循环，
         # 不会被误算为活跃预算。历史累计值存放在 Run 的 active_elapsed_ms。
         active_started_at = monotonic()
-        for raw_node in plan.steps_json:
+        for raw_node in static_nodes:
             node = self._validated_node(raw_node)
             if node is None:
                 return self._fail(run, lease_context, "WORKFLOW_NODE_INVALID")
@@ -217,6 +235,15 @@ class WorkflowExecutor:
                     run_id=run_id, status="cancelled",
                     execution_attempt=lease_context.execution_attempt,
                     error_code="AUTHORIZATION_CHANGED",
+                )
+            if self._package_revoked(run):
+                run.cancel_requested_at = datetime.now(UTC)
+                self._record_package_revoked(run)
+                return AgentRunResult(
+                    run_id=run_id,
+                    status="cancelled",
+                    execution_attempt=lease_context.execution_attempt,
+                    error_code="PACKAGE_REVOKED",
                 )
             if self._is_draining():
                 return self._draining_result(run_id, lease_context, completed_steps)
@@ -266,10 +293,24 @@ class WorkflowExecutor:
                             str(exc),
                         )
             except Exception:  # noqa: BLE001 - 节点异常必须转为安全错误码。
-                logging.exception("Workflow 节点执行失败 run_id=%s node=%s", run_id, node["node_id"])
                 step.status = "failed"
                 step.error_code = "WORKFLOW_NODE_FAILED"
                 step.finished_at = datetime.now(UTC)
+                # 可选后处理只能在主作品已完成发布后降级为 partial；不能把
+                # 主链故障伪装为可重试媒体失败，也不记录异常正文。
+                if bool(node.get("optional")) and "publish_document" in completed_node_ids:
+                    partial_optional_failure = True
+                    logging.warning(
+                        "Workflow 可选节点失败，保留已发布作品 run_id=%s node=%s code=OPTIONAL_NODE_FAILED",
+                        run_id,
+                        node_id,
+                    )
+                    continue
+                logging.warning(
+                    "Workflow 节点执行失败 run_id=%s node=%s code=WORKFLOW_NODE_FAILED",
+                    run_id,
+                    node_id,
+                )
                 return self._fail(run, lease_context, "WORKFLOW_NODE_FAILED")
             if not self._lease.heartbeat(
                 run_id, lease_context
@@ -291,8 +332,14 @@ class WorkflowExecutor:
             completed_steps += 1
             completed_node_ids.add(node_id)
             state.completed_node_ids = sorted(completed_node_ids)
-            step.status = "succeeded"
-            step.output_summary = {"node_id": node_id, "status": "ok"}
+            node_status = (
+                "skipped" if node_result.get("skipped") is True else "succeeded"
+            )
+            step.status = node_status
+            step.output_summary = {
+                "node_id": node_id,
+                "status": "skipped" if node_status == "skipped" else "ok",
+            }
             step.finished_at = datetime.now(UTC)
             # 每个安全节点边界刷新累计活跃时间；不能用 Run.created_at，避免排队
             # 或人工审批时间错误消耗执行额度。
@@ -345,7 +392,7 @@ class WorkflowExecutor:
             self._outbox.append_callback_event(
                 run,
                 "step_changed",
-                [{"step": node_id, "status": "succeeded"}],
+                [{"step": node_id, "status": node_status}],
             )
         logging.info(
             "Workflow 静态计划执行完成 run_id=%s execution_attempt=%s steps=%s",
@@ -355,7 +402,7 @@ class WorkflowExecutor:
         )
         return AgentRunResult(
             run_id=run_id,
-            status="succeeded",
+            status="partial" if partial_optional_failure else "succeeded",
             execution_attempt=lease_context.execution_attempt,
             output_summary={"completed_steps": completed_steps},
         )
@@ -406,6 +453,17 @@ class WorkflowExecutor:
         current = self._authorization_version_resolver(run)
         return current is None or current != run.authorization_version
 
+    def _package_revoked(self, run: AgentRun) -> bool:
+        """Package 在 Run 创建后被撤销时，旧 lease 不得再启动任何节点。"""
+        definition = self._session.scalar(
+            select(AgentDefinition).where(
+                AgentDefinition.agent_id == run.agent_id,
+                AgentDefinition.version == run.agent_version,
+            )
+        )
+        # 兼容只装配 Run/Plan 的隔离单元测试；真实部署由创建 API 保证定义存在。
+        return definition is not None and definition.status == "revoked"
+
     def _record_authorization_change(self, run: AgentRun) -> None:
         """只审计版本失配结论，不记录授权配置、输入或节点数据。"""
         AuditService(session=self._session).append(
@@ -413,6 +471,18 @@ class WorkflowExecutor:
                 audit_id=str(uuid4()), actor_type="system", actor_id="workflow_executor",
                 action="agent_run_authorization_changed", resource_type="agent_run",
                 resource_id=run.run_id, reason_code="AUTHORIZATION_CHANGED",
+                outcome="cancel_requested", occurred_at=datetime.now(UTC),
+                trace_id=run.trace_id, metadata_summary={"status": run.status},
+            )
+        )
+
+    def _record_package_revoked(self, run: AgentRun) -> None:
+        """仅审计撤销结论，禁止携带 Package 内容或 Run 输入。"""
+        AuditService(session=self._session).append(
+            RuntimeAuditEvent(
+                audit_id=str(uuid4()), actor_type="system", actor_id="workflow_executor",
+                action="agent_run_package_revoked", resource_type="agent_run",
+                resource_id=run.run_id, reason_code="PACKAGE_REVOKED",
                 outcome="cancel_requested", occurred_at=datetime.now(UTC),
                 trace_id=run.trace_id, metadata_summary={"status": run.status},
             )

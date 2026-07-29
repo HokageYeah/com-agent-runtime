@@ -65,3 +65,6 @@ from app.models.runtime import (
 from app.models.runtime import (
     RuntimeReconciliationLease as RuntimeReconciliationLease,
 )
+from app.models.runtime import (
+    RuntimeTrafficEvent as RuntimeTrafficEvent,
+)

@@ -7,11 +7,17 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
 
+import app.models  # noqa: F401
 from app.core.tool_security import tool_signature
+from app.db.sqlalchemy_db import Base
+from app.models import AgentToolCall
 from app.runtime.test_harness import LoopbackTestTransport, RuntimeHarnessConfig
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.schemas.agent_package import ToolManifest
+from app.services.tool_call_audit_service import ToolCallAuditService
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +65,49 @@ def test_harness_explicitly_allows_loopback_mock_connector() -> None:
         test_transport=LoopbackTestTransport(config),
     )
     assert gateway is not None
+
+
+def test_gateway_audits_connector_and_authorization_rejections_without_request_data() -> None:
+    """拒绝审计只能收到 run ID 与固定码，不能携带 connector 配置或工具输入。"""
+    events: list[tuple[str, str]] = []
+    missing = ToolGateway(
+        {}, httpx.Client(), audit_rejection=lambda run_id, code: events.append((run_id, code))
+    )
+    with pytest.raises(ValueError, match="BUSINESS_CONNECTOR_UNAVAILABLE"):
+        missing.get_snapshot("missing", "archive-1", "snapshot-1", "run-1", 0)
+
+    denied = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "runtime", "key", "secret")},
+        httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"output": {}}))),
+        authorization_permitted=lambda _run_id: False,
+        audit_rejection=lambda run_id, code: events.append((run_id, code)),
+    )
+    with pytest.raises(ValueError, match="TOOL_AUTHORIZATION_REVOKED"):
+        denied.get_snapshot("c", "archive-1", "snapshot-1", "run-2", 0)
+
+    assert events == [
+        ("run-1", "CONNECTOR_DISABLED"),
+        ("run-2", "AUTHORIZATION_REVOKED"),
+    ]
+
+
+def test_gateway_audits_authorization_version_change_with_fixed_reason() -> None:
+    events: list[tuple[str, str]] = []
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "runtime", "key", "secret")},
+        httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: pytest.fail("must not send")
+            )
+        ),
+        authorization_permitted=lambda _run_id: "AUTHORIZATION_VERSION_CHANGED",
+        audit_rejection=lambda run_id, code: events.append((run_id, code)),
+    )
+
+    with pytest.raises(ValueError, match="TOOL_AUTHORIZATION_REVOKED"):
+        gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
+
+    assert events == [("run-1", "AUTHORIZATION_VERSION_CHANGED")]
 
 
 def test_gateway_rejects_connector_domain_resolved_to_private_ip(
@@ -155,6 +204,26 @@ def test_gateway_rechecks_authorization_before_each_physical_send() -> None:
     assert calls == 0
 
 
+def test_gateway_rechecks_execution_context_before_each_physical_send() -> None:
+    """cancel、purge、失租或 Package 撤销后不得再触发任何工具请求。"""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"output": {}})
+
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        execution_permitted=lambda _run_id: False,
+    )
+
+    with pytest.raises(ValueError, match="TOOL_EXECUTION_CONTEXT_INVALID"):
+        gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
+    assert calls == 0
+
+
 def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> None:
     captured: dict[str, object] = {}
 
@@ -164,6 +233,7 @@ def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> Non
         captured["input"] = json.loads(request.content)["input"]
         captured["signature"] = request.headers["X-Agent-Signature"]
         captured["timestamp"] = request.headers["X-Agent-Timestamp"]
+        captured["tool_attempt"] = request.headers.get("X-Agent-Tool-Attempt")
         captured["body"] = request.content
         return httpx.Response(200, json={"output": {"diaries": ["私密正文"]}})
 
@@ -190,6 +260,7 @@ def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> Non
             "secret",
         ),
         "timestamp": captured["timestamp"],
+        "tool_attempt": None,
         "body": captured["body"],
     }
 
@@ -197,10 +268,66 @@ def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> Non
 def test_gateway_publishes_complete_document_with_run_snapshot_and_epoch() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("memory.publish_playback_document")
+        assert request.headers["X-Agent-Tool-Attempt"] == "7"
         assert json.loads(request.content) == {"input": {"archive_id": "a", "run_id": "r", "snapshot_id": "s", "generation_epoch": 2, "document": {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}}}
         return httpx.Response(200, json={"output": {"revision": 3, "content_digest": "digest"}})
     gateway = ToolGateway({"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")}, httpx.Client(transport=httpx.MockTransport(handler)))
-    assert gateway.publish_playback_document("c", "a", "r", "s", 2, {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}) == {"revision": 3, "content_digest": "digest"}
+    audit = AgentToolCall(tool_call_id="call-7", run_id="r", tool_attempt=7, side_effect=True)
+    assert gateway.publish_playback_document("c", "a", "r", "s", 2, {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}, "write-1", audit) == {"revision": 3, "content_digest": "digest"}
+
+
+def test_gateway_rejects_publish_without_authoritative_physical_attempt() -> None:
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"output": {}}))),
+    )
+
+    with pytest.raises(ValueError, match="TOOL_ATTEMPT_REQUIRED"):
+        gateway.publish_playback_document(
+            "c", "a", "r", "s", 2,
+            {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}, "write-1",
+        )
+
+
+def test_native_tool_uses_fixed_registry_and_persists_only_safe_summary() -> None:
+    """Native 输入不进入审计，且不会被错误标记为业务副作用。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))),
+    )
+
+    result = gateway.call_native(
+        "runtime.summarize_keys",
+        {"value": {"private_body": "绝密正文"}, "max_items": 1},
+        audit_service=ToolCallAuditService(session),
+        run_id="run-1", execution_attempt=1, step_id="summarize",
+        logical_key="run-1:summarize:1", request_digest="controlled-digest",
+    )
+
+    saved = session.scalar(select(AgentToolCall))
+    assert result == {"keys": ["private_body"], "item_count": 1}
+    assert saved is not None
+    assert (saved.transport, saved.side_effect, saved.status) == ("native", False, "succeeded")
+    assert saved.input_summary == {"operation": "runtime.summarize_keys"}
+    assert saved.output_summary == {"keys": ["private_body"], "item_count": 1}
+    assert "绝密正文" not in repr(saved.input_summary)
+    assert "绝密正文" not in repr(saved.output_summary)
+
+
+def test_native_tool_rejects_model_supplied_registration() -> None:
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500))),
+    )
+
+    with pytest.raises(ValueError, match="NATIVE_TOOL_NOT_ALLOWED"):
+        gateway.call_native(
+            "runtime.model_declared_tool", {}, audit_service=object(), run_id="run-1",
+            execution_attempt=1, step_id="step", logical_key="key", request_digest="digest",
+        )
 
 
 def test_snapshot_gateway_retries_once_after_transport_failure_without_logging_body(caplog) -> None:
@@ -241,7 +368,7 @@ def test_publish_gateway_does_not_retry_timeout_to_preserve_unknown_outcome() ->
     )
 
     try:
-        gateway.publish_playback_document("c", "a", "r", "s", 2, {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}, "write-1")
+        gateway.publish_playback_document("c", "a", "r", "s", 2, {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}, "write-1", AgentToolCall(tool_call_id="call-timeout", run_id="r", tool_attempt=1, side_effect=True))
     except httpx.ReadTimeout:
         pass
     else:
@@ -294,7 +421,7 @@ def test_gateway_draining_rejects_new_write_without_sending_http() -> None:
         gateway.publish_playback_document(
             "c", "a", "r", "s", 1,
             {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []},
-            "write-1",
+            "write-1", AgentToolCall(tool_call_id="call-drain", run_id="r", tool_attempt=1, side_effect=True),
         )
     assert calls == 0
 
@@ -410,3 +537,44 @@ def test_generic_call_rejects_sensitive_tool_output_without_logging_payload(capl
     with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
         gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2})
     assert "13800138000" not in caplog.text
+
+
+def test_disabled_tts_contract_is_rejected_before_network() -> None:
+    """预留 TTS 契约即使被误调用，也必须在任何 DNS/HTTP 前拒绝。"""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("disabled tool must not send")
+
+    gateway = ToolGateway(
+        {
+            "couple_diary_backend": BusinessConnector(
+                "http://business.local", "agent-runtime", "dev", "secret"
+            )
+        },
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    manifest = ToolManifest(
+        name="memory.enqueue_tts",
+        version="1.0.0",
+        connector_id="couple_diary_backend",
+        method="POST",
+        relative_path="/api/v1/internal/agent-tools/memory.enqueue_tts",
+        input_from="media_tasks",
+        output_to="media_tasks",
+        side_effect=True,
+        cancellation_behavior="query_after_commit",
+        enabled=False,
+    )
+
+    with pytest.raises(ValueError, match="TOOL_CAPABILITY_DISABLED"):
+        gateway.call(
+            manifest,
+            {
+                "archive_id": "archive",
+                "snapshot_id": "snapshot",
+                "run_id": "run",
+                "generation_epoch": 1,
+                "media_tasks": [],
+            },
+            idempotency_key="stable-key",
+        )

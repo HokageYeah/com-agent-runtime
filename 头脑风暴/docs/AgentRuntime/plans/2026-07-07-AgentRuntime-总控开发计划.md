@@ -388,7 +388,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] approval/cancel/retry/purge 写入脱敏且追加的 `RuntimeAuditEvent`，与 Run 状态变更在同一事务持久化。
 - [✅] 人工确认只接受 `status=waiting_human AND dispatch_state=finished` 的 run，要求独立幂等键、`decision=approve|reject` 和 `expected_status_version`；approve 在同一事务只推进 `dispatch_state: finished -> queued`、递增 `status_version` 并写 dispatch outbox，run 状态由新 worker 取得 lease 后从 `waiting_human` 迁移为 `running`；reject 按 package 策略重新入队执行 fallback，或终结为 failed/cancelled，过期版本返回冲突且不推进状态。
 - [✅] Retry 只允许原 caller 或内部审计身份调用，手动 run 级重试默认最多 3 次。
-- [ ] `partial` 只重试 Runtime 未完成的可选步骤，不重新发布主作品；依赖 Task 6 写入节点完成状态、可选节点声明与发布结果。
+- [✅] `partial` 只重试 Runtime 未完成的可选步骤，不重新发布主作品；控制面仅接受“主发布已成功 + 失败节点全为声明 optional”的 checkpoint 恢复，执行器跳过已完成节点。
 - [✅] Runtime 自动节点重试使用 step attempt / `auto_retry_count`，不消耗手动重试次数。
 - [✅] 为 `memoir_agent` 生成静态 `AgentPlan`；产生真实恢复状态后再保存首个 checkpoint，不创建空 Artifact。
 
@@ -408,7 +408,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] heartbeat 失效由 reaper 回收；旧 worker 迟到写入被 fencing 拒绝。
 - [✅] draining 在执行器返回的非终态安全边界停止续租，由 reaper 以原子 `claimed -> queued` 迁移接管，Admission 占用不会提前释放。
 - [✅] cancel/retry 互斥；实例进入 draining 后停止新认领、readiness 503、liveness 成功；安全返回边界会让 lease 到期，Admission 占用由 reaper 的 `claimed -> queued` 事务迁移，接管时只创建一个新 execution attempt。
-- [ ] 在途 Worker 宽限期内 heartbeat、checkpoint 落库后停止写入，以及宽限期耗尽时停止新的模型/工具调用；依赖 Task 6 的真实执行器、CheckpointStore、ModelGateway 与 ToolGateway。
+- [✅] `SIGTERM/SIGINT` 只把 Worker 切换为 draining；当前同步节点在受 lease/deadline 限制的调用窗口内完成，执行器于节点边界 heartbeat 后先落安全 Artifact/checkpoint，随即停止新模型/工具及后续节点写入、让 lease 到期，由 reaper 以新 fencing token 唯一接管。
 - [✅] Worker draining 模型调用边界：运行期 guard 在 permit、usage 与 Provider HTTP 前/后复核，draining 时拒绝新的模型调用并安全释放已获资源；工具调用与 checkpoint 停写边界仍按上项推进。
 - [✅] WorkflowExecutor draining 安全返回：节点开始前拒绝新工作；已完成节点先写摘要 Artifact 与 checkpoint，再以非终态结果交给 reaper 接管，不新建后台续约线程。
 - [✅] 同步调用窗口：ToolGateway 与 ModelGateway 均将 HTTP timeout 限制为固定 route/tool timeout、可信 Run deadline、当前 Lease 到期时间三者的最小值；任一窗口已过期时不触网，draining 不会开启新模型或工具调用。
@@ -419,7 +419,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 
 **Plan:** 后端计划 Task 6、Task 10。
 
-> 阶段完成基础（不新增计划任务）：已实现可注入 mock `WorkflowExecutor`，可按静态 AgentPlan 写 `AgentStep.running/succeeded` 安全摘要；节点完成后通过 `CheckpointStore` 以 Fernet 认证加密完整恢复状态，并写入仅含节点进度的安全摘要、TTL、privacy/fencing 校验及脱敏持久审计。执行器可从同一加密 checkpoint 恢复已完成节点；同时通过 `ArtifactStore` 持久化仅含节点名、结果字段名、digest 与业务资源引用的安全 Artifact。真实 Tool/Model 节点 Runner、生产密钥注入与 Worker 装配仍待后续任务完成，避免当前安全 mock 产生业务假成功。原有 Task 6 条目仍按完整验收语义逐项标记。
+> 完成说明：`WorkflowExecutor` 已按静态 AgentPlan 写入安全 Step 摘要、加密 checkpoint 和最小 Artifact，并已由后续 Task 7/8/9 接入真实 Tool/Model Runner、生产密钥注入边界与 Worker 装配；恢复、迟到写入和 draining 均有 SQLite/PostgreSQL/真实 Worker 回归。
 - [✅] Package loader 以 AST 字面量读取受信任 `workflow.graph.py` 的导出节点；StaticPlanner 复用 `WorkflowNodeDefinition` 校验后冻结到 `AgentPlan`，畸形定义拒绝创建可执行计划，不执行 Package Python。
 - [✅] 执行每个节点时写 `AgentStep`。
 - [✅] 每个节点完成后写加密 checkpoint。
@@ -456,20 +456,20 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] 归档补偿使用 `(space_id, relationship_segment_no, owner_user_id)` 幂等复用首次冻结的双方 archive；manifest、payload digest、脱敏版本或冻结时间不一致时拒绝覆盖。revision 0 生成封面/统计卡和默认 `show_card` 动作，Runtime 不可用时仍可播放。
 - [✅] 建立 `MemoryPlayerService` 的 `published_revision` 读取边界，以及完整 PlaybackDocument 的原子发布：先校验并落库完整 `scenes/actions/media_manifest`，再在同一事务切换唯一发布指针。
 - [✅] `RelationshipArchiveService` 在和平解绑或强制拉黑事务中冻结 `space_id + relationship_segment_no + snapshot_cutoff_at + source manifest/version`，为双方创建独立 archive，并写入 Runtime 启动 outbox；Runtime 故障不回滚 baseline。
-- [✅] `MemorySnapshotMaterializer` 已按真实 `couple_relationships/diary_entries/bets` 的空间、关系、段号、解绑截止时间与删除状态冻结最小素材 manifest；晚到或跨段素材不进入加密快照。Runtime readiness/capabilities 校验与实际 HTTP adapter 仍待接入。
-- [✅] `RelationshipArchiveService` 在同一业务 Session 锁定 `BOUND` 关系、写入 `UNBOUND_ARCHIVED` 与解绑操作者/原因后，立即按冻结输入创建双方隔离 archive；服务自身不提交事务，调用方可统一 commit 或 rollback。`snapshot/run outbox` 和 Runtime held-run 仍待后续接入。
+- [✅] `MemorySnapshotMaterializer` 已按真实 `couple_relationships/diary_entries/bets` 的空间、关系、段号、解绑截止时间与删除状态冻结最小素材 manifest；晚到或跨段素材不进入加密快照。Runtime readiness/capabilities 与实际 HTTP adapter 已由 Task 6.75 接入。
+- [✅] `RelationshipArchiveService` 在同一业务 Session 锁定 `BOUND` 关系、写入 `UNBOUND_ARCHIVED` 与解绑操作者/原因后，立即按冻结输入创建双方隔离 archive；服务自身不提交事务，调用方可统一 commit 或 rollback。`snapshot/run outbox` 与 Runtime held-run 已由本 Task 后续条目和 Task 6.75 接入。
 - [✅] 解绑归档事务为每个 owner archive 写入 Runtime 自有的 `MemoryRuntimeLaunchEvent(create_held)`；投递消费者成功后才绑定 `MemoryAgentRunRef` 并追加唯一 `start_held` 事件。create/start 均使用 `(archive_id, generation_epoch)` 派生的独立稳定幂等键；Runtime 网络失败只保留标准错误码与 pending 事件，revision 0 baseline 不回滚。
-- [ ] `MemoryArchive` 保存 owner/partner 快照、关系时间、summary、content/enhancement 状态、generation epoch、active run、published revision、pin/delete 字段；`MemoryAgentRunRef` 保存运行摘要、retry、event/status version、row version、各操作幂等键和 purge 对账字段。
+- [✅] `MemoryArchive` 保存 owner/partner 快照、关系时间、summary、content/enhancement 状态、generation epoch、active run、published revision、pin/delete 字段；`MemoryAgentRunRef` 保存运行摘要、retry、event/status version、row version、各操作幂等键和 purge 对账字段。
 - [✅] 快照 materializer 只按解绑时冻结的关系段、截止时间和删除状态读取素材；`source_manifest_hash/privacy_filter_version` 与加密快照一起持久化，不读取任务执行时新增或变更的数据。
-- [ ] `MemorySnapshot` 保存 `snapshot_version/source_range_json/diary_items_json/bet_items_json/stats_json/privacy_filter_version/snapshot_cutoff_at/source_manifest_hash`；正文使用数据库或应用层静态加密，只允许 memory service 和内部 tool 身份读取，通用后台、debug 日志和导出任务不得展开。
-- [✅] `MemorySnapshot/MemoryPlaybackDocument/MemoryScene/MemoryAction` 分别持久化 schema major；数据库保留原始 snapshot version，发布服务严格拒绝未知 future major。跨 major 的单向迁移留待对应升级版本实现。
+- [✅] `MemorySnapshot` 保存 snapshot/schema 版本、冻结 manifest/hash、privacy/cutoff 与认证加密的版本化 envelope；envelope 仅白名单化 `source_range/user_snapshots/diary_items/bet_items/stats`，只允许 memory service 和已绑定内部 tool 身份解密，通用后台、debug 日志和导出任务不得展开。
+- [✅] `MemorySnapshot/MemoryPlaybackDocument/MemoryScene/MemoryAction` 分别持久化 schema major；数据库保留原始 snapshot version，旧无版本 Snapshot 只读单向投影为 v1，发布服务严格拒绝未知 future major。后续新增 major 时继续按同一单向迁移规则扩展。
 - [✅] Scene schema 已冻结 `cover/stats/diary_highlight/bet_highlight/image/milestone/summary` 与 `normal/sensitive/fallback`；Action schema 已冻结 `show_card/focus_image/type_text/hold/play_tts/transition`，服务层和数据库均校验 order、duration、Scene 引用。MVP 媒体关闭时只接受空 `media_manifest`。
 - [✅] 发布前已冻结 document schema major、Scene/Action 类型、正时长与 Scene 引用；未知 major、未知类型或无效 Action 不切换 `published_revision`。`safety_level`/media 的完整领域校验仍随该大条目后续推进。
 - [✅] 每个 AI Scene 的 `source_refs_json` 已按当前已授权 Snapshot manifest 校验；`MemorySourceReference` 以 `(archive_id, document_id, revision, source_type, source_id)` 建最小反查映射，与 document/Scene/Action 和发布指针在同一事务提交，并随 superseded revision GC 清理，不保存素材正文。
-- [ ] 建立 `unique(space_id, relationship_segment_no, owner_user_id)`、`unique(run_id)`、`unique(archive_id, generation_epoch)`、`unique(archive_id, revision)`，并为 Scene/Action/Media 建立指向同一 document/archive 的外键或等价约束。
+- [✅] 建立 `unique(space_id, relationship_segment_no, owner_user_id)`、`unique(run_id)`、`unique(archive_id, generation_epoch)`、`unique(archive_id, revision)`，并为 Scene/Action/Media 建立指向同一 document/archive 的外键或等价约束；SQLite 与 PostgreSQL 迁移回归均覆盖代际唯一性。
 - [✅] archive 创建时发布 revision 0 baseline，包含封面、基础统计和默认 Action；Runtime 不可用时仍可播放。
-- [ ] 建立 `content_status/enhancement_status` 唯一写入者，`generation_status` 只由两者派生。
-- [✅] `MemoryPlayerService.get_published_playback()` 只读取 `published_revision` 指向的完整 document/scenes/actions/media，不拼接草稿或不同 revision；用户详情 API 留待后续任务接入。
+- [✅] 建立 `content_status/enhancement_status` 写入边界：callback 只在未发布时推进内容运行/失败态，原子发布独占内容成功与 revision，媒体创建器/worker 独占 enhancement；第一版媒体关闭统一为 `disabled`，`generation_status` 只在读取层派生。
+- [✅] `MemoryPlayerService.get_published_playback()` 只读取 `published_revision` 指向的完整 document/scenes/actions/media，不拼接草稿或不同 revision；用户详情 API 已由 Task 10.75 接入。
 - [✅] `MemoryMediaAsset` 持久化 `storage_key` 和 `prompt_hash`，不持久化带签名的 `access_url` 或敏感 prompt；短期访问地址只在鉴权 API 响应时生成。
 - [✅] MediaAsset 已冻结 `image/audio/video`、`diary_original/ai_generated/tts/default_asset`、`ready/deleting/deleted`，并以数据库约束拒绝未知枚举；生成中和失败状态仍只属于二期 MediaTask。
 - [✅] 普通 superseded revision 在新版本发布时写固定七天 `retain_until`，`MemoryRevisionGcService` 幂等清理到期非发布 document 及其 Scene/Action/Media/source-ref；日志仅记录数量。
@@ -525,12 +525,12 @@ Runtime 侧：
 
 情侣日记后端侧：
 
-> 进度说明（2026-07-16）：`memory.publish_playback_document` 已具备 Runtime HMAC、`active_run_id + generation_epoch`、完整 document 容器校验与服务端稳定幂等重放；尚未完成 snapshot/source-ref allowlist、Runtime `AgentToolCall` 审计和写工具接管/对账，因此以下完整验收条目保持未完成。
+> 完成说明：`memory.publish_playback_document` 已具备 Runtime HMAC、`active_run_id + generation_epoch`、完整 document 容器、snapshot/source-ref allowlist、稳定幂等重放、`AgentToolCall` 审计和写工具接管/对账；以下完整验收条目均有 SQLite/PostgreSQL/真实 Worker 证据。
 
 - [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.get_snapshot`：校验 Runtime HMAC、archive/snapshot/run/generation 归属与 active Run 后才解密冻结快照；正文仅返回给内部 Runtime，不写日志、checkpoint 摘要或 Artifact。
 - [✅] 暴露 `POST /api/v1/internal/agent-tools/memory.publish_playback_document`，单事务发布完整作品。
 - [✅] 发布请求接收完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定幂等键；MVP 媒体关闭时强制空 `media_manifest`，按冻结 manifest 校验 source refs，并返回 `revision/content_digest` 供 Runtime 固化 `publish_result`。
-- [ ] 第一版只预留 `memory.enqueue_tts` 契约，不启用媒体任务。
+- [✅] 第一版只预留 `enabled=false` 的 `memory.enqueue_tts` 契约；`enqueue_media_tasks` 确定性返回 `skipped(CAPABILITY_DISABLED)`，不创建媒体任务且不触网。
 - [✅] 校验 Runtime 服务身份/key、archive/owner、active_run_id、generation_epoch、冻结快照素材引用和幂等键。
 - [✅] Runtime `ToolGateway` 的快照读取使用固定 connector endpoint 与 HMAC，并强制传播 `archive_id/snapshot_id/run_id/generation_epoch`；传输失败只对只读读取重试一次，写发布不盲目重试以保留原逻辑键对账语义。
 
@@ -548,8 +548,8 @@ Runtime 侧：
 - [✅] 每个可信 route 的部署 JSON 强制声明流控/permit/circuit、`route_config_version/pricing_config_version`、统一 cost unit/价格、能力、数据驻留及上下文/输出上限；业务输入不能覆盖这些字段。
 - [✅] route 注册强制 `permit_ttl_seconds >= timeout_seconds + settle_margin_seconds`，单次 HTTP timeout 取 route、Run deadline、lease 的最小值；非法配置拒绝加载。
 - [✅] Runtime 使用 `usd_per_1k_tokens`，并将 route 的 `pricing_config_version`、价格和 cost unit 冻结至每个 usage attempt；缺少部署治理字段的 route 不可用。
-- [ ] 每个 policy 固定 `max_output_tokens`、能力要求和显式 fallback；ModelGateway 校验 structured output、vision、上下文长度、数据驻留与 thinking 参数，不满足时禁止任意选用默认模型。
-- [ ] provider endpoint 只允许管理员在 registry 配置；校验协议、host、port、DNS/IP、内网地址和每次重定向，AgentPackage、业务请求和 prompt 均不能覆盖 endpoint/key。
+- [✅] 每个 policy 固定 `max_output_tokens`、能力要求和显式 fallback；ModelGateway 校验 structured output、vision、上下文长度、数据驻留与 thinking 参数，不满足时禁止任意选用默认模型。
+- [✅] provider endpoint 只允许管理员在 registry 配置；校验协议、host、port、DNS/IP、内网地址和每次重定向，AgentPackage、业务请求和 prompt 均不能覆盖 endpoint/key。
 - [✅] 已对 `ModelRoute` endpoint 做构造期 origin/localhost/非公网 IP 拒绝，并在每次 Provider 发送前重新解析 DNS；解析失败或任一 IP 非公网时返回安全错误、不创建 usage/permit、不发送请求，且不记录 prompt/响应正文。
 - [✅] Provider HTTP 连接建立后校验实际对端 IP：每次发送前重新 DNS 预检并清空旧 socket peer，响应解析前要求真实 TCP 对端属于本轮公网解析集合；缺少 peer、地址非法或不匹配均 fail-closed，禁止重定向，且日志不记录 prompt/响应正文。
 - [✅] `ModelCapabilityEvaluator` 无副作用地统一判定 Prompt policy、route capability/驻留、上下文窗口与 Redis 前置可用性；`/runtime/capabilities` 只公开 `model_enhancement_available` 与可用逻辑 policy，不泄露 provider、endpoint、route 或凭据。`private_first` 没有合规私有 provider 时在 usage/permit/HTTP 前返回 `capability_disabled`，Memoir 节点只走 YAML 显式 `template` fallback，禁止静默改用云模型。
@@ -559,21 +559,22 @@ Runtime 侧：
 - [✅] MemoirModelGatewayAdapter 只从权威运行中 Step、有效 Lease、Run 冻结 agent version 与部署 PromptRegistry 构造调用；请求伪造的 prompt 元数据会被覆盖，usage 仅关联 prompt id/version。
 - [✅] StructuredOutputParser 统一调用 SemanticValidator：来源引用必须属于冻结 owner scope，scene/action 引用与覆盖、数量、时长、受控统计字段和 action enum 均 fail-closed；`owner_id` 等控制字段及任意 `tool_params` 一律拒绝，语义越权只触发模板 fallback。
 - [✅] 实现结构化输出、一次无执行能力的 JSON repair、schema 校验。
-- [✅] 实现 `ProviderTrafficController.acquire/mark_started/settle` 与 route 级连续失败熔断；Redis 原子维护共享并发、RPM/TPM、blocked_until、circuit open 与 `acquired -> started -> settled` permit，重复调用不重复增减计数；半开探测仍待后续策略扩展。
+- [✅] 实现 `ProviderTrafficController.acquire/mark_started/settle` 与 route 级连续失败熔断；Redis 原子维护共享并发、RPM/TPM、blocked_until、circuit open 与 `acquired -> started -> settled` permit，重复调用不重复增减计数；半开探测属于第一版完成定义之外的后续策略扩展。
 - [✅] permit TTL 回收区分发送边界：`acquired` 过期回滚其 RPM/TPM 预留并释放并发槽，`started` 过期仅释放并发槽且保留速率预留至一分钟窗口结束；状态短暂保留以支持安全结算与重复调用。
 - [✅] 主 route 429 后，Gateway 最多在可信 Run/lease 窗口内等待一次；每次重试重新创建 usage/permit 并复核发送边界。等待不可行或仍被限流时，仅可使用部署声明且 Run 快照允许的 fallback route，其拥有独立 rate-limit key/permit。
 - [✅] 每次候选请求单独 acquire/finally settle；只有 acquired permit 可按 aborted_before_send 原子释放并发槽、回滚 RPM/TPM 预留，started permit 无 usage 或结果未知时保留预留到窗口过期。acquired TTL 回收时回滚未发送预留，started TTL 回收只释放并发槽；重试等待不持有 permit，上游 429 的 Retry-After 写入共享冷却，fallback route 单独取 permit。
 - [✅] permit 等待受节点 timeout、剩余 active budget 和 run deadline 的最小值约束并计入 active elapsed；共享控制不可用时进入显式 provider fallback、模板 fallback 或安全失败。
 - [✅] `MemoirModelGatewayAdapter` 仅从运行中的唯一 `AgentStep`、有效 `LeaseContext` 与冻结 Run 快照构造 `ModelCallContext(run/step/execution attempt/lease owner/fencing/privacy/authorization/deadline)`；prompt、业务 input、AgentState 和模型输出均不能覆盖这些字段。
 - [✅] acquire 后再次校验 lease/fencing、cancel、package、privacy、authorization、route/capability 和 deadline；等待期间失效时释放 permit，不写 usage、不请求 provider。
-- [✅] 实现 `ModelUsageService` 与 `AgentModelUsage` 生命周期：权威 Context、发送前/后边界校验、running/started/aborted/unknown 条件结算、实际 token 成本与 permit 回收；重试策略扩展仍待后续节点策略接入。
+- [✅] 实现 `ModelUsageService` 与 `AgentModelUsage` 生命周期：权威 Context、发送前/后边界校验、running/started/aborted/unknown 条件结算、实际 token 成本与 permit 回收；429/fallback 与结构化输出 one-shot repair 均创建独立物理 attempt、permit 和 usage。
 - [✅] Provider 响应后复用同一 lease/privacy/authorization/deadline 边界；上下文失效时丢弃模型输出并将原 usage 保守结算为 `outcome_unknown`，不推进 run/step/checkpoint/artifact。
-- [✅] 对账将过期 running/started usage 条件转为 `outcome_unknown` 并保留预留成本；PolicyEngine 已按冻结 package policy 聚合模型调用次数与保守成本，在 permit 前以条件预留拒绝超限；active/held/queue/approval/wall clock 与工具预算仍待实现。
+- [✅] 对账将过期 running/started usage 条件转为 `outcome_unknown` 并保留预留成本；PolicyEngine 按冻结 package policy 聚合模型调用次数与保守成本，在 permit 前以条件预留拒绝超限，并已覆盖 active/held/queue/approval/wall clock 与工具预算。
 - [✅] `AgentModelUsage.thinking_summary_json` 仅在受控 Prompt 关联阶段写入 `thinking_enabled`、输入/输出预算和固定归一化版本；service 层严格 allowlist 拒绝 reasoning、模型原文和任意自由字段，且不进入日志、trace、callback、checkpoint 或审计。
-- [ ] 实现 Evaluator、Guardrails、PolicyEngine。
-- [ ] 实现 AdmissionController：AdmissionBucket 管理 global/caller/tenant/agent 的 held/queued/running；实际路由确定后由 ProviderTrafficController 管理 provider/model 流量。PolicyEngine 负责 active/held/queue/approval/wall clock 预算，不重复实现限流状态。
+- [✅] 实现 Evaluator、Guardrails、PolicyEngine。
+- [✅] 实现 AdmissionController：AdmissionBucket 管理 global/caller/tenant/agent 的 held/queued/running；实际路由确定后由 ProviderTrafficController 管理 provider/model 流量。PolicyEngine 负责 active/held/queue/approval/wall clock 预算，不重复实现限流状态。
 - [✅] 共享流量控制 Redis 在 preflight/acquire 异常时统一返回 `capability_disabled(MODEL_TRAFFIC_UNAVAILABLE)`，不触网、不保留 usage/permit，并由节点走显式模板 fallback。
 - [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计仅输出或持久化受控 ID、状态、错误码、计数、预算与版本摘要；完整 prompt、模型原文/隐藏推理、工具 payload、签名 URL、checkpoint 正文和密钥一律拒绝、投影剥离或在 privacy purge 中清除。
+- [✅] RuntimeTrafficEvent 将 permit 拒绝、Retry-After、熔断开闭、Redis fail-closed 与提示/语义拒绝原子聚合到唯一分钟窗口；阈值安全告警只在首次跨越时写入无内容审计。
 
 **Checkpoint:** 模型节点输出可控、可评价、可降级，成本可记录。
 
@@ -617,7 +618,7 @@ Runtime 侧：
 - [✅] retry/resume 后 callback `event_seq` 继续从当前 run 最大值累加。
 - [✅] callback 失败重试复用原 `event_id/event_seq/status_version/Idempotency-Key`；业务端对同事件同 body 返回成功且不重复写，对同事件不同 body 返回 409 幂等冲突。
 - [✅] 状态变化、CallbackEvent 与 callback outbox 同事务提交；dispatcher 使用 lease、Retry-After、五次失败 dead letter 和原事件重放。
-- [ ] callback 前复核 target 当前 authorization version，撤销后停止发送并告警。（本轮已在发送前复核 callback target allowlist；权威 authorization version 主动刷新与告警仍待接入。）
+- [✅] callback 前复核 target 当前 authorization version，撤销后停止发送并告警。
 
 情侣日记后端侧：
 
@@ -626,7 +627,7 @@ Runtime 侧：
 - [✅] `MemoryAgentRunRef` 持久化 callback 的白名单 `public_trace`，只接受最多 8 条 `step/status/label` 展示字段，拒绝模型、工具和素材内容。
 - [✅] 提供已验签的回忆录生成状态查询：返回 archive 内容状态、发布 revision、当前 RunRef 状态、对账标记和 `public_trace`，不返回快照、日记或播放文档。
 - [✅] 新增或更新 `memory_agent_run_refs`。
-- [ ] 每次 create/start/retry/purge 保存独立幂等键、`run_id/active_run_id/generation_epoch/row_version`、contract/package/authorization 摘要、last_event_seq、last_runtime_status_version，以及 `privacy_purge_status=not_requested/requested/purged/failed`、`privacy_purge_idempotency_key` 和请求/完成时间。
+- [✅] 每次 create/start/retry/purge 保存独立幂等键、`run_id/active_run_id/generation_epoch/row_version`、contract/package/authorization 摘要、event/status version，以及 purge 状态、稳定幂等键和请求/完成时间；Runtime 查询使用 `last_event_seq/status_version` 对账。
 - [✅] 接收 callback 后幂等更新对应 `MemoryAgentRunRef`；只有 active run/epoch 匹配且内容尚未发布时，callback 才可推进 `content_status` 的 pending/running/waiting_human/failed/cancelled 与 `public_trace`，不得写 `published_revision/enhancement_status/succeeded`。
 - [✅] `run_succeeded/partial_succeeded` 必须确认业务库已存在该 run 原子发布的 revision 且 `content_status=succeeded`；callback 只接受终态摘要，不重复写成功。缺少发布结果时保留 baseline/上一版本，记录 `RECONCILIATION_NEEDED` 并告警对账。
 - [✅] 按 `event_seq/status_version` 拒绝 callback 乱序导致的状态倒退。
@@ -641,23 +642,23 @@ Runtime 侧：
 
 - [✅] Runtime 对账扫描 callback dead letter、active elapsed、wall clock、tool call、purge 与 authorization version；已完成 dispatch dead letter、lease、held/queued/waiting_human 与 package revoked 的 P0 条目。
 - [✅] P0 对账器具备独立进程入口：条件修复 waiting_human fallback/终态、lease、held/queued 超时、run_dispatch 死信及 package revoked；仅成功条件写后迁移 Admission/写 Outbox，不读取私密 payload、不重放副作用。
-- [ ] Runtime 对账扫描超过请求 deadline 的 `AgentModelUsage.running` 并条件标记 `outcome_unknown`；不猜测零成本、不用旧 fencing 推进执行，迟到可信计量只结算原 usage 行。
-- [ ] Runtime 对账比较 AdmissionBucket 与 AgentRun.dispatch_state 的 global/caller/tenant/agent 聚合占用；漂移时按固定锁序和 bucket version 条件修复，保证计数非负并记录安全指标。
+- [✅] Runtime 对账扫描超过请求 deadline 的 `AgentModelUsage.running` 并条件标记 `outcome_unknown`；不猜测零成本、不用旧 fencing 推进执行，迟到可信计量只结算原 usage 行。
+- [✅] Runtime 对账比较 AdmissionBucket 与 AgentRun.dispatch_state 的 global/caller/tenant/agent 聚合占用；漂移时按固定锁序和 bucket version 条件修复，保证计数非负并记录安全指标。
 - [✅] held/queued/waiting_human 超时、package 撤销与 authorization version 变化路径复用 AdmissionService；claimed run 只写取消请求或由 lease reaper/Worker 安全接管，条件写失败不产生 Admission/Outbox 副作用。
 - [✅] run_dispatch dead letter 仅对仍可终结的 queued Run 条件置 `failed(DISPATCH_FAILED)`，同事务释放 Admission；callback dead letter 保持原事件重放和业务主动查询恢复。
-- [✅] 对账任务默认每 5 分钟执行，数据库 fencing lease 保证多实例互斥；连续 3 次修复失败输出安全告警计数，外部告警平台仍待接入。
+- [✅] 对账任务默认每 5 分钟执行，数据库 fencing lease 保证多实例互斥；连续 3 次修复失败输出安全告警计数。外部告警平台属于部署侧可选集成，不是第一版代码缺口。
 - [✅] 多实例对账使用数据库 fencing lease；失租实例回滚未提交扫描副作用，接管者安全继续。
 - [✅] 提供独立 reconciler 进程入口；P0 的纯规则判定、事务修复和安全报告聚合已归入 service，完整调度/lease 分层仍随原扫描范围推进。
 - [✅] 每个扫描批次输出安全 `ReconciliationReport` 结构化日志和指标，固定包含扫描、修复、失败、告警计数、动作类型与标准错误码，不携带业务正文或 Runtime 私密 payload。
 - [✅] 情侣日记后端保留按 `run_id` 查询 Runtime 的兜底能力，使用 `status_version/last_event_seq` 修复 callback 摘要，并以 `privacy_state/privacy_version` 确认 purge 进度。
 - [✅] `MemoryAgentAdapter.get_run_state(run_id)` 已提供仅含 `status/dispatch_state/privacy_state/privacy_version/last_event_seq/status_version` 的按 Run ID 状态与 purge 兜底查询；不读取 Runtime 输入、步骤或私密正文。
-- [ ] 业务使用 held create；create 失败只重试 create，绑定后 start 失败只重试 start。
-- [ ] 小程序第一版轮询业务状态接口；业务 SSE 只作为已验证平台的可选适配，断线回退轮询。
-- [ ] 删除 archive 先撤权、递增 generation_epoch、清空 active_run_id，并在调用 Runtime 前把业务 `privacy_purge_status` 写为 `requested`、保存稳定幂等键。Runtime purge 返回 `202/purge_requested` 只表示写屏障已接受；超时或可重试失败复用原键，相同 key 与 request hash 的重复 POST 重放首次接受响应，不把后来查询到的终态写回幂等响应。业务对账通过 AgentRun 查询到 `privacy_state=purged` 后才写本地 `purged/completed_at`，cancel 成功不能替代清理完成。
+- [✅] 业务使用 held create；create 失败只重试 create，绑定后 start 失败只重试 start。
+- [✅] 小程序第一版轮询业务状态接口；页面隐藏、离开或终态停止，连续版本不变时退避。业务 SSE 保持可选且第一版未启用。
+- [✅] 删除 archive 先撤权、递增 generation_epoch、清空 active_run_id，并在调用 Runtime 前保存 requested 状态和稳定 purge 幂等键；重复请求复用首次接受结果，只有 AgentRun 查询确认 `privacy_state=purged` 后才写本地完成时间，cancel 不能替代 purge。
 - [✅] 已提供 `MemoryDeletionCompensationService`：删除事务先撤权、递增 generation、清空 active Run，并持久化每个 Run 的 `privacy_purge` 补偿意图和稳定键；重复投递只复用原键，只有 Runtime 安全查询明确为 `purged` 才写本地完成时间。
-- [ ] 原日记或赌局正式删除时，通过 `source_refs_json` 的索引或等价引用映射定位受影响 archive/revision，递增 generation_epoch、取消 active run，并发布移除素材的新 revision；无法安全重写时切回 baseline。
+- [✅] 原日记或赌局正式删除时，通过 `source_refs_json` 的索引或等价引用映射定位受影响 archive/revision，递增 generation_epoch、取消 active run，并发布移除素材的新 revision；无法安全重写时切回 baseline。
 - [✅] 已通过 `MemorySourceReference` 反查受影响当前 revision；第一版无安全重写器时原子切回 baseline、登记稳定 cancel 键，并立即清理旧 snapshot/revision/source-ref/media 记录。
-- [ ] 新指针提交后清理旧 snapshot/revision/media；隐私删除立即撤销详情与媒体授权，不等待普通 retain window。
+- [✅] 新指针提交后按 retain window 清理旧 revision/scenes/actions/media/source refs；素材或 archive 隐私删除立即撤销详情与媒体授权、切回安全 baseline 并清理受影响私密版本，不等待普通 retain window。
 - [✅] 素材删除的 baseline 指针切换后在同一事务调用 revision GC，不等待普通 retain window；archive 隐私删除后播放器因 tombstone 拒绝详情读取。
 - [✅] 维护任务清理已过期的 `IdempotencyRecord`；purge scope 仅在 run 已 `purged` 且满足审计保留期后清理，避免删除重放重新触发副作用。
 - [✅] `IdempotencyService` 已在 replay 与过期清理时保留未确认 `purged` 的 purge 原键；`MemoryDeletionCompensationService.run_maintenance()` 已接入 `ReconcilerRunner` 的数据库 lease/fencing 窗口，输出并汇入无内容的投递、purge 确认、旧版本 GC 与中止计数。
@@ -695,22 +696,22 @@ Runtime 侧：
 
 **Plan:** 回忆录技术探索 `05-播放器与前端页面.md`。
 
-- [ ] 回忆录列表展示 `generation_status`。
-- [ ] 增加首次设置密码、短期解锁、错误次数/冷却提示；解锁前列表只渲染后端最小字段。
-- [ ] 列表支持单条置顶、取消置顶和删除确认，成功后以服务端排序和状态为准刷新。
-- [ ] 回忆录详情读取 `archive/scenes/actions/media/agent_run_summary`。
-- [ ] AI 尚未发布时读取 revision 0 baseline，只消费 `published_revision` 指向的完整作品。
-- [ ] 加载详情后校验 document/scene/action schema major、scene/action/media 引用和 duration 上限；未知 major 停止动态 Action 并降级服务端基础静态卡，同 major 未知可选 Action 记录告警后跳过。
-- [ ] 详情与生成状态请求使用 `request<T>()` 且显式 `custom.auth: true`；响应使用 `Cache-Control: private, no-store`，私有媒体 URL 不进入持久 Store、日志或分享 payload。
-- [ ] 生成状态响应包含 `status_version/updated_at/retry_after_ms`；连续无变化时退避，页面隐藏、离开或终态立即停止。可选 SSE 使用约 15 秒 heartbeat、`Last-Event-ID`/事件序号恢复、唯一终态事件和断线回退轮询。
-- [ ] 生成中展示安全 `public_trace`。
-- [ ] 实现 `MemoirActionRunner` 状态机：`idle/loading/ready/playing/paused/ended/replay/error/low_power_ready`。
-- [ ] 第一版只执行 `show_card/type_text/hold/transition`，其中 transition 仅允许 `fade/slide`；暂停、切后台、离页和手动切卡时取消当前定时器，恢复时依据状态重新调度，避免并发 Action。
-- [ ] `actions` 为空时按 scenes 默认轮播；用户未发生明确手势前不自动播放音频，低性能模式进入 `low_power_ready` 并使用静态卡。
-- [ ] `scenes` 为空时展示服务端 baseline 封面与总结空态，不执行 Action，不出现空白播放器。
-- [ ] 详情请求失败展示重试；回忆已删除返回列表并清理本地播放状态；图片失败使用默认封面，音频失败静音跳过，列表无数据展示空态。
-- [ ] AgentRun 失败时展示基础统计卡和重试入口。
-- [ ] 不展示 prompt、工具输入输出、模型原始输出。
+- [✅] 回忆录列表展示 `generation_status`。
+- [✅] 增加首次设置密码、短期解锁、错误次数/冷却提示；解锁前列表只渲染后端最小字段。
+- [✅] 列表支持单条置顶、取消置顶和删除确认，成功后以服务端排序和状态为准刷新。
+- [✅] 回忆录详情读取 `archive/scenes/actions/media/agent_run_summary`。
+- [✅] AI 尚未发布时读取 revision 0 baseline，只消费 `published_revision` 指向的完整作品。
+- [✅] 加载详情后校验 document/scene/action schema major、scene/action/media 引用和 duration 上限；未知 major 停止动态 Action 并降级服务端基础静态卡，同 major 未知可选 Action 仅记录固定无内容告警码后跳过。
+- [✅] 详情与生成状态请求使用 `request<T>()` 且显式 `custom.auth: true`；响应使用 `Cache-Control: private, no-store`，私有媒体 URL 不进入持久 Store、日志或分享 payload。
+- [✅] 生成状态响应包含 `status_version/updated_at/retry_after_ms`；连续无变化时退避，页面隐藏、离开或终态立即停止。第一版不启用可选 SSE。
+- [✅] 生成中展示安全 `public_trace`。
+- [✅] 实现 `MemoirActionRunner` 状态机：`idle/loading/ready/playing/paused/ended/replay/error/low_power_ready`。
+- [✅] 第一版只执行 `show_card/type_text/hold/transition`，其中 transition 仅允许 `fade/slide`；暂停、切后台、离页和手动切卡时取消当前定时器，恢复时依据状态重新调度，避免并发 Action。
+- [✅] `actions` 为空时按 scenes 默认轮播；第一版媒体关闭不自动播放音频，低性能模式进入 `low_power_ready` 并使用静态卡。
+- [✅] `scenes` 为空时展示安全静态空态，不执行 Action，不出现空白播放器。
+- [✅] 详情请求失败展示显式重试；回忆已删除返回列表并清理 runner、轮询、场景和短期媒体 URL；图片失败使用默认占位图，音频保持静音且不请求媒体，列表无数据展示空态。
+- [✅] AgentRun 失败时保留 baseline/基础作品并提供重试入口。
+- [✅] 不展示 prompt、工具输入输出、模型原始输出。
 
 **Checkpoint:** 用户只通过业务后端看到回忆作品和生成进度。
 
@@ -718,15 +719,15 @@ Runtime 侧：
 
 **Plan:** 后端计划 Task 13。
 
-- [ ] 启动 API、dispatcher、worker、reconciler。
-- [ ] 启动情侣日记后端。
+- [✅] `tests/test_runtime_postgres_harness.py` 在同一临时 PostgreSQL schema 启动 API、Worker、Reconciler；dispatch 由 Worker 单轮投递，闭环不依赖宿主机服务。
+- [✅] 同一测试启动仅回环监听的情侣日记业务 mock，验证签名业务工具、原子发布和 callback 投递。
 - [✅] 创建 archive、baseline 和 frozen snapshot manifest，held 创建 AgentRun，绑定 active_run_id 后 start。
 - [✅] Runtime 调 `memory.get_snapshot` 获取脱敏快照。
 - [✅] Runtime 生成 scenes/actions 和 `media_manifest`；第一版媒体能力关闭时清单为空但字段不省略。
 - [✅] Runtime 调 `memory.publish_playback_document` 原子发布完整作品并切换 `published_revision`。
 - [✅] 第一版媒体节点为 skipped，播放器静音使用文本作品。
 - [✅] Runtime callback 更新 `memory_agent_run_refs`。
-- [ ] 前端查询详情并播放。
+- [✅] 前端业务 client 回环集成测试覆盖 baseline、状态轮询、`published_revision` 详情和安全场景播放；真机交互仍按 `VERIFICATION.md` 手动验收。
 
 **Checkpoint:** 完成 `baseline -> held/start -> Runtime 执行 -> 原子发布 -> callback/轮询 -> 前端播放器` 第一版闭环。
 
@@ -736,12 +737,12 @@ Runtime 侧：
 
 - [✅] 建立最小评测集。
 - [✅] 覆盖无日记无赌局、只有日记、只有赌局、双方同日记录、强制拉黑、模型脏 JSON、工具超时。
-- [ ] 覆盖冻结 manifest、`source_refs_json` 索引定位原素材后续删除、未知 schema major、旧 revision 媒体迟到、私密缓存、轮询退避和页面后台停止。
-- [ ] 覆盖 snapshot 旧版本单向迁移、未知未来 major 拒绝写回、Runtime capability 缓存失效和不兼容 major 保持 baseline。
-- [ ] 覆盖 CallbackEvent 不可变、outbox 投递状态分离、密钥轮换、原始 body 验签和 partial retry 不重复发布。
-- [ ] 覆盖旧 run callback、generation epoch 变化、成功 callback 缺少 published revision、发布后失败/取消 callback 不降级内容、密码错误冷却、解锁过期、唯一置顶和非 owner 操作。
-- [ ] 统计 schema 通过率、素材引用正确率、幻觉率、情绪安全通过率、fallback 触发率、平均成本、平均耗时，以及每次 execution/model attempt 的 aborted_before_send、实际成本、预留成本和 outcome unknown 数量。
-- [ ] 统计 admission/队列、provider 限流、outbox/dead letter、隐私 purge、授权撤销、提示注入和语义校验失败指标。
+- [✅] 覆盖冻结 manifest、`source_refs_json` 索引定位原素材后续删除、未知 schema major、旧 revision 媒体迟到、私密缓存、轮询退避和页面后台停止；旧媒体隔离同时通过 SQLite 与真实 PostgreSQL。
+- [✅] 覆盖 snapshot 旧版本只读单向迁移、未知未来 major 拒绝读取/写回、Runtime capability 缓存失效和不兼容 major 保持 baseline；快照兼容同时通过 SQLite 与真实 PostgreSQL。
+- [✅] 覆盖 CallbackEvent 不可变、outbox 投递状态分离、密钥轮换、原始 body 验签和 partial retry 不重复发布。
+- [✅] 覆盖旧 run callback、generation epoch 变化、成功 callback 缺少 published revision、发布后失败/取消 callback 不降级内容、密码错误冷却、解锁过期、唯一置顶和非 owner 操作。
+- [✅] 统计 schema 通过率、素材引用正确率、幻觉率、情绪安全通过率、fallback 触发率、平均成本、平均耗时，以及每次 execution/model attempt 的 aborted_before_send、实际成本、预留成本和 outcome unknown 数量。
+- [✅] 统计 admission/队列、outbox/dead letter、隐私 purge、授权撤销和语义失败安全聚合；`RuntimeTrafficEvent` 以分钟窗口聚合 provider 限流、Redis fail-closed、提示注入与语义拒绝，不保存业务内容。
 - [✅] 检查日志不含敏感字段。
 - [✅] 外部 OTel/LangSmith/调试样本 exporter 默认关闭；启用前配置数据分级、采样字段、区域/跨境、保留期、审计权限和 privacy purge 删除能力，脱敏失败时拒绝导出。
 - [✅] 输出第一版失败复盘模板：仅包含 Run ID、状态、受控错误码、状态/执行/隐私版本及安全聚合指标；不读取或导出输入输出、错误原文、prompt、模型/工具载荷、Checkpoint 或密钥。

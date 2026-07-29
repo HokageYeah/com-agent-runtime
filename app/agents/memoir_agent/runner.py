@@ -45,6 +45,14 @@ class MemoirModelGateway(Protocol):
 
     def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object: ...
 
+    def repair(
+        self,
+        run_id: str,
+        node_id: str,
+        request: dict[str, object],
+        invalid_output: object,
+    ) -> object: ...
+
 
 class _HighlightOutput(BaseModel):
     """高光节点的最小模型输出契约。"""
@@ -168,11 +176,26 @@ class MemoirNodeRunner:
             highlights = state.highlights if isinstance(state.highlights, dict) else {}
             refs = highlights.get("source_refs", [])
             safe_refs = [ref for ref in refs if isinstance(ref, str)][:8] if isinstance(refs, list) else []
-            model_data = self._model_data(run.run_id, "plan_chapters", {"source_refs": safe_refs})
-            chapters = self._valid_chapters(model_data, safe_refs)
-            if chapters is not None:
-                state.apply_tool_output("chapter_plan", {"chapters": chapters})
-                logging.info("MemoirAgent 模型章节完成 run_id=%s chapter_count=%s", run.run_id, len(chapters))
+            chapter_request: dict[str, object] = {"source_refs": safe_refs}
+            model_data = self._model_data(
+                run.run_id, "plan_chapters", chapter_request,
+            )
+            validated_chapters = self._valid_chapters(model_data, safe_refs)
+            if validated_chapters is None and model_data is not None:
+                repaired = self._repair_model_data(
+                    run.run_id, "plan_chapters", chapter_request, model_data,
+                )
+                validated_chapters = self._valid_chapters(repaired, safe_refs)
+            if validated_chapters is not None:
+                state.apply_tool_output(
+                    "chapter_plan",
+                    {"chapters": validated_chapters},
+                )
+                logging.info(
+                    "MemoirAgent 模型章节完成 run_id=%s chapter_count=%s",
+                    run.run_id,
+                    len(validated_chapters),
+                )
                 return {"node_id": "plan_chapters", "fallback": False}
             if self._model_gateway is not None:
                 state.fallback_flags.append("model_invalid_chapters")
@@ -184,11 +207,29 @@ class MemoirNodeRunner:
             plan = state.chapter_plan if isinstance(state.chapter_plan, dict) else {}
             chapters = plan.get("chapters", [])
             safe_chapters = self._safe_chapters(chapters)
-            model_data = self._model_data(run.run_id, "generate_scenes", {"chapters": safe_chapters})
-            scenes = self._valid_scenes(model_data, self._source_refs(safe_chapters))
-            if scenes is not None:
-                state.apply_tool_output("scenes", scenes)
-                logging.info("MemoirAgent 模型场景完成 run_id=%s scene_count=%s", run.run_id, len(scenes))
+            scene_request: dict[str, object] = {"chapters": safe_chapters}
+            model_data = self._model_data(
+                run.run_id, "generate_scenes", scene_request,
+            )
+            validated_scenes = self._valid_scenes(
+                model_data,
+                self._source_refs(safe_chapters),
+            )
+            if validated_scenes is None and model_data is not None:
+                repaired = self._repair_model_data(
+                    run.run_id, "generate_scenes", scene_request, model_data,
+                )
+                validated_scenes = self._valid_scenes(
+                    repaired,
+                    self._source_refs(safe_chapters),
+                )
+            if validated_scenes is not None:
+                state.apply_tool_output("scenes", validated_scenes)
+                logging.info(
+                    "MemoirAgent 模型场景完成 run_id=%s scene_count=%s",
+                    run.run_id,
+                    len(validated_scenes),
+                )
                 return {"node_id": "generate_scenes", "fallback": False}
             if self._model_gateway is not None:
                 state.fallback_flags.append("model_invalid_scenes")
@@ -213,11 +254,32 @@ class MemoirNodeRunner:
         if node.get("node_id") == "extract_highlights":
             # 原始 snapshot 不得在此节点回读，高光只可消费脱敏视图中的非敏感引用。
             refs = self._safe_material_refs(state.sanitized_material)
-            model_data = self._model_data(run.run_id, "extract_highlights", {"source_refs": refs})
-            highlights = self._valid_highlights(model_data, refs)
-            if highlights is not None:
-                state.apply_tool_output("highlights", {"source_refs": highlights, "mode": "model"})
-                logging.info("MemoirAgent 模型高光完成 run_id=%s ref_count=%s", run.run_id, len(highlights))
+            highlight_request: dict[str, object] = {"source_refs": refs}
+            model_data = self._model_data(
+                run.run_id, "extract_highlights", highlight_request,
+            )
+            validated_highlights = self._valid_highlights(model_data, refs)
+            if validated_highlights is None and model_data is not None:
+                repaired = self._repair_model_data(
+                    run.run_id,
+                    "extract_highlights",
+                    highlight_request,
+                    model_data,
+                )
+                validated_highlights = self._valid_highlights(repaired, refs)
+            if validated_highlights is not None:
+                state.apply_tool_output(
+                    "highlights",
+                    {
+                        "source_refs": validated_highlights,
+                        "mode": "model",
+                    },
+                )
+                logging.info(
+                    "MemoirAgent 模型高光完成 run_id=%s ref_count=%s",
+                    run.run_id,
+                    len(validated_highlights),
+                )
                 return {"node_id": "extract_highlights", "fallback": False}
             if self._model_gateway is not None:
                 state.fallback_flags.append("model_unavailable_highlights")
@@ -228,8 +290,8 @@ class MemoirNodeRunner:
         if node.get("node_id") == "compute_stats":
             # 统计只保留计数，不将任何日记/赌局正文写进后续可观测摘要。
             snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
-            diaries = snapshot.get("diaries", [])
-            bets = snapshot.get("bets", [])
+            diaries = snapshot.get("diary_items", snapshot.get("diaries", []))
+            bets = snapshot.get("bet_items", snapshot.get("bets", []))
             diary_count = len(diaries) if isinstance(diaries, list) else 0
             bet_count = len(bets) if isinstance(bets, list) else 0
             state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
@@ -255,6 +317,20 @@ class MemoirNodeRunner:
                     sensitive_count,
                 )
             return {"node_id": "sanitize_materials", "sanitized": True}
+        if node.get("node_id") == "enqueue_media_tasks":
+            # 第一版媒体能力关闭。该节点必须是确定性无副作用跳过点：
+            # 不解析作品正文、不调用预留 Tool、不创建媒体任务。
+            state.media_tasks = []
+            logging.info(
+                "MemoirAgent 媒体能力已关闭 run_id=%s code=%s",
+                run.run_id,
+                "CAPABILITY_DISABLED",
+            )
+            return {
+                "node_id": "enqueue_media_tasks",
+                "skipped": True,
+                "reason_code": "CAPABILITY_DISABLED",
+            }
         if node.get("node_id") == "publish_document":
             if not isinstance(state.playback_document, dict):
                 raise ValueError("PLAYBACK_DOCUMENT_MISSING")
@@ -285,13 +361,48 @@ class MemoirNodeRunner:
                 raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN")
             audit = self._audit.begin_publish(run.run_id, run.execution_attempt, logical_key, logical_key, digest) if self._audit else None
             try:
-                state.publish_result = self._gateway.publish_playback_document(run.business_connector_id, archive_id, run.run_id, snapshot_id, epoch, state.playback_document, logical_key)
+                if audit is None:
+                    raise RuntimeError("PUBLISH_AUDIT_REQUIRED")
+                state.publish_result = self._gateway.publish_playback_document(
+                    run.business_connector_id, archive_id, run.run_id, snapshot_id, epoch,
+                    state.playback_document, logical_key, audit,
+                )
             except httpx.TimeoutException:
                 if audit is not None:
                     self._audit.unknown(audit, "HTTP_TIMEOUT", lease_context=self._lease_context)
                 logging.warning("MemoirAgent 发布结果未知 run_id=%s", run.run_id)
                 raise
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 409:
+                    # Idempotency 冲突不可信任响应正文；仅再次查询业务端已提交的
+                    # revision/content_digest，并要求 digest 与本次规范化文档一致。
+                    reconciled = self._gateway.get_publish_result(
+                        run.business_connector_id, archive_id, run.run_id, logical_key
+                    )
+                    if (
+                        isinstance(reconciled, dict)
+                        and isinstance(reconciled.get("revision"), int)
+                        and reconciled.get("content_digest") == digest
+                    ):
+                        state.publish_result = reconciled
+                        if audit is not None and not self._audit.succeed(
+                            audit, reconciled["revision"], digest,
+                            lease_context=self._lease_context,
+                        ):
+                            state.publish_result = None
+                            raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN") from None
+                        logging.info("MemoirAgent 409 对账恢复发布结果 run_id=%s", run.run_id)
+                        return {"node_id": "publish_document", "published": True}
+                    if audit is not None:
+                        self._audit.fail(
+                            audit, "TOOL_IDEMPOTENCY_CONFLICT", retryable=False,
+                            lease_context=self._lease_context,
+                        )
+                    logging.warning(
+                        "MemoirAgent 发布幂等冲突未通过摘要对账 run_id=%s code=%s",
+                        run.run_id, "TOOL_IDEMPOTENCY_CONFLICT",
+                    )
+                    raise RuntimeError("TOOL_IDEMPOTENCY_CONFLICT") from None
                 if audit is not None:
                     self._audit.fail(audit, f"HTTP_{exc.response.status_code}", retryable=exc.response.status_code >= 500, lease_context=self._lease_context)
                 logging.warning("MemoirAgent 发布被业务端拒绝 run_id=%s status=%s", run.run_id, exc.response.status_code)
@@ -341,8 +452,11 @@ class MemoirNodeRunner:
             return [], 0, 0
         materials: list[dict[str, object]] = []
         sensitive_count = invalid_count = 0
-        for field, material_type in (("diaries", "diary"), ("bets", "bet")):
-            raw_items = snapshot.get(field)
+        for fields, material_type in (
+            (("diary_items", "diaries"), "diary"),
+            (("bet_items", "bets"), "bet"),
+        ):
+            raw_items = snapshot.get(fields[0], snapshot.get(fields[1]))
             if not isinstance(raw_items, list):
                 continue
             for item in raw_items:
@@ -456,28 +570,9 @@ class MemoirNodeRunner:
         if self._model_gateway is None:
             return None
         try:
-            prompt_id = {
-                "extract_highlights": "highlight-extract",
-                "plan_chapters": "chapter-plan",
-                "generate_scenes": "scene-generate",
-            }.get(node_id)
-            if prompt_id is None:
+            safe_request = self._safe_model_request(node_id, request)
+            if safe_request is None:
                 return None
-            prompt = self._prompts.load("memoir_agent", "1.0.0", prompt_id, "v1")
-            refs = self._request_source_refs(request)
-            context = self._contexts.build_node_context(
-                trusted_instructions=prompt.template,
-                materials=[{"source_ref": ref, "text": "[SOURCE_REF]"} for ref in refs],
-                tool_results=[], token_budget=256,
-            )
-            # 仅传 Prompt 身份、策略和无正文上下文摘要；模板正文绝不进入可观测请求 DTO。
-            safe_request = {
-                "prompt_id": prompt.prompt_id,
-                "prompt_version": prompt.version,
-                "model_policy": prompt.model_policy,
-                "context": context.safe_summary(),
-                "input": request,
-            }
             result = self._model_gateway.call(run_id, node_id, safe_request)
         except Exception:  # Gateway 已处理 usage；Runner 不记录请求或异常正文。
             logging.warning("MemoirAgent 模型能力不可用 node_id=%s", node_id)
@@ -487,6 +582,58 @@ class MemoirNodeRunner:
             return None
         return getattr(result, "data", None)
 
+    def _repair_model_data(
+        self,
+        run_id: str,
+        node_id: str,
+        request: dict[str, object],
+        invalid_output: object,
+    ) -> object | None:
+        """最多调用一次受信任 repair 边界；原输出只沿当前调用栈短暂传递。"""
+        if self._model_gateway is None:
+            return None
+        repair = getattr(self._model_gateway, "repair", None)
+        if not callable(repair):
+            return None
+        try:
+            safe_request = self._safe_model_request(node_id, request)
+            if safe_request is None:
+                return None
+            result = repair(run_id, node_id, safe_request, invalid_output)
+        except Exception:
+            logging.warning("MemoirAgent 结构化修复能力不可用 node_id=%s", node_id)
+            return None
+        if getattr(result, "status", None) != "succeeded":
+            logging.info("MemoirAgent 结构化修复未成功 node_id=%s", node_id)
+            return None
+        return getattr(result, "data", None)
+
+    def _safe_model_request(
+        self, node_id: str, request: dict[str, object],
+    ) -> dict[str, object] | None:
+        """构造不含模板正文与素材正文的可观测请求摘要。"""
+        prompt_id = {
+            "extract_highlights": "highlight-extract",
+            "plan_chapters": "chapter-plan",
+            "generate_scenes": "scene-generate",
+        }.get(node_id)
+        if prompt_id is None:
+            return None
+        prompt = self._prompts.load("memoir_agent", "1.0.0", prompt_id, "v1")
+        refs = self._request_source_refs(request)
+        context = self._contexts.build_node_context(
+            trusted_instructions=prompt.template,
+            materials=[{"source_ref": ref, "text": "[SOURCE_REF]"} for ref in refs],
+            tool_results=[], token_budget=256,
+        )
+        # 仅传 Prompt 身份、策略和无正文上下文摘要；模板正文绝不进入可观测 DTO。
+        return {
+            "prompt_id": prompt.prompt_id,
+            "prompt_version": prompt.version,
+            "model_policy": prompt.model_policy,
+            "context": context.safe_summary(),
+            "input": request,
+        }
 
     @staticmethod
     def _request_source_refs(request: Mapping[str, object]) -> list[str]:
@@ -501,7 +648,7 @@ class MemoirNodeRunner:
                 for ref in chapter.get("source_refs", []) if isinstance(ref, str)]
 
     def _valid_highlights(self, data: object | None, allowed_refs: list[str]) -> list[str] | None:
-        output = self._parse_structured_output(data, _HighlightOutput, allowed_refs)
+        output = self._parse_structured_output(data, _HighlightOutput, allowed_refs, "extract_highlights")
         if not isinstance(output, _HighlightOutput):
             return None
         return list(dict.fromkeys(output.source_refs))[:8]
@@ -521,7 +668,7 @@ class MemoirNodeRunner:
         return safe
 
     def _valid_chapters(self, data: object | None, allowed_refs: list[str]) -> list[dict[str, object]] | None:
-        output = self._parse_structured_output(data, _ChapterPlanOutput, allowed_refs)
+        output = self._parse_structured_output(data, _ChapterPlanOutput, allowed_refs, "plan_chapters")
         if not isinstance(output, _ChapterPlanOutput):
             return None
         raw_chapters = output.model_dump()["chapters"]
@@ -541,7 +688,7 @@ class MemoirNodeRunner:
         return [ref for chapter in MemoirNodeRunner._safe_chapters(chapters) for ref in chapter["source_refs"] if isinstance(ref, str)]
 
     def _valid_scenes(self, data: object | None, allowed_refs: list[str]) -> list[dict[str, object]] | None:
-        output = self._parse_structured_output(data, _ScenePlanOutput, allowed_refs)
+        output = self._parse_structured_output(data, _ScenePlanOutput, allowed_refs, "generate_scenes")
         if not isinstance(output, _ScenePlanOutput):
             return None
         scenes = output.model_dump()["scenes"]
@@ -566,6 +713,7 @@ class MemoirNodeRunner:
         data: object | None,
         schema: type[BaseModel],
         trusted_refs: list[str],
+        node_id: str,
     ) -> BaseModel | None:
         """模型结果不论字符串或 Mapping 均必须穿过同一个受控解析器。"""
         if isinstance(data, str):
@@ -583,6 +731,9 @@ class MemoirNodeRunner:
             raw, schema, trusted_source_refs=set(trusted_refs),
         )
         if parsed.validated_value is None:
+            recorder = getattr(self._model_gateway, "record_validation_rejection", None)
+            if callable(recorder) and parsed.safety_status == "semantic_validation_failed":
+                recorder(node_id, parsed.error_codes)
             # 仅记录受控状态码，禁止把模型输出或可能含正文的异常写进日志。
             logging.info(
                 "MemoirAgent 结构化模型输出被拒绝 parse_status=%s safety_status=%s error_codes=%s",

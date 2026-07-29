@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.schemas.audit import RuntimeAuditEvent
 from app.services.admission_service import AdmissionService
+from app.services.agent_run_service import AgentRunService
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.lease_service import LeaseService
@@ -114,15 +115,19 @@ class ReconciliationService:
         repaired = expired_idempotency
         if expired_idempotency:
             self._record_action("idempotency_expired_deleted", expired_idempotency)
-        expired_usage_count = len(self._session.scalars(
-            select(AgentModelUsage.usage_id).where(
-                # started 表示 Worker 已取得发送权；崩溃后同样可能已有上游副作用。
-                AgentModelUsage.status.in_(("running", "started")),
-                AgentModelUsage.request_deadline_at.is_not(None),
-                AgentModelUsage.request_deadline_at < current,
-            )
-        ).all())
-        expired_usage_repaired = ModelUsageService(self._session).mark_expired_running_unknown(current)
+        expired_usage_count = len(
+            self._session.scalars(
+                select(AgentModelUsage.usage_id).where(
+                    # started 表示 Worker 已取得发送权；崩溃后同样可能已有上游副作用。
+                    AgentModelUsage.status.in_(("running", "started")),
+                    AgentModelUsage.request_deadline_at.is_not(None),
+                    AgentModelUsage.request_deadline_at < current,
+                )
+            ).all()
+        )
+        expired_usage_repaired = ModelUsageService(
+            self._session
+        ).mark_expired_running_unknown(current)
         repaired += expired_usage_repaired
         if expired_usage_repaired:
             self._record_action("model_usage_outcome_unknown", expired_usage_repaired)
@@ -143,6 +148,16 @@ class ReconciliationService:
         for run in runs:
             if not self._has_lease(lease_guard):
                 return self._abort_scan()
+            # purge 先由 API 建立版本写屏障；终态 Run 没有在途执行者后才可在
+            # 对账事务中物理清理，避免清理与 Worker 的迟到写入相互覆盖。
+            if (
+                run.privacy_state == "purge_requested"
+                and run.dispatch_state == "finished"
+                and AgentRunService(self._session).complete_purge(run.run_id)
+            ):
+                repaired += 1
+                self._record_action("privacy_purge_completed")
+                continue
             if run.dispatch_state in {"held", "queued", "claimed"} or (
                 run.status == "waiting_human" and run.dispatch_state == "finished"
             ):
@@ -246,7 +261,9 @@ class ReconciliationService:
 
     @staticmethod
     def _aborted_report() -> ReconciliationReport:
-        return ReconciliationReport(scanned=0, repaired=0, dead_letter_callbacks=0, failures=0)
+        return ReconciliationReport(
+            scanned=0, repaired=0, dead_letter_callbacks=0, failures=0
+        )
 
     def _record_action(self, action: str, count: int = 1) -> None:
         self._action_counts[action] = self._action_counts.get(action, 0) + count
@@ -308,9 +325,14 @@ class ReconciliationService:
     ) -> bool:
         repaired = self._session.execute(
             update(AdmissionBucket)
-            .where(AdmissionBucket.id == bucket.id, AdmissionBucket.version == bucket.version)
+            .where(
+                AdmissionBucket.id == bucket.id,
+                AdmissionBucket.version == bucket.version,
+            )
             .values(
-                held_count=counts[0], queued_count=counts[1], running_count=counts[2],
+                held_count=counts[0],
+                queued_count=counts[1],
+                running_count=counts[2],
                 version=AdmissionBucket.version + 1,
             )
             .execution_options(synchronize_session=False)
@@ -362,7 +384,9 @@ class ReconciliationService:
             )
             if requested.rowcount == 1:  # type: ignore[attr-defined]
                 self._session.refresh(run)
-                logging.warning("对账请求取消已撤销 Package 的 claimed run_id=%s", run.run_id)
+                logging.warning(
+                    "对账请求取消已撤销 Package 的 claimed run_id=%s", run.run_id
+                )
                 return True
         return False
 
@@ -410,12 +434,21 @@ class ReconciliationService:
         self, run: AgentRun, current: datetime, outcome: str
     ) -> None:
         """授权版本变化只记录受控结论，禁止将权限或业务载荷写入审计。"""
-        self._audit.append(RuntimeAuditEvent(
-            audit_id=str(uuid4()), actor_type="system", actor_id="reconciler",
-            action="agent_run_authorization_changed", resource_type="agent_run",
-            resource_id=run.run_id, reason_code="AUTHORIZATION_CHANGED", outcome=outcome,
-            occurred_at=current, trace_id=run.trace_id, metadata_summary={"status": run.status},
-        ))
+        self._audit.append(
+            RuntimeAuditEvent(
+                audit_id=str(uuid4()),
+                actor_type="system",
+                actor_id="reconciler",
+                action="agent_run_authorization_changed",
+                resource_type="agent_run",
+                resource_id=run.run_id,
+                reason_code="AUTHORIZATION_CHANGED",
+                outcome=outcome,
+                occurred_at=current,
+                trace_id=run.trace_id,
+                metadata_summary={"status": run.status},
+            )
+        )
 
     def _repair_held_timeout(self, run: AgentRun, current: datetime) -> bool:
         if run.status != "pending" or run.dispatch_state != "held":
@@ -438,7 +471,9 @@ class ReconciliationService:
 
     def _repair_active_elapsed_timeout(self, run: AgentRun, current: datetime) -> bool:
         """累计 active 时间只由执行边界记账，排队和人工等待不消耗该额度。"""
-        plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run.run_id))
+        plan = self._session.scalar(
+            select(AgentPlan).where(AgentPlan.run_id == run.run_id)
+        )
         limit = plan.stop_conditions_json.get("max_run_seconds") if plan else None
         if (
             isinstance(limit, bool)
@@ -474,7 +509,9 @@ class ReconciliationService:
                 return False
             self._session.refresh(run)
             self._record_action(f"{action}_cancel_requested")
-            logging.warning("对账请求执行超时取消 run_id=%s code=%s", run.run_id, error_code)
+            logging.warning(
+                "对账请求执行超时取消 run_id=%s code=%s", run.run_id, error_code
+            )
             return True
         if run.dispatch_state not in {"held", "queued", "finished"}:
             return False
@@ -489,7 +526,9 @@ class ReconciliationService:
     def _repair_queued_timeout(self, run: AgentRun, current: datetime) -> bool:
         if run.status != "pending" or run.dispatch_state != "queued":
             return False
-        plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run.run_id))
+        plan = self._session.scalar(
+            select(AgentPlan).where(AgentPlan.run_id == run.run_id)
+        )
         ttl = plan.stop_conditions_json.get("queue_ttl_seconds") if plan else None
         if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0:
             return False
@@ -505,14 +544,16 @@ class ReconciliationService:
         """修复 queued Run 的 dispatch 投递缺口，绝不创建第二个既有事件身份。"""
         if run.status != "pending" or run.dispatch_state != "queued":
             return False
-        events = list(self._session.scalars(
-            select(RuntimeOutboxEvent)
-            .where(
-                RuntimeOutboxEvent.event_type == "run_dispatch",
-                RuntimeOutboxEvent.aggregate_id == run.run_id,
-            )
-            .order_by(RuntimeOutboxEvent.id)
-        ).all())
+        events = list(
+            self._session.scalars(
+                select(RuntimeOutboxEvent)
+                .where(
+                    RuntimeOutboxEvent.event_type == "run_dispatch",
+                    RuntimeOutboxEvent.aggregate_id == run.run_id,
+                )
+                .order_by(RuntimeOutboxEvent.id)
+            ).all()
+        )
         # pending/有效 delivering 均仍由 dispatcher 负责。dead letter 则由下方终止
         # 分支收敛，不能擅自绕过投递上限重放。
         if any(event.status in {"pending", "dead_letter"} for event in events):
@@ -530,7 +571,9 @@ class ReconciliationService:
         if active_delivery:
             return False
         if not events:
-            self._outbox.append_run_dispatch(run.run_id, "reconciliation_missing_dispatch")
+            self._outbox.append_run_dispatch(
+                run.run_id, "reconciliation_missing_dispatch"
+            )
             logging.warning("对账补建缺失 run_dispatch run_id=%s", run.run_id)
             return True
         # Dispatcher 已标 delivered 但进程在 Worker claim 前退出，或 delivering lease
@@ -540,7 +583,9 @@ class ReconciliationService:
         if event.status == "delivering":
             replay_condition = RuntimeOutboxEvent.status == "delivering"
             if event.lease_expires_at is None:
-                replay_condition = replay_condition & RuntimeOutboxEvent.lease_expires_at.is_(None)
+                replay_condition = (
+                    replay_condition & RuntimeOutboxEvent.lease_expires_at.is_(None)
+                )
             else:
                 replay_condition = replay_condition & (
                     RuntimeOutboxEvent.lease_expires_at == event.lease_expires_at
@@ -568,7 +613,9 @@ class ReconciliationService:
             return False
         if not self._is_expired(run.waiting_expires_at, current):
             return False
-        if self._timeout_action(run) == "fallback" and self._has_valid_fallback_target(run):
+        if self._timeout_action(run) == "fallback" and self._has_valid_fallback_target(
+            run
+        ):
             repaired = self._requeue_timeout_fallback(run, current)
         elif self._timeout_action(run) == "fallback":
             repaired = self._terminate_timeout(run, current, "FALLBACK_NODE_INVALID")
@@ -581,9 +628,15 @@ class ReconciliationService:
 
     def _timeout_action(self, run: AgentRun) -> str | None:
         """只读取与 Run 同事务冻结的 Plan；缺失或非法策略安全降级失败。"""
-        plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run.run_id))
+        plan = self._session.scalar(
+            select(AgentPlan).where(AgentPlan.run_id == run.run_id)
+        )
         policy = plan.fallback_policy_json if plan is not None else {}
-        action = policy.get("waiting_human_timeout_action") if isinstance(policy, dict) else None
+        action = (
+            policy.get("waiting_human_timeout_action")
+            if isinstance(policy, dict)
+            else None
+        )
         return action if action in {"fallback", "cancelled", "failed"} else None
 
     def _timeout_terminal_status(self, run: AgentRun) -> str:
@@ -593,18 +646,22 @@ class ReconciliationService:
         return "failed"
 
     def _has_valid_fallback_target(self, run: AgentRun) -> bool:
-        plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run.run_id))
+        plan = self._session.scalar(
+            select(AgentPlan).where(AgentPlan.run_id == run.run_id)
+        )
         if plan is None:
             return False
         target = plan.fallback_policy_json.get("waiting_human_fallback_node")
         return isinstance(target, str) and target in {
-            node.get("node_id")
-            for node in plan.steps_json
-            if isinstance(node, dict)
+            node.get("node_id") for node in plan.steps_json if isinstance(node, dict)
         }
 
-    def _terminate_timeout(self, run: AgentRun, current: datetime, error_code: str) -> bool:
-        return self._terminate(run, current, self._timeout_terminal_status(run), error_code)
+    def _terminate_timeout(
+        self, run: AgentRun, current: datetime, error_code: str
+    ) -> bool:
+        return self._terminate(
+            run, current, self._timeout_terminal_status(run), error_code
+        )
 
     def _terminate(
         self, run: AgentRun, current: datetime, status: str, error_code: str

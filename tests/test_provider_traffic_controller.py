@@ -95,10 +95,11 @@ class FakeRedis:
             return ["circuit_failure", self.circuit_failures[route_id]]
         if operation == "circuit_success":
             route_id = str(args[5])
+            recovered = route_id in self.circuit_failures or route_id in self.circuit_open_until
             self.circuit_failures.pop(route_id, None)
             self.circuit_failure_expires_at.pop(route_id, None)
             self.circuit_open_until.pop(route_id, None)
-            return ["circuit_reset", 0]
+            return ["circuit_recovered" if recovered else "circuit_reset", 0]
         if operation == "started":
             reap_expired_permits()
             permit = self.permits.get(permit_key)
@@ -214,7 +215,7 @@ def test_circuit_success_resets_and_429_does_not_count_as_failure(route: ModelRo
     controller = ProviderTrafficController(redis, clock=lambda: 100.0)
 
     assert controller.record_circuit_failure(guarded).status == "circuit_failure"
-    assert controller.record_circuit_success(guarded).status == "circuit_reset"
+    assert controller.record_circuit_success(guarded).status == "circuit_recovered"
     assert controller.settle(guarded, "missing", retry_after_seconds=20).status == "already_settled"
     assert controller.record_circuit_failure(guarded).status == "circuit_failure"
     assert redis.circuit_failures[guarded.route_id] == 1
@@ -385,7 +386,8 @@ def test_settings_only_exposes_validated_server_side_routes() -> None:
             '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,'
             '"route_config_version":"v1","pricing_config_version":"v1",'
             '"capabilities":["structured_output"],"data_residency":"public",'
-            '"max_context_tokens":2048,"max_output_tokens":512}]'
+            '"max_context_tokens":2048,"max_output_tokens":512,"enabled":true,'
+            '"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced"]}]'
     )
 
     assert settings.model_routes[0].route_id == "summary"
@@ -416,7 +418,8 @@ def test_settings_rejects_duplicate_route_id_at_startup() -> None:
         '"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,'
         '"route_config_version":"v1","pricing_config_version":"v1",'
         '"capabilities":["structured_output"],"data_residency":"public",'
-        '"max_context_tokens":2048,"max_output_tokens":512}'
+        '"max_context_tokens":2048,"max_output_tokens":512,"enabled":true,'
+        '"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced"]}'
     )
     with pytest.raises(ValueError, match="重复 route_id"):
         Settings(MODEL_ROUTES_JSON=f"[{route},{route}]")

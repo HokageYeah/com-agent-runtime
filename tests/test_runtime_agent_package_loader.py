@@ -22,6 +22,12 @@ def test_loads_frozen_memoir_agent_package() -> None:
     assert package.package_digest.startswith("sha256:")
     assert len(package.evals) >= 5
     assert package.tools[0].relative_path.startswith("/")
+    enqueue_tts = next(
+        tool for tool in package.tools if tool.name == "memory.enqueue_tts"
+    )
+    assert enqueue_tts.enabled is False
+    assert enqueue_tts.side_effect is True
+    assert enqueue_tts.cancellation_behavior == "query_after_commit"
 
 
 def test_rejects_implicit_latest_version() -> None:

@@ -47,17 +47,12 @@ def test_model_capability_unavailable_uses_template_without_snapshot_body(caplog
 
 def test_invalid_model_structure_uses_safe_scene_template() -> None:
     class ModelGateway:
+        def __init__(self) -> None:
+            self.rejections: list[tuple[str, tuple[str, ...]]] = []
+
         def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
             assert node_id == "generate_scenes"
-            assert request == {
-                "chapters": [
-                    {
-                        "chapter_id": "chapter-1",
-                        "source_refs": ["diary:diary-1"],
-                        "kind": "memory_overview",
-                    }
-                ]
-            }
+            assert request["input"] == {"chapters": [{"chapter_id": "chapter-1", "source_refs": ["diary:diary-1"], "kind": "memory_overview"}]}
             return type(
                 "Result",
                 (),
@@ -75,6 +70,9 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
                 },
             )()
 
+        def record_validation_rejection(self, node_id: str, error_codes: tuple[str, ...]) -> None:
+            self.rejections.append((node_id, error_codes))
+
     state = AgentState(
         chapter_plan={
             "chapters": [
@@ -87,7 +85,8 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
         }
     )
 
-    result = MemoirNodeRunner(object(), model_gateway=ModelGateway()).run_node(
+    gateway = ModelGateway()
+    result = MemoirNodeRunner(object(), model_gateway=gateway).run_node(
         {"node_id": "generate_scenes"}, _run(), state
     )
 
@@ -98,6 +97,7 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
         {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
     ]
     assert state.fallback_flags == ["model_invalid_scenes", "template_scenes"]
+    assert gateway.rejections == [("generate_scenes", ("UNKNOWN_SOURCE_REF", "SCENE_COUNT_INVALID"))]
 
 
 def test_duplicate_model_scene_ids_use_safe_scene_template() -> None:
@@ -193,6 +193,105 @@ def test_repaired_json_model_highlights_are_accepted_without_exposing_raw_text(c
     assert state.highlights == {"source_refs": ["diary:diary-1"], "mode": "model"}
     assert "私密正文" not in str(result)
     assert "私密正文" not in caplog.text  # type: ignore[attr-defined]
+
+
+def test_invalid_model_output_uses_one_versioned_repair_before_template_fallback() -> None:
+    class ModelGateway:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.repairs = 0
+
+        def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+            self.calls += 1
+            return type("Result", (), {"status": "succeeded", "data": "not-json"})()
+
+        def repair(
+            self,
+            run_id: str,
+            node_id: str,
+            request: dict[str, object],
+            invalid_output: object,
+        ) -> object:
+            self.repairs += 1
+            assert request["prompt_id"] == "highlight-extract"
+            return type(
+                "Result",
+                (),
+                {
+                    "status": "succeeded",
+                    "data": {"source_refs": ["diary:diary-1"]},
+                },
+            )()
+
+    gateway = ModelGateway()
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=gateway).run_node(
+        {"node_id": "extract_highlights"}, _run(), state
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": False}
+    assert state.highlights == {
+        "source_refs": ["diary:diary-1"],
+        "mode": "model",
+    }
+    assert gateway.calls == 1
+    assert gateway.repairs == 1
+
+
+def test_invalid_repair_output_is_not_repaired_recursively() -> None:
+    class ModelGateway:
+        def __init__(self) -> None:
+            self.repairs = 0
+
+        def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+            return type("Result", (), {"status": "succeeded", "data": "not-json"})()
+
+        def repair(
+            self,
+            run_id: str,
+            node_id: str,
+            request: dict[str, object],
+            invalid_output: object,
+        ) -> object:
+            self.repairs += 1
+            return type("Result", (), {"status": "succeeded", "data": "still-not-json"})()
+
+    gateway = ModelGateway()
+    state = AgentState(
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": "diary:diary-1",
+                    "type": "diary",
+                    "sensitive": False,
+                    "summary": "摘要",
+                },
+            ],
+        },
+    )
+
+    result = MemoirNodeRunner(object(), model_gateway=gateway).run_node(
+        {"node_id": "extract_highlights"}, _run(), state
+    )
+
+    assert result == {"node_id": "extract_highlights", "fallback": True}
+    assert state.highlights == {
+        "source_refs": ["diary:diary-1"],
+        "mode": "template",
+    }
+    assert gateway.repairs == 1
 
 
 def test_model_chapters_with_control_field_fall_back_without_writing_model_data() -> None:

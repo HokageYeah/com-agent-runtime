@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import signal
 import socket
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -13,21 +15,24 @@ import app.models  # noqa: F401
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
 from app.models import (
+    AgentDefinition,
     AgentPlan,
     AgentRun,
     AgentStep,
     AgentToolCall,
     CallbackEvent,
+    RuntimeAuditRecord,
     RuntimeOutboxEvent,
 )
 from app.runtime.artifact import ArtifactStore
+from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.services.agent_run_service import AgentRunService
 from app.services.reconciliation_service import ReconciliationService
 from app.services.tool_call_audit_service import ToolCallAuditService
-from app.worker import WorkerLoop, configured_model_gateway
+from app.worker import WorkerLoop, configured_executor, configured_model_gateway
 
 
 class FakeExecutor:
@@ -52,6 +57,105 @@ class FakeExecutor:
         )
 
 
+def test_worker_classifies_callback_target_rejections_with_fixed_safe_codes() -> None:
+    run = AgentRun(
+        run_id="callback-auth-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="digest", contract_version="1", business_type="memoir",
+        business_id="archive", status="running", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace",
+        run_deadline_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    target = CallbackTarget("https://business.example/callback", "runtime", "key", "secret")
+
+    missing = WorkerLoop(
+        lambda: object(), FakeExecutor(), worker_id="worker",
+        callback_gateway=CallbackGateway({}, httpx.Client()),
+        trusted_clients={"caller": {"callback_target_ids": ["callback"], "authorization_version": 1}},
+    )
+    revoked = WorkerLoop(
+        lambda: object(), FakeExecutor(), worker_id="worker",
+        callback_gateway=CallbackGateway({"callback": target}, httpx.Client()),
+        trusted_clients={"caller": {"callback_target_ids": [], "authorization_version": 1}},
+    )
+    changed = WorkerLoop(
+        lambda: object(), FakeExecutor(), worker_id="worker",
+        callback_gateway=CallbackGateway({"callback": target}, httpx.Client()),
+        trusted_clients={"caller": {"callback_target_ids": ["callback"], "authorization_version": 2}},
+    )
+
+    assert missing._callback_target_authorized(run) == "CALLBACK_TARGET_MISSING"
+    assert revoked._callback_target_authorized(run) == "AUTHORIZATION_REVOKED"
+    assert changed._callback_target_authorized(run) == "AUTHORIZATION_VERSION_CHANGED"
+
+
+def test_worker_persists_contentless_connector_disabled_audit(
+    monkeypatch,
+) -> None:
+    """部署 connector 禁用必须在真实 Worker 装配边界留下固定安全码。"""
+    import app.worker as worker
+
+    monkeypatch.setattr(
+        worker.settings,
+        "RUNTIME_BUSINESS_CONNECTORS_JSON",
+        '{"connector":{"enabled":false}}',
+        raising=False,
+    )
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="connector-disabled-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="digest", contract_version="1", business_type="memoir",
+        business_id="archive", status="running", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace", execution_attempt=1,
+        lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(minutes=1),
+        run_deadline_at=now + timedelta(days=1),
+    )
+    session.add(run)
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker", fencing_token=1,
+        lease_expires_at=run.lease_expires_at, privacy_version=1, authorization_version=1,
+    )
+
+    configured_executor(session).run(run.run_id, context)
+    session.commit()
+
+    audit = session.scalar(select(RuntimeAuditRecord))
+    assert audit is not None
+    assert audit.reason_code == "CONNECTOR_DISABLED"
+    assert audit.metadata_summary == {"run_id": run.run_id}
+    assert all(
+        value not in str(audit.metadata_summary)
+        for value in ("base_url", "secret", "payload")
+    )
+
+def test_worker_signal_requests_drain_without_raising_or_terminating_inflight_work(
+    monkeypatch,
+) -> None:
+    """SIGTERM 只切换共享 draining 状态，当前节点可自行完成安全边界。"""
+    import app.worker as worker
+
+    registered: dict[int, object] = {}
+    monkeypatch.setattr(
+        worker.signal, "signal", lambda number, handler: registered.__setitem__(number, handler),
+    )
+    controller = worker.WorkerDrainController()
+
+    worker.install_drain_signal_handlers(controller)
+
+    assert controller.is_draining() is False
+    handler = registered[signal.SIGTERM]
+    assert callable(handler)
+    handler(signal.SIGTERM, None)
+    assert controller.is_draining() is True
+
+
 def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> None:
     class FakeRedis:
         @classmethod
@@ -74,7 +178,9 @@ def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> Non
             '"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens",'
             '"input_price":0,"output_price":0,"route_config_version":"v1",'
             '"pricing_config_version":"v1","capabilities":["structured_output","private_residency"],'
-            '"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512}]',
+            '"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,'
+            '"enabled":true,"allowed_tenant_ids":["*"],'
+            '"allowed_model_policies":["balanced","emotional_writing","strict"]}]',
     )
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(
@@ -130,7 +236,7 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
     monkeypatch.setattr(worker, "Redis", FakeRedis)
     monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
-    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512}]')
+    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
     monkeypatch.setattr(
@@ -159,6 +265,15 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     assert active is not None
     active.bind_lease(lease)
     assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "succeeded"
+    assert RecordingProvider.calls == 1
+
+    session.add(AgentDefinition(
+        agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+        definition_json={}, package_digest="digest", contract_version="1", status="revoked",
+        status_changed_at=now, status_changed_by="test", status_change_reason="fixture",
+    ))
+    session.commit()
+    assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
     assert RecordingProvider.calls == 1
 
     # 同一 Run 冻结的版本与当前权威授权不一致时，模型边界必须在触网前拒绝。

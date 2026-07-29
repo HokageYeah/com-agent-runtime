@@ -28,6 +28,8 @@ dependencies = [
     # AgentPackage 使用 YAML 描述可信工作流、工具与策略清单。
     "PyYAML>=6.0.0",
     "langchain-core (>=1.5.1,<2.0.0)",
+    "psycopg[binary] (>=3.2,<4.0)",
+    "langgraph (>=1.0,<2.0)",
 ]
 
 [tool.poetry]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Integer,
@@ -25,6 +26,17 @@ class MemoryArchive(Base):
             "space_id", "relationship_segment_no", "owner_user_id",
             name="uq_memory_archive_owner_segment",
         ),
+        CheckConstraint(
+            "content_status IN "
+            "('baseline','pending','running','waiting_human','succeeded',"
+            "'failed','cancelled')",
+            name="ck_memory_archive_content_status",
+        ),
+        CheckConstraint(
+            "enhancement_status IN "
+            "('disabled','pending','running','succeeded','partial','failed')",
+            name="ck_memory_archive_enhancement_status",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
@@ -36,7 +48,13 @@ class MemoryArchive(Base):
     partner_user_id = Column(Integer, nullable=False)
     # 内容状态由原子发布工具与 callback adapter 分工写入，播放器只认 published_revision。
     content_status = Column(String(32), nullable=False, default="baseline")
-    enhancement_status = Column(String(32), nullable=False, default="not_started")
+    # 媒体增强由独立媒体 worker 独占写入；能力关闭时始终保持 disabled。
+    enhancement_status = Column(String(32), nullable=False, default="disabled")
+    partner_nickname_snapshot = Column(String(100), nullable=True)
+    # 只保存受信任对象键/资产引用，禁止持久化 URL。
+    partner_avatar_snapshot = Column(String(255), nullable=True)
+    bound_at = Column(DateTime(timezone=True), nullable=True)
+    unbound_at = Column(DateTime(timezone=True), nullable=True)
     generation_epoch = Column(Integer, nullable=False, default=0)
     active_run_id = Column(String(80), nullable=True, unique=True)
     published_revision = Column(Integer, nullable=False, default=0)

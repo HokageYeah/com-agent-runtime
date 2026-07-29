@@ -4,6 +4,19 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+CALLBACK_TARGET_MISSING = "CALLBACK_TARGET_MISSING"
+AUTHORIZATION_REVOKED = "AUTHORIZATION_REVOKED"
+AUTHORIZATION_VERSION_CHANGED = "AUTHORIZATION_VERSION_CHANGED"
+CONNECTOR_DISABLED = "CONNECTOR_DISABLED"
+RUNTIME_REJECTION_REASON_CODES = frozenset(
+    {
+        CALLBACK_TARGET_MISSING,
+        AUTHORIZATION_REVOKED,
+        AUTHORIZATION_VERSION_CHANGED,
+        CONNECTOR_DISABLED,
+    }
+)
+
 
 class RuntimeAuditEvent(BaseModel):
     """追加写审计事件；metadata_summary 禁止存 prompt、正文、密钥或原始工具 payload。"""

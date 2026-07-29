@@ -39,6 +39,7 @@ def test_generation_status_returns_safe_active_run_summary(client) -> None:
     )[0]
     ref = MemoryAgentBindingService(session).bind(archive.archive_id, "run-status", 0)
     ref.status, ref.event_seq, ref.status_version = "running", 2, 3
+    ref.updated_at = datetime(2026, 7, 17, 8, 30, tzinfo=UTC)
     ref.public_trace_json = [{"step": "generate_scenes", "status": "succeeded"}]
     archive.content_status = "running"
     session.commit()
@@ -50,8 +51,10 @@ def test_generation_status_returns_safe_active_run_summary(client) -> None:
     assert response.json() == {
         "output": {
             "archive_id": archive.archive_id, "content_status": "running",
-            "enhancement_status": "not_started", "generation_epoch": 0,
-            "published_revision": 0, "active_run": {
+            "enhancement_status": "disabled", "generation_epoch": 0,
+            "published_revision": 0, "status_version": 3,
+            "updated_at": "2026-07-17T08:30:00", "retry_after_ms": 2000,
+            "active_run": {
                 "run_id": "run-status", "status": "running", "event_seq": 2,
                 "status_version": 3, "reconciliation_status": "not_needed",
                 "public_trace": [{"step": "generate_scenes", "status": "succeeded"}],

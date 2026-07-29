@@ -65,6 +65,15 @@ class AuthorizationService:
             raise AuthorizationError("authorization_version 配置非法")
         return value
 
+    def model_data_residency(self, client_id: str) -> str | None:
+        """读取租户部署侧驻留要求；业务请求和 Package 不能声明或覆盖。"""
+        value = self._require_client(client_id).get("model_data_residency")
+        if value is None:
+            return None
+        if value not in {"public", "private"}:
+            raise AuthorizationError("model_data_residency 配置非法")
+        return value
+
     def _require_client(self, client_id: str) -> dict[str, Any]:
         client = self._clients.get(client_id)
         if client is None:

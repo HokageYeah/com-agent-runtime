@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AgentEvaluation, AgentModelUsage, AgentRun, AgentToolCall
-from app.runtime.observability import RuntimeObservabilityReport
+from app.models import (
+    AdmissionBucket,
+    AgentEvaluation,
+    AgentModelUsage,
+    AgentRun,
+    AgentToolCall,
+    RuntimeOutboxEvent,
+)
+from app.runtime.observability import (
+    GlobalRuntimeObservabilityReport,
+    RuntimeObservabilityReport,
+)
 
 type FailureReview = dict[str, object]
 
@@ -83,3 +95,73 @@ class ObservabilityService:
             "privacy_version": run.privacy_version,
             "metrics": self.report_for_run(run_id).as_dict(),
         }
+
+    def global_report(self) -> GlobalRuntimeObservabilityReport:
+        """汇总全局安全运营指标，不读取任何内容承载列或身份定位字段。"""
+        runs = list(self._session.scalars(select(AgentRun)))
+        reports = [self.report_for_run(run.run_id) for run in runs]
+        evaluations = sum(report.evaluation_count for report in reports)
+        # rate 仅来自已计算的安全数值，恢复为计数后重新加权，避免简单平均失真。
+        def weighted(attribute: str) -> int:
+            return sum(
+                round(getattr(report, attribute) * report.evaluation_count)
+                for report in reports
+            )
+
+        return GlobalRuntimeObservabilityReport(
+            run_count=len(runs),
+            status_counts=_count_strings(run.status for run in runs),
+            error_code_counts=_count_strings(
+                run.error_code for run in runs if isinstance(run.error_code, str)
+            ),
+            operational_counts=self._operational_counts(runs),
+            metrics=RuntimeObservabilityReport.from_counts(
+                evaluations=evaluations,
+                evaluation_passed=weighted("evaluation_pass_rate"),
+                fallbacks=sum(report.fallback_count for report in reports),
+                model_cost=sum(report.actual_model_cost for report in reports),
+                reserved_cost=sum(report.reserved_cost for report in reports),
+                unknown_outcomes=sum(report.unknown_outcome_count for report in reports),
+                tool_calls=sum(report.tool_call_count for report in reports),
+                model_attempts=sum(report.model_attempt_count for report in reports),
+                execution_attempts=sum(report.execution_attempt_count for report in reports),
+                aborted_before_send=sum(report.aborted_before_send_count for report in reports),
+                model_elapsed_ms=sum(report.model_elapsed_ms for report in reports),
+                tool_elapsed_ms=sum(report.tool_elapsed_ms for report in reports),
+                active_elapsed_ms=sum(report.active_elapsed_ms for report in reports),
+                schema_passed=weighted("schema_pass_rate"),
+                grounding_passed=weighted("grounding_pass_rate"),
+                material_reference_passed=weighted("material_reference_pass_rate"),
+                hallucinations=weighted("hallucination_rate"),
+                emotional_safety_passed=weighted("emotional_safety_pass_rate"),
+            ),
+        )
+
+    def _operational_counts(self, runs: list[AgentRun]) -> dict[str, int]:
+        """仅按权威状态列聚合运行信号，严禁读取 outbox payload 或 Run 内容。"""
+        dead_letters = list(
+            self._session.scalars(
+                select(RuntimeOutboxEvent.event_type).where(
+                    RuntimeOutboxEvent.status == "dead_letter"
+                )
+            )
+        )
+        semantic_codes = {"WORKFLOW_NODE_INVALID", "WORKFLOW_NODE_FAILED", "INVALID_PLAYBACK_STRUCTURE"}
+        return {
+            "admission_bucket_count": len(list(self._session.scalars(select(AdmissionBucket.id)))),
+            "queued_run_count": sum(run.dispatch_state == "queued" for run in runs),
+            "dead_letter_callback_count": sum(event == "callback" for event in dead_letters),
+            "dead_letter_dispatch_count": sum(event == "run_dispatch" for event in dead_letters),
+            "purge_requested_run_count": sum(run.privacy_state == "purge_requested" for run in runs),
+            "authorization_changed_run_count": sum(run.error_code == "AUTHORIZATION_CHANGED" for run in runs),
+            "semantic_failure_count": sum(run.error_code in semantic_codes for run in runs),
+        }
+
+
+def _count_strings(values: Iterable[object]) -> dict[str, int]:
+    """以固定状态/错误码键聚合，不接收正文或任意对象。"""
+    counts: dict[str, int] = {}
+    for value in values:
+        if isinstance(value, str) and value:
+            counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))

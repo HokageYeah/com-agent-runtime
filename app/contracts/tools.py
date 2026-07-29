@@ -14,6 +14,7 @@ class ToolManifest(ToolContractModel):
 
     name: str
     version: str
+    enabled: bool = True
     connector_id: str | None = None
     method: str | None = None
     relative_path: str | None = None
@@ -50,3 +51,6 @@ class ToolError(ToolContractModel):
     error_type: str
     retryable: bool
     safe_message: str
+    # 默认绝不让业务错误详情进入模型上下文；只有未来冻结 policy 明确允许的
+    # 受控枚举才能改变此结论，不能由 Provider/Tool 响应自行声明。
+    details_visible_to_model: bool = False

@@ -42,6 +42,7 @@ class AgentRunService:
         admission_limits: AdmissionLimits | None = None,
         *,
         trusted_model_route_ids: Iterable[str] = (),
+        required_model_data_residency: str | None = None,
         authorization_version_resolver: Callable[[AgentRun], int | None] | None = None,
     ) -> None:
         self._session = session
@@ -53,6 +54,9 @@ class AgentRunService:
         self._trusted_model_route_ids = tuple(
             sorted({route_id for route_id in trusted_model_route_ids if isinstance(route_id, str) and route_id})
         )
+        if required_model_data_residency not in {None, "public", "private"}:
+            raise ValueError("required_model_data_residency 非法")
+        self._required_model_data_residency = required_model_data_residency
         self._authorization_version_resolver = authorization_version_resolver
 
     def create(
@@ -126,6 +130,13 @@ class AgentRunService:
                 "package_digest": definition.package_digest,
                 "business_connector_id": command.business_connector_id,
                 "allowed_model_route_ids": list(self._trusted_model_route_ids),
+                **(
+                    {
+                        "required_model_data_residency": self._required_model_data_residency
+                    }
+                    if self._required_model_data_residency is not None
+                    else {}
+                ),
                 "model_policy": model_policy,
                 "execution_policy": execution_policy,
                 # 注册 Package 时持久化的 ui-trace 是唯一可信公开投影策略，Run 创建后冻结。
@@ -350,6 +361,8 @@ class AgentRunService:
             select(AgentCheckpoint).where(AgentCheckpoint.run_id == run_id)
         ) is None:
             raise AgentRunServiceError("Run 缺少 checkpoint，禁止 retry")
+        if run.status == "partial":
+            self._assert_partial_retryable(run)
         definition = self._session.scalar(
             select(AgentDefinition).where(
                 AgentDefinition.agent_id == run.agent_id,
@@ -371,6 +384,31 @@ class AgentRunService:
             {"manual_retry_count": str(run.manual_retry_count)},
         )
         return self._summary(run)
+
+    def _assert_partial_retryable(self, run: AgentRun) -> None:
+        """partial 只能补做发布后的失败可选步骤，禁止重放主作品副作用。"""
+        plan = self._session.scalar(select(AgentPlan).where(AgentPlan.run_id == run.run_id))
+        if plan is None:
+            raise AgentRunServiceError("partial Run 缺少计划，禁止 retry")
+        optional_node_ids = {
+            node.get("node_id")
+            for node in plan.steps_json
+            if isinstance(node, dict)
+            and node.get("optional") is True
+            and isinstance(node.get("node_id"), str)
+        }
+        steps = list(
+            self._session.scalars(
+                select(AgentStep).where(AgentStep.run_id == run.run_id)
+            )
+        )
+        failed_names = {step.step_name for step in steps if step.status == "failed"}
+        published = any(
+            step.step_name == "publish_document" and step.status == "succeeded"
+            for step in steps
+        )
+        if not published or not failed_names or not failed_names <= optional_node_ids:
+            raise AgentRunServiceError("partial Run 不满足可选步骤 retry 条件")
 
     def record_auto_retry(self, run_id: str, step_id: str | None = None) -> None:
         """记录节点级自动重试；传入 step 时按该物理节点单独限额。"""

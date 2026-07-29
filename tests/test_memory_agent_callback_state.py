@@ -7,10 +7,12 @@ from datetime import UTC, datetime
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
+from app.models.memory_agent_run_ref import MemoryAgentRunRef
 from app.models.memory_archive import MemoryArchive
 from app.services.memory_agent_binding_service import MemoryAgentBindingService
 from app.services.memory_agent_callback_service import MemoryAgentCallbackService
@@ -149,3 +151,27 @@ def test_run_ref_records_distinct_create_start_and_contract_metadata() -> None:
     assert (ref.create_idempotency_key, ref.start_idempotency_key) == ("create:key", "start:key")
     assert (ref.contract_version, ref.package_digest, ref.authorization_version) == ("1.0.0", "sha256:package", 7)
     assert ref.row_version == 2
+
+
+def test_run_ref_rejects_second_run_for_same_archive_generation() -> None:
+    """同一 archive 代际只能绑定一个 Runtime Run，数据库必须兜底并发写。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    session.add_all(
+        [
+            MemoryAgentRunRef(
+                run_id="run-a",
+                archive_id="archive-a",
+                generation_epoch=3,
+            ),
+            MemoryAgentRunRef(
+                run_id="run-b",
+                archive_id="archive-a",
+                generation_epoch=3,
+            ),
+        ]
+    )
+
+    with pytest.raises(IntegrityError):
+        session.commit()

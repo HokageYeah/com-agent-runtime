@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Column, DateTime, Integer, String
+from sqlalchemy import JSON, Column, DateTime, Integer, String, UniqueConstraint
 from sqlalchemy.sql import func
 
 from app.db.sqlalchemy_db import Base
@@ -10,6 +10,13 @@ from app.db.sqlalchemy_db import Base
 
 class MemoryAgentRunRef(Base):
     __tablename__ = "memory_agent_run_refs"
+    __table_args__ = (
+        UniqueConstraint(
+            "archive_id",
+            "generation_epoch",
+            name="uq_memory_run_ref_archive_generation",
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
     run_id = Column(String(80), unique=True, nullable=False, index=True)

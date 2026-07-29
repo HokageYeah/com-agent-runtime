@@ -5,7 +5,14 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentEvaluation, AgentModelUsage, AgentRun, AgentToolCall
+from app.models import (
+    AdmissionBucket,
+    AgentEvaluation,
+    AgentModelUsage,
+    AgentRun,
+    AgentToolCall,
+    RuntimeOutboxEvent,
+)
 from app.services.observability_service import ObservabilityService
 
 
@@ -100,3 +107,52 @@ def test_failure_review_template_exports_only_controlled_run_facts() -> None:
         },
     }
     assert "private-marker" not in str(review)
+
+
+def test_global_report_aggregates_only_status_codes_and_safe_metrics() -> None:
+    """跨 Run 看板不得读取输入、输出、错误原文或任何模型/工具载荷。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add_all([
+        AgentRun(
+            run_id="global-ok", agent_id="agent", agent_version="1", package_digest="digest",
+            contract_version="1", business_type="memoir", business_id="business", status="succeeded",
+            dispatch_state="finished", input_json={"prompt": "private-marker"},
+            output_summary_json={"tool_payload": "private-marker"}, authorization_version=1,
+            caller_id="caller", tenant_id="tenant", create_idempotency_key="key-1",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace-1",
+            active_elapsed_ms=10, run_deadline_at=now + timedelta(minutes=1),
+        ),
+        AdmissionBucket(scope_type="global", scope_key="all", held_count=0, queued_count=1, running_count=0),
+        RuntimeOutboxEvent(
+            outbox_id="dead-callback", event_type="callback", aggregate_type="agent_run",
+            aggregate_id="global-failed", payload_json={}, status="dead_letter",
+            retention_until=now + timedelta(days=1),
+        ),
+        AgentRun(
+            run_id="global-failed", agent_id="agent", agent_version="1", package_digest="digest",
+            contract_version="1", business_type="memoir", business_id="business", status="failed",
+            dispatch_state="finished", input_json={"content": "private-marker"},
+            error_code="PROVIDER_TIMEOUT", error_message="private-marker", authorization_version=1,
+            caller_id="caller", tenant_id="tenant", create_idempotency_key="key-2",
+            callback_target_id="callback", business_connector_id="connector", trace_id="trace-2",
+            active_elapsed_ms=20, run_deadline_at=now + timedelta(minutes=1),
+        ),
+    ])
+    session.commit()
+
+    report = ObservabilityService(session).global_report().as_dict()
+
+    assert report["run_count"] == 2
+    assert report["status_counts"] == {"failed": 1, "succeeded": 1}
+    assert report["error_code_counts"] == {"PROVIDER_TIMEOUT": 1}
+    assert report["metrics"]["active_elapsed_ms"] == 30
+    assert report["operational_counts"] == {
+        "admission_bucket_count": 1, "queued_run_count": 0,
+        "dead_letter_callback_count": 1, "dead_letter_dispatch_count": 0,
+        "purge_requested_run_count": 0, "authorization_changed_run_count": 0,
+        "semantic_failure_count": 0,
+    }
+    assert "private-marker" not in str(report)
