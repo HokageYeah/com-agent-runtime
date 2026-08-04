@@ -6,6 +6,202 @@
 - 使用独立数据库、独立 Redis namespace、随机测试 HMAC key 和回环 mock 服务。
 - 禁止在命令行、日志、截图或工单中放入 prompt、业务正文、模型原文、工具 payload、签名 URL、checkpoint 正文或密钥。
 
+`SERVICE_BASE_URL`、外部 exporter、HMAC、Fernet、JWT 和私有媒体桶的生成与填写规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。本文只保留启动顺序和可观察的验收结果。
+
+## 一键配置、启动与验收
+
+项目根目录的 `agent-runtime.sh` 提供五个对外命令：
+
+| 命令 | 用途 | 是否修改数据 |
+|---|---|---|
+| `configure development|test` | 交互生成 `.env.<env>.local` 和随机本机密钥 | 只写本机忽略文件 |
+| `doctor development|test|production` | 检查必填字段、占位值、JSON 与文件权限 | 否 |
+| `prepare development|test|production` | 先 doctor，再执行 `alembic upgrade head` 和单 head 检查 | 是，仅数据库迁移 |
+| `start development|test|production` | 先 prepare，再前台托管 API、launcher、Worker、Reconciler | 是，运行正常业务流程 |
+| `verify` | 运行隔离 PostgreSQL/Redis/真实 Worker harness | 只写临时容器，结束后 `down -v` |
+
+### 1. 准备运行依赖
+
+所有命令都在仓库根目录执行。
+
+```bash
+poetry install
+poetry run python --version
+poetry run alembic heads
+```
+
+预期：Python 和 Poetry 命令成功，Alembic 只输出 `20260729_1000 (head)`。本地启动还需要一个已建好的 MySQL 数据库和可连接的 Redis；脚本不会自动创建数据库账号或复用生产实例。
+
+首次本地测试可以在 MySQL 客户端内创建隔离库和最小权限账号：
+
+```sql
+CREATE DATABASE couple_diary_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'runtime_test'@'127.0.0.1' IDENTIFIED BY '<只在 MySQL 交互终端输入的随机密码>';
+GRANT ALL PRIVILEGES ON couple_diary_test.* TO 'runtime_test'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+不要把真实密码写入 SQL 文件、shell history 或本文档。生产环境由 DBA/部署平台预建数据库和账号，应用账号不需要建库权限。
+
+Redis 使用独立 DB 或 namespace。连接检查只应返回 `PONG`，不要打印带凭据的 Redis URL。
+
+### 2. 生成本地测试配置
+
+```bash
+./agent-runtime.sh configure test
+./agent-runtime.sh doctor test
+```
+
+`configure` 会询问 DB user/password/host/port/name、Redis URL 和服务 base URL。密码输入不回显；脚本会生成服务 HMAC secret、Snapshot Fernet key 和用户 JWT secret，并把 `.env.test.local` 设为 `0600`。
+
+生成文件中每个配置项都有中文注释，并标记 `[必填/手动输入]`、`[必填/自动生成]`、`[必填/自动填写]` 或 `[可选]`。手动输入项的填写规则如下：
+
+| 交互项 | 必填 | 如何配置 |
+|---|---|---|
+| `DB user` | 是 | 填 MySQL 应用账号；建议为当前环境创建独立账号，只授予对应库权限，生产不使用 `root`。 |
+| `DB password` | 是 | 在隐藏输入中填 MySQL 应用账号的密码；不要写入 shell history、文档或聊天。 |
+| `DB host` | 是 | 应用在宿主机运行时填 `127.0.0.1`；应用在 Docker 内运行时填 Compose 中 MySQL 的 service 名，例如 `mysql`。 |
+| `DB port` | 是 | 开发/测试宿主机填 `3306`；生产宿主机填 `3307`；应用在 Docker 内时一律填容器端口 `3306`。 |
+| `DB name` | 是 | 分别使用 `couple_diary_dev`、`couple_diary_test`、`couple_diary_prod`；数据库必须预先创建。 |
+| `Redis URL` | 是 | 开发/测试宿主机填 `redis://127.0.0.1:6379/15`；生产宿主机填 `redis://127.0.0.1:6380/15`；Docker 内填 `redis://redis:6379/15`。启用 Redis 认证时由 secret manager 注入带认证的 URL。 |
+| `Service base URL` | 是 | 开发/测试填 `http://127.0.0.1:8010`；生产填经 allowlist 的真实 HTTPS API 地址，禁止在 URL 中携带凭据。 |
+
+HMAC secret、Fernet key 和 JWT secret 由 `configure` 独立随机生成，无需人工编写。生产环境不使用 `configure`：必须由 secret manager 分别注入 client HMAC secret、tool/callback HMAC secret、Fernet key、JWT secret、数据库密码与 Redis 凭据，且 client/tool/JWT 不得共用密钥。
+
+上述密钥的手工生成命令、字段间一致性、生产注入和轮换顺序，以及 exporter/媒体的条件必填项，统一参考 [ENV_CONFIG.md](ENV_CONFIG.md)。
+
+应用端口和 Docker 端口的最终填法：
+
+| 环境/运行位置 | `HOST` | `PORT` | `DB_HOST:DB_PORT` | `RUNTIME_REDIS_URL` |
+|---|---:|---:|---|---|
+| 开发/测试，应用在宿主机 | `127.0.0.1` | `8010` | `127.0.0.1:3306` | `redis://127.0.0.1:6379/15` |
+| 生产，应用在宿主机 | `127.0.0.1` | `8011` | `127.0.0.1:3307` | `redis://127.0.0.1:6380/15` |
+| 测试，应用也在 Docker | `0.0.0.0` | `8010` | `mysql:3306` | `redis://redis:6379/15` |
+| 生产，应用也在 Docker | `0.0.0.0` | `8011` | `mysql:3306` | `redis://redis:6379/15` |
+
+`mysql`/`redis` 是示例 service 名，必须换成实际 Compose service 名。生产宿主机发布 `3307:3306` 和 `127.0.0.1:6380:6379`，不会改变 Docker 网络内仍使用 `3306/6379` 的规则。
+
+如果文件已存在，命令返回 `CONFIG_FILE_EXISTS`，防止覆盖现有密钥。只有确认旧配置不再需要时才能使用：
+
+```bash
+./agent-runtime.sh configure test --force
+```
+
+预期：`doctor` 只输出 `[OK] configuration environment=test`。失败时只输出字段名和 `MISSING_VALUE/PLACEHOLDER_VALUE/INVALID_JSON/INSECURE_FILE_MODE` 等固定错误码，不回显值。文件权限错误可以用以下命令修复：
+
+```bash
+chmod 600 .env.test.local
+```
+
+脚本生成的本地配置默认使用 `MODEL_ROUTES_JSON=[]`，因此模型增强关闭，MemoirAgent 使用确定性模板降级。这条默认路径不会请求外部 Provider。
+
+### 3. 一键启动完整进程
+
+```bash
+./agent-runtime.sh start test
+```
+
+`start` 的顺序为：
+
+1. 执行无内容配置检查。
+2. 迁移当前数据库到 Alembic head。
+3. 启动 FastAPI，等待 `/healthz` 和 Runtime readiness 返回 200。
+4. 每 5 秒消费一次回忆录 Runtime 启动 outbox。
+5. 启动 Worker 和每 300 秒执行的 Reconciler。
+
+脚本保持在前台。任一子进程退出时脚本返回失败，并回收其余子进程。按 `Ctrl-C` 时应观察到 API 关闭、Worker 进入 draining，且没有遗留 `run_app.py/app.worker/app.reconciler/launcher-loop` 进程。
+
+另开一个终端执行：
+
+```bash
+curl -fsS http://127.0.0.1:8010/healthz
+curl -fsS http://127.0.0.1:8010/readyz
+curl -fsS http://127.0.0.1:8010/api/v1/runtime/health/live
+curl -fsS http://127.0.0.1:8010/api/v1/runtime/health/ready
+```
+
+预期：四条命令都以退出码 0 结束。`/readyz` 的 database 为 `ready`；Runtime readiness 中 `database/trusted_clients/audit_sink/callback_dispatcher` 可用、`draining=false`。响应不含 DSN、connector/callback URL、凭据或业务内容。
+
+本地 `service_base_url=http://127.0.0.1:8010` 只用于 API 和进程启动冒烟。生产 ToolGateway 会拒绝 localhost、私网 IP、DNS 重绑定和重定向；需要验证完整工具/callback 闭环时，使用下一节的隔离 harness，或在 staging 配置经过 allowlist 的 HTTPS 业务地址。
+
+### 4. 一键真实 PostgreSQL/Redis/Worker 验收
+
+```bash
+docker compose version
+./agent-runtime.sh verify
+```
+
+脚本会：
+
+- 生成只存在子进程环境中的随机 PostgreSQL 密码。
+- 启动绑定 `127.0.0.1:54329` 的 PostgreSQL 17 和 `127.0.0.1:56379` 的 Redis。
+- 执行 PostgreSQL 迁移、Redis permit、真实 API/Worker/Reconciler、迟到模型/工具/callback 隔离回归。
+- 无论 pytest 成功还是失败，都先对 PostgreSQL 和 Redis 执行 `down -v`。
+
+预期：当前完整 harness 为 `35 passed`，不出现 Docker 相关 skip。命令结束后，以下检查不应找到 harness 容器或 volume：
+
+```bash
+docker ps -a --filter name=agent-runtime-postgres-harness
+docker ps -a --filter name=agent-runtime-redis-harness
+docker volume ls --filter name=agent-runtime-postgres-harness
+docker volume ls --filter name=agent-runtime-redis-harness
+```
+
+### 5. staging/生产配置
+
+`configure` 不允许写入 `.env.production.local`。生产值从部署平台或 secret manager 注入，并由所有 Runtime 进程共享。
+
+生产 `SERVICE_BASE_URL`、受治理 exporter、HMAC/Fernet/JWT 以及 S3 兼容私有桶的完整配置规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
+
+| 分组 | 必填配置 | 要求 |
+|---|---|---|
+| 应用 | `ENVIRONMENT/HOST/PORT/BACKEND_CORS_ORIGINS` | production 不允许通配 CORS，`DEBUG/DB_ECHO` 关闭 |
+| 数据库 | `DB_DRIVER/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT/DB_NAME` | 使用独立账号，先备份再迁移，不使用生产库做验收 |
+| Runtime 入站 | `RUNTIME_ID/RUNTIME_TRUSTED_CLIENTS_JSON/RUNTIME_SIGNATURE_TOLERANCE_SECONDS` | 每个 client/key 独立，配置 agent/business/callback/connector/data-domain allowlist 和授权版本 |
+| 工具与 callback | `RUNTIME_BUSINESS_CONNECTORS_JSON/RUNTIME_CALLBACK_TARGETS_JSON/MEMORY_TOOL_TRUSTED_RUNTIMES_JSON` | 只允许预注册 HTTPS 目标，禁止凭据进入 URL，密钥不共用 |
+| 回忆录适配 | `MEMORY_RUNTIME_BASE_URL/CLIENT_ID/KEY_ID/SECRET` | 必须与 Runtime trusted client 中的 client/key 匹配 |
+| 加密与登录 | `MEMORY_SNAPSHOT_FERNET_KEY/USER_AUTH_JWT_SECRET/USER_AUTH_JWT_ISSUER` | 从 secret manager 注入；轮换前先制定旧数据解密和 token 过渡方案 |
+| 共享流控 | `RUNTIME_REDIS_URL` | 使用独立 namespace/DB，故障时模型调用 fail-closed |
+| 模型路由 | `MODEL_ROUTES_JSON/MEMOIR_MODEL_NODE_ROUTES_JSON` | 只从部署配置读取，业务请求、Package 和 prompt 不能覆盖 |
+| 审计与观测 | `RUNTIME_AUDIT_SINK_CONFIGURED=true` | 外部 exporter 默认关闭；启用时必须补齐分级、区域、保留、访问审计和 purge 能力 |
+
+生产模型路由示例只表示字段结构：
+
+```env
+MODEL_ROUTES_JSON=[{"route_id":"memoir-private-v1","provider":"trusted_gateway","model":"approved-structured-model","endpoint":"https://model-gateway.example.com/v1","rate_limit_key":"memoir-private","max_concurrency":4,"rpm_limit":60,"tpm_limit":120000,"timeout_seconds":30,"permit_ttl_seconds":35,"settle_margin_seconds":5,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":32768,"max_output_tokens":4096,"enabled":true,"allowed_tenant_ids":["couple-diary"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]
+MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_chapters":"memoir-private-v1","generate_scenes":"memoir-private-v1"}
+```
+
+替换示例 endpoint、model、限流和价格前，需要由部署管理员确认驻留、许可和成本单位。Provider 凭据不属于 route JSON，由受信模型网关或部署密钥边界注入；不得放入业务请求、Package、prompt 或 URL。
+
+注入配置后先执行：
+
+```bash
+./agent-runtime.sh doctor production
+./agent-runtime.sh prepare production
+```
+
+预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 和周期 launcher 分为独立 workload，并使用同一权威数据库与配置版本。
+
+### 6. 常见失败和观察结果
+
+| 现象 | 处理 | 修复后应观察到 |
+|---|---|---|
+| `PLACEHOLDER_VALUE` | 在 `.env.<env>.local` 或 secret manager 中替换该字段 | doctor 只输出 `[OK]` |
+| `INSECURE_FILE_MODE` | `chmod 600 .env.<env>.local` | doctor 通过，Git 仍不跟踪该文件 |
+| Alembic 连接失败 | 检查 DB host/port/账号/库是否存在 | `alembic upgrade head` 退出码 0 |
+| Runtime readiness 503 | 根据 checks 修复 database/trusted client/audit/callback 配置 | `/api/v1/runtime/health/ready` 返回 200 |
+| `model_enhancement_available=false` | 检查 Redis、route 治理字段和节点 route 映射 | 验签 capabilities 中出现允许的逻辑 model policy |
+| Worker 退出 | 先保留受控错误码，检查 DB/Redis/connector 与 package | supervisor 回收其他进程，无孤儿进程 |
+
+## 脚本行为定向回归
+
+```bash
+poetry run pytest -q tests/test_agent_runtime_cli.py
+```
+
+预期：配置文件权限、防覆盖、生产配置边界、无内容 doctor、进程命令、周期 launcher 和 harness 异常清理测试全部通过。
+
 ## 代码门禁
 
 在仓库根目录执行：
@@ -202,7 +398,6 @@ poetry run pytest -q \
   tests/test_runtime_postgres_harness.py \
   tests/test_runtime_process_harness.py \
   tests/test_runtime_redis_harness.py
-unset AGENT_RUNTIME_TEST_POSTGRES_DSN AGENT_RUNTIME_TEST_REDIS_URL PGPASSWORD POSTGRES_HARNESS_PASSWORD
 ```
 
 预期：PostgreSQL 与 Redis 用例不再 skip，当前完整 harness 为 `35 passed`。验证范围包括旧 Memory 表真实迁移、状态/Run 代际约束、Archive 时间/用户快照、加密 Snapshot envelope、旧 Snapshot 只读迁移、未来 major 拒绝写回、旧 revision 迟到媒体隔离、schema 创建/删除、真实 `ReconcilerRunner` lease 单轮、两个独立 Session 对同一 queued Run 的竞争（仅一个 Worker 获得 attempt/fencing），以及同一临时 schema 的 `held -> bind -> start -> publish -> skipped media -> callback -> purge -> reconcile`。真实 Worker 在 callback target 缺失或当前授权撤销时不触网，并持久化固定 reason code 的无内容审计；Redis primary 的 429 冷却不污染显式 fallback 的独立 permit 分区。Worker/Reconciler 终态仅输出 `{"event":"completed","role":"...","result_code":"completed|failed"}`，不得附带 stderr、DSN、prompt 或 payload；迟到测试应先等待该事件，不能依赖退出时序。迟到副作用回归会先让回环 mock 阻塞一次 publish，在请求已到达后并发 cancel 与 purge、再释放响应；最终 `published_revision` 仍为 `0`，且 Artifact/Checkpoint/Step/ToolCall 的私密摘要均未被旧 lease 恢复。迟到模型与迟到 one-shot repair 回归都会在 Provider 请求已发出后并发 cancel/purge、再释放响应；首次 attempt 与 repair attempt 使用不同 permit/usage，迟到 attempt 只允许无内容 `outcome_unknown/aborted_before_send` 结算，不能恢复任何 checkpoint、step、artifact、tool call 或业务 revision。测试进程只连接回环 mock；子进程配置文件只保存无凭据 loopback DSN，测试密码仅通过受限子进程环境传递；每次创建的 `agent_runtime_test_*` schema 在退出后不存在。
@@ -212,9 +407,10 @@ unset AGENT_RUNTIME_TEST_POSTGRES_DSN AGENT_RUNTIME_TEST_REDIS_URL PGPASSWORD PO
 ```bash
 docker compose -f docker-compose.postgres-harness.yml down -v
 docker compose -f docker-compose.redis-harness.yml down -v
+unset AGENT_RUNTIME_TEST_POSTGRES_DSN AGENT_RUNTIME_TEST_REDIS_URL PGPASSWORD POSTGRES_HARNESS_PASSWORD
 ```
 
-预期：容器和命名 volume 均被删除。
+预期：容器和命名 volume 均被删除。必须在 `down -v` 之后再 `unset POSTGRES_HARNESS_PASSWORD`，因为 Compose 解析清理命令时仍需要该必填变量。
 
 ## uni-app 回忆录手动验证
 

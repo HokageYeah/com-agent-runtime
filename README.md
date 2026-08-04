@@ -228,45 +228,53 @@ poetry run ruff check app tests
 
 ## 快速开始
 
-如果你是第一次把项目跑起来，推荐直接按下面顺序执行：
+项目根目录的 `agent-runtime.sh` 是 AgentRuntime 的统一入口。它负责生成本机私有配置、检查必填项、执行 Alembic 迁移、前台托管 API/Worker/Reconciler/launcher，以及运行隔离的 PostgreSQL/Redis 真实 harness。
+
+首次启动测试环境：
 
 ```bash
-# 1. 安装依赖
 poetry install
-
-# 2. 首次初始化开发环境数据库
-poetry run python -m app.scripts.set_env development bootstrap
-
-# 3. 启动开发环境服务
-./run.sh development
+./agent-runtime.sh configure test
+./agent-runtime.sh doctor test
+./agent-runtime.sh start test
 ```
 
-如果你要切到测试环境：
+`configure` 会交互读取 MySQL 连接信息，生成随机服务签名密钥、Snapshot Fernet key 和用户 JWT secret，然后写入已忽略的 `.env.test.local`。生成文件的每个字段都带有中文用途、必填类型和填写方法；脚本将文件权限设为 `0600`，不会在终端回显密码或密钥。手动必填项、宿主机/Docker 地址规则见 [AgentRuntime 验证流程](VERIFICATION.md#2-生成本地测试配置)。
+
+`SERVICE_BASE_URL`、外部 exporter 治理、client/tool HMAC、Snapshot Fernet key、JWT secret 以及 S3/MinIO/COS 私有媒体桶的生成、一致性、轮换和无凭据检查方法，详见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
+
+启动前需要先准备好 MySQL 数据库和 Redis。`start` 会执行 `alembic upgrade head`，但不会创建数据库账号、启动 MySQL/Redis 容器或覆盖现有配置。按 `Ctrl-C` 后，脚本会回收它启动的所有进程。
+
+如果你只想在隔离容器中验收真实 PostgreSQL、Redis、API、Worker 和 Reconciler，运行：
 
 ```bash
-poetry run python -m app.scripts.set_env test bootstrap
-./run.sh test
+./agent-runtime.sh verify
 ```
 
-如果你只想确认当前命令会使用哪套配置：
+该命令自动生成临时测试密码、启动 Docker PostgreSQL/Redis、运行进程级验收，然后在成功或失败后执行 `down -v`。密码只存在子进程环境中。
+
+生产环境不使用 `configure`。请在部署平台或 secret manager 中注入配置，然后执行：
 
 ```bash
-poetry run python -m app.scripts.set_env development
+./agent-runtime.sh doctor production
+./agent-runtime.sh prepare production
+./agent-runtime.sh start production
 ```
 
-如果启动时报错里出现 `your_mysql_user` 或 `your_mysql_password`，说明你还没有配置本地覆盖文件，请先补 `.env.development.local`、`.env.test.local` 或 `.env.local`。
+单机部署可以使用 `start production` 前台托管全部进程。容器/Kubernetes 环境应分别部署 API、Worker、Reconciler 和周期 launcher，并为每个进程注入同一套受控配置。
 
-如果你想快速确认服务进程是否启动成功，可以访问：
+启动后检查：
 
 ```bash
-curl http://127.0.0.1:8002/healthz
+curl http://127.0.0.1:8010/healthz
+curl http://127.0.0.1:8010/readyz
+curl http://127.0.0.1:8010/api/v1/runtime/health/live
+curl http://127.0.0.1:8010/api/v1/runtime/health/ready
 ```
 
-如果你想进一步确认“服务依赖是否已经就绪”，可以再访问：
+预期四个请求均返回 HTTP 200；Runtime readiness 中 `database/trusted_clients/audit_sink/callback_dispatcher` 应为可用状态，`draining=false`。响应不应包含数据库连接串、URL 配置或密钥。
 
-```bash
-curl http://127.0.0.1:8002/readyz
-```
+数据库建库、模型路由、真实 harness 和手工验收流程请阅读 [AgentRuntime 验证流程](VERIFICATION.md)；敏感与条件环境变量请阅读 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
 
 ## 开发与协作约定
 
@@ -566,7 +574,7 @@ poetry run pytest
 - `test` -> `.env.test`
 - `production` -> `.env.production`
 
-脚本只负责传递 `ENVIRONMENT`，不会再改写 `.env` 文件。
+`run.sh` 和 `set_env.py` 只传递 `ENVIRONMENT`。`agent-runtime.sh configure development|test` 会新建或在显式 `--force` 时替换对应的 `.env.<environment>.local`，不修改可跟踪的 `.env.development/.env.test/.env.production`。
 
 同时还支持两层本地覆盖文件，方便把真实密码留在本机，不提交到仓库：
 
@@ -576,8 +584,10 @@ poetry run pytest
 推荐做法：
 
 - 把仓库里的 `.env.development / .env.test / .env.production` 当作团队共享模板
-- 把你自己的真实账号密码写进本地 `.local` 文件
+- 开发/测试环境优先用 `./agent-runtime.sh configure <env>` 生成本机 `.local` 文件
+- 生产环境从 secret manager 或部署平台注入，不由脚本写入工作区
 - `.local` 文件已经加入忽略规则，不会进入 git
+- `.local` 文件权限应为 `0600`；`doctor` 检测到 group/other 可读时会拒绝启动
 - 跨域白名单通过 `BACKEND_CORS_ORIGINS` 配置，不再写死在代码里
 - 请求链路日志也支持基础配置，例如 `REQUEST_ID_HEADER` 和 `SLOW_REQUEST_THRESHOLD_MS`
 
@@ -641,10 +651,10 @@ print(database_config.database)
 
 不推荐在新增代码里继续到处散落读取一长串 `settings.DB_*`、`settings.PROJECT_*`、`settings.REQUEST_*`，这样后面很难快速看出某段逻辑到底依赖了哪类配置。
 
-如果你要在本机放真实开发库密码，推荐新建：
+如果你不使用一键脚本，也可以手工新建：
 
 ```bash
-backend/com-agent-runtime-b/.env.development.local
+.env.development.local
 ```
 
 示例：
@@ -780,9 +790,17 @@ poetry run python -m app.scripts.set_env development downgrade
 
 ## 运行应用
 
-有三种常用方式运行应用：
+需要运行完整 AgentRuntime 时，使用：
 
-### 方式一：使用 run.sh 脚本（推荐）
+```bash
+./agent-runtime.sh start development
+# 或
+./agent-runtime.sh start test
+```
+
+该入口会先执行配置检查和 Alembic 迁移，再启动 API、周期 launcher、Worker 和 Reconciler。下面三种方式只启动 FastAPI 进程，适合接口调试，不会消费 Runtime outbox。
+
+### 方式一：使用 run.sh 脚本
 
 ```bash
 ./run.sh development
@@ -823,7 +841,7 @@ poetry run python -m app.scripts.set_env development runserver
 
 `run_app.py` 会启动 Uvicorn 服务并加载 `app.main:app`。FastAPI 会在 `lifespan` 阶段初始化日志和数据库连接。
 
-应用将在 http://localhost:8002 运行，API 文档可在 http://localhost:8002/docs 访问。
+按当前 AgentRuntime 本地默认配置，应用将在 http://localhost:8010 运行，API 文档可在 http://localhost:8010/docs 访问。如果在 `.env.<environment>.local` 中修改了 `PORT`，以该配置为准。
 
 基础健康检查接口：
 
