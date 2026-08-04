@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260720_1200"
 down_revision = "20260720_1100"
@@ -18,6 +19,8 @@ depends_on = None
 
 def upgrade() -> None:
     """保存安全引用，不保存任何快照正文。"""
+    if memory_schema_created_at_head():
+        return
     op.add_column("memory_agent_run_refs", sa.Column("snapshot_id", sa.String(64)))
     op.create_index("ix_memory_agent_run_refs_snapshot_id", "memory_agent_run_refs", ["snapshot_id"])
 

@@ -1,9 +1,47 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from unittest.mock import patch
 
 import pytest
+
+# 测试进程必须与开发者的 .env.*.local 隔离。这些都是固定的假测试值，
+# 只在当前 pytest 进程生效，不会覆盖本地文件或被应用日志输出。
+os.environ.update(
+    {
+        "RUNTIME_ID": "agent-runtime",
+        "RUNTIME_TRUSTED_CLIENTS_JSON": (
+            '{"couple-diary":{"tenant_id":"couple-diary",'
+            '"keys":{"dev":"development-secret"}}}'
+        ),
+        "RUNTIME_BUSINESS_CONNECTORS_JSON": (
+            '{"couple_diary_backend":{"enabled":true,'
+            '"base_url":"http://127.0.0.1:8002","runtime_id":"agent-runtime",'
+            '"key_id":"dev","secret":"runtime-tool-development-secret"}}'
+        ),
+        "RUNTIME_CALLBACK_TARGETS_JSON": (
+            '{"memory_callback":{"enabled":true,'
+            '"url":"http://127.0.0.1:8002/api/v1/internal/agent-callbacks/memory",'
+            '"runtime_id":"agent-runtime","key_id":"dev",'
+            '"secret":"runtime-tool-development-secret"}}'
+        ),
+        "MEMORY_TOOL_TRUSTED_RUNTIMES_JSON": (
+            '{"agent-runtime":{"keys":{"dev":"runtime-tool-development-secret"}}}'
+        ),
+        "MEMORY_RUNTIME_BASE_URL": "http://127.0.0.1:8002",
+        "MEMORY_RUNTIME_CLIENT_ID": "couple-diary",
+        "MEMORY_RUNTIME_KEY_ID": "dev",
+        "MEMORY_RUNTIME_SECRET": "development-secret",
+        "MEMORY_SNAPSHOT_FERNET_KEY": (
+            "UIdCWOsJY0GWrMpXlM444_JDKJC-zFwylDAJCymPvPg="
+        ),
+        "USER_AUTH_JWT_SECRET": "unit-test-user-jwt-secret",
+        "MODEL_ROUTES_JSON": "[]",
+        "MEMOIR_MODEL_NODE_ROUTES_JSON": "{}",
+        "RUNTIME_REDIS_URL": "",
+    }
+)
 
 
 @pytest.fixture

@@ -6,7 +6,9 @@ import argparse
 import inspect
 import logging
 import os
+import signal
 import socket
+import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from time import sleep as default_sleep
@@ -16,7 +18,7 @@ import httpx
 
 from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
-from app.core.logging_uru import setup_logging
+from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.runtime.test_harness import RuntimeDependencies
 from app.services.memory_agent_adapter import (
@@ -218,6 +220,8 @@ def main() -> None:
     parser.add_argument("--interval-seconds", type=int, default=300, help="循环间隔")
     args = parser.parse_args()
     setup_logging()
+    # supervisor 使用 SIGTERM 回收子服务；转为受控退出以执行 finally。
+    signal.signal(signal.SIGTERM, lambda _number, _frame: sys.exit(0))
     database.connect()
     try:
         owner_id = f"{socket.gethostname()}:{os.getpid()}"
@@ -234,6 +238,7 @@ def main() -> None:
             runner.run_forever()
     finally:
         database.close()
+        shutdown_logging()
 
 
 if __name__ == "__main__":

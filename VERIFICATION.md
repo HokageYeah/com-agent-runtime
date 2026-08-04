@@ -30,14 +30,14 @@ poetry run python --version
 poetry run alembic heads
 ```
 
-预期：Python 和 Poetry 命令成功，Alembic 只输出 `20260729_1000 (head)`。本地启动还需要一个已建好的 MySQL 数据库和可连接的 Redis；脚本不会自动创建数据库账号或复用生产实例。
+预期：Python 和 Poetry 命令成功，Alembic 只输出 `20260729_1000 (head)`。本地启动需要可连接的 MySQL 服务和 Redis；脚本不会自动创建数据库账号或复用生产实例。development/test 的 Runtime 专库缺失时可由 `DB_AUTO_CREATE=true` 自动创建。
 
 首次本地测试可以在 MySQL 客户端内创建隔离库和最小权限账号：
 
 ```sql
-CREATE DATABASE couple_diary_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE couple_diary_agent_runtime_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER 'runtime_test'@'127.0.0.1' IDENTIFIED BY '<只在 MySQL 交互终端输入的随机密码>';
-GRANT ALL PRIVILEGES ON couple_diary_test.* TO 'runtime_test'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON couple_diary_agent_runtime_test.* TO 'runtime_test'@'127.0.0.1';
 FLUSH PRIVILEGES;
 ```
 
@@ -62,11 +62,22 @@ Redis 使用独立 DB 或 namespace。连接检查只应返回 `PONG`，不要�
 | `DB password` | 是 | 在隐藏输入中填 MySQL 应用账号的密码；不要写入 shell history、文档或聊天。 |
 | `DB host` | 是 | 应用在宿主机运行时填 `127.0.0.1`；应用在 Docker 内运行时填 Compose 中 MySQL 的 service 名，例如 `mysql`。 |
 | `DB port` | 是 | 开发/测试宿主机填 `3306`；生产宿主机填 `3307`；应用在 Docker 内时一律填容器端口 `3306`。 |
-| `DB name` | 是 | 分别使用 `couple_diary_dev`、`couple_diary_test`、`couple_diary_prod`；数据库必须预先创建。 |
+| `DB name` | 是 | 只允许 `couple_diary_agent_runtime_dev`、`couple_diary_agent_runtime_test`、`couple_diary_agent_runtime_prod`；三个 `couple_diary_dev/test/prod` 业务库会被固定拒绝。 |
 | `Redis URL` | 是 | 开发/测试宿主机填 `redis://127.0.0.1:6379/15`；生产宿主机填 `redis://127.0.0.1:6380/15`；Docker 内填 `redis://redis:6379/15`。启用 Redis 认证时由 secret manager 注入带认证的 URL。 |
 | `Service base URL` | 是 | 开发/测试填 `http://127.0.0.1:8010`；生产填经 allowlist 的真实 HTTPS API 地址，禁止在 URL 中携带凭据。 |
 
 HMAC secret、Fernet key 和 JWT secret 由 `configure` 独立随机生成，无需人工编写。生产环境不使用 `configure`：必须由 secret manager 分别注入 client HMAC secret、tool/callback HMAC secret、Fernet key、JWT secret、数据库密码与 Redis 凭据，且 client/tool/JWT 不得共用密钥。
+
+`prepare/start` 启动数据库顺序为：先检查环境与专库名，再查询库是否存在；缺库且 `DB_AUTO_CREATE=true` 时创建，已存在时复用；最后执行 Alembic。预期分别看到 `[OK] database ... status=created` 或 `status=existing`。未知 revision、非规范库名或迁移失败会固定 fail-closed，不自动 stamp。
+
+建库后可以使用 MySQL 客户端只读确认（`-p` 后在隐藏提示中输入密码）：
+
+```bash
+mysql -h127.0.0.1 -P3306 -uroot -p -e \
+  "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='couple_diary_agent_runtime_dev'; SELECT version_num FROM couple_diary_agent_runtime_dev.alembic_version;"
+```
+
+预期：只输出新的 `couple_diary_agent_runtime_dev` 与 `20260729_1000`。不要对 `couple_diary_dev/test/prod` 执行 `alembic upgrade`、`stamp`、`create_all`、`reset`、`DROP` 或任何 DDL。
 
 上述密钥的手工生成命令、字段间一致性、生产注入和轮换顺序，以及 exporter/媒体的条件必填项，统一参考 [ENV_CONFIG.md](ENV_CONFIG.md)。
 
@@ -109,7 +120,7 @@ chmod 600 .env.test.local
 4. 每 5 秒消费一次回忆录 Runtime 启动 outbox。
 5. 启动 Worker 和每 300 秒执行的 Reconciler。
 
-脚本保持在前台。任一子进程退出时脚本返回失败，并回收其余子进程。按 `Ctrl-C` 时应观察到 API 关闭、Worker 进入 draining，且没有遗留 `run_app.py/app.worker/app.reconciler/launcher-loop` 进程。
+脚本保持在前台。任一子进程退出时脚本返回失败，并回收其余子进程。按 `Ctrl-C` 时应观察到 API 关闭、Worker 进入 draining，且没有 traceback、semaphore 泄漏 warning 或遗留的 `run_app.py/app.worker/app.reconciler/launcher-loop` 进程。一键启动会禁用嵌套 Uvicorn reloader；需要热重载时单独使用 `./run.sh development`。
 
 另开一个终端执行：
 

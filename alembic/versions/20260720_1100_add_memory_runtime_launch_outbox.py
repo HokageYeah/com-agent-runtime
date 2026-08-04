@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260720_1100"
 down_revision = "20260720_1000"
@@ -18,6 +19,8 @@ depends_on = None
 
 def upgrade() -> None:
     """持久化 create-held/start-held 意图；表中不保存日记或 Prompt 正文。"""
+    if memory_schema_created_at_head():
+        return
     op.create_table(
         "memory_runtime_launch_events",
         sa.Column("id", sa.Integer(), primary_key=True),

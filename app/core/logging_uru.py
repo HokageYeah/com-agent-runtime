@@ -167,6 +167,12 @@ def setup_logging() -> None:
     )
 
 
+def shutdown_logging() -> None:
+    """排空 enqueue 队列并关闭 handler，避免受控子进程退出时遗留信号量。"""
+    logger.complete()
+    logger.remove()
+
+
 def get_logger(name: str | None = None):
     """获取命名日志记录器。"""
     return logger.bind(name=name)

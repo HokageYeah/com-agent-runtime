@@ -24,6 +24,10 @@ from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
 from dotenv import dotenv_values
+from sqlalchemy import URL, create_engine
+from sqlalchemy import text as sql_text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _ENVIRONMENTS = {
@@ -58,6 +62,7 @@ _LOCAL_CONFIG_COMMENTS = {
     "ENVIRONMENT": "[必填/自动确定] 运行环境：由 configure 命令的 development/test 参数生成，不要交叉复制。",
     "HOST": "[必填/手动配置] API 监听主机：由 Service base URL 的主机生成；宿主机运行通常为 127.0.0.1。",
     "PORT": "[必填/手动配置] API 监听端口：由 Service base URL 的显式端口生成，必须与宿主机发布端口一致。",
+    "DB_AUTO_CREATE": "[必填/安全默认] 缺库自动创建：development/test 默认 true；production 仅首次受控 bootstrap 临时开启。",
     "DB_DRIVER": "[必填/自动填写] 数据库驱动：当前本地启动固定使用 mysql+mysqlconnector。",
     "DB_USER": "[必填] MySQL 应用账号：由配置时的 DB user 生成；建议使用只有当前数据库权限的独立账号。",
     "DB_PASSWORD": "[必填/手动输入] MySQL 应用密码：在 configure 的隐藏输入中填写，不要复用 root 或生产密码。",
@@ -98,6 +103,118 @@ class LocalSetup:
     database_name: str
     redis_url: str
     service_base_url: str
+
+
+@dataclass(frozen=True)
+class DatabaseBootstrapConfig:
+    """启动前的最小数据库创建决策；不包含账号、密码或连接串。"""
+
+    environment: str
+    database_name: str
+    auto_create: bool
+
+
+class DatabaseBootstrapError(RuntimeError):
+    """数据库命名或创建边界被拒绝时只携带固定错误码。"""
+
+
+class DatabaseServer(Protocol):
+    """数据库服务器的最小 bootstrap 接口。"""
+
+    def database_exists(self, database_name: str) -> bool: ...
+
+    def create_database(self, database_name: str) -> None: ...
+
+    def close(self) -> None: ...
+
+
+_RUNTIME_DATABASE_NAMES = {
+    "development": "couple_diary_agent_runtime_dev",
+    "test": "couple_diary_agent_runtime_test",
+    "production": "couple_diary_agent_runtime_prod",
+}
+
+
+def ensure_runtime_database(
+    config: DatabaseBootstrapConfig,
+    server: DatabaseServer,
+) -> str:
+    """只允许当前环境的独立 Runtime 库，绝不尝试业务库。"""
+    environment = _normalize_local_environment(config.environment)
+    expected_name = _RUNTIME_DATABASE_NAMES[environment]
+    if config.database_name != expected_name:
+        raise DatabaseBootstrapError("RUNTIME_DATABASE_NAME_MISMATCH")
+    if server.database_exists(config.database_name):
+        return "existing"
+    if not config.auto_create:
+        raise DatabaseBootstrapError("RUNTIME_DATABASE_MISSING")
+    server.create_database(config.database_name)
+    return "created"
+
+
+class MySQLDatabaseServer:
+    """只连接 MySQL 服务器层，不预先选择任何业务库。"""
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    @classmethod
+    def from_environment(cls, values: Mapping[str, str]) -> MySQLDatabaseServer:
+        if values.get("DB_DRIVER") != "mysql+mysqlconnector":
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_DRIVER_UNSUPPORTED")
+        try:
+            port = int(values.get("DB_PORT", ""))
+        except ValueError as exc:
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_PORT_INVALID") from exc
+        if not 1 <= port <= 65535:
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_PORT_INVALID")
+        required = ("DB_USER", "DB_PASSWORD", "DB_HOST", "DB_CHARSET")
+        if any(not values.get(field, "").strip() for field in required):
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_CONFIG_INCOMPLETE")
+        url = URL.create(
+            drivername="mysql+mysqlconnector",
+            username=values["DB_USER"],
+            password=values["DB_PASSWORD"],
+            host=values["DB_HOST"],
+            port=port,
+            query={"charset": values["DB_CHARSET"]},
+        )
+        return cls(
+            create_engine(
+                url,
+                isolation_level="AUTOCOMMIT",
+                pool_pre_ping=True,
+            )
+        )
+
+    def database_exists(self, database_name: str) -> bool:
+        try:
+            with self._engine.connect() as connection:
+                result = connection.execute(
+                    sql_text(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA "
+                        "WHERE SCHEMA_NAME = :database_name"
+                    ),
+                    {"database_name": database_name},
+                )
+                return result.scalar_one_or_none() is not None
+        except SQLAlchemyError as exc:
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_SERVER_UNAVAILABLE") from exc
+
+    def create_database(self, database_name: str) -> None:
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", database_name):
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_NAME_INVALID")
+        try:
+            with self._engine.connect() as connection:
+                connection.exec_driver_sql(
+                    f"CREATE DATABASE `{database_name}` "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                )
+        except SQLAlchemyError as exc:
+            raise DatabaseBootstrapError("RUNTIME_DATABASE_CREATE_FAILED") from exc
+
+    def close(self) -> None:
+        self._engine.dispose()
 
 
 @dataclass(frozen=True)
@@ -217,6 +334,7 @@ def create_local_config(
         ("ENVIRONMENT", normalized),
         ("HOST", service_url.hostname),
         ("PORT", service_port),
+        ("DB_AUTO_CREATE", True),
         ("DB_DRIVER", setup.database_driver),
         ("DB_USER", setup.database_user),
         ("DB_PASSWORD", setup.database_password),
@@ -298,6 +416,7 @@ def inspect_configuration(
     values = _load_environment(project_root, normalized, process_env)
     required = (
         "DB_DRIVER",
+        "DB_AUTO_CREATE",
         "DB_USER",
         "DB_PASSWORD",
         "DB_HOST",
@@ -322,6 +441,15 @@ def inspect_configuration(
             findings.append(ConfigFinding(field, "MISSING_VALUE"))
         elif value in _PLACEHOLDERS or value.startswith("your_"):
             findings.append(ConfigFinding(field, "PLACEHOLDER_VALUE"))
+    auto_create = values.get("DB_AUTO_CREATE", "").strip().lower()
+    if auto_create and auto_create not in {"true", "false"}:
+        findings.append(ConfigFinding("DB_AUTO_CREATE", "INVALID_BOOLEAN"))
+    expected_database = _RUNTIME_DATABASE_NAMES[normalized]
+    database_name = values.get("DB_NAME", "").strip()
+    if database_name and database_name != expected_database:
+        findings.append(
+            ConfigFinding("DB_NAME", "RUNTIME_DATABASE_NAME_MISMATCH")
+        )
     registry_fields = (
         "RUNTIME_TRUSTED_CLIENTS_JSON",
         "RUNTIME_BUSINESS_CONNECTORS_JSON",
@@ -380,28 +508,22 @@ def inspect_configuration(
 def build_service_commands() -> tuple[tuple[str, ...], ...]:
     """返回由前台 supervisor 共同回收的进程命令。"""
     return (
-        ("poetry", "run", "python", "run_app.py"),
+        (sys.executable, "run_app.py"),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.scripts.agent_runtime_cli",
             "_launcher-loop",
         ),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.worker",
             "--worker-id",
             "agent-runtime-worker",
         ),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.reconciler",
             "--interval-seconds",
@@ -423,7 +545,7 @@ def run_launcher_loop(
     if interval_seconds <= 0:
         raise ValueError("LAUNCHER_INTERVAL_INVALID")
     command_runner = runner or _default_runner
-    command = ("poetry", "run", "python", "-m", "app.memory_runtime_launcher")
+    command = (sys.executable, "-m", "app.memory_runtime_launcher")
     cycles = 0
     while max_cycles is None or cycles < max_cycles:
         command_runner(
@@ -529,18 +651,45 @@ def _doctor(environment: str) -> dict[str, str]:
 
 def _prepare(environment: str) -> dict[str, str]:
     command_environment = _doctor(environment)
-    subprocess.run(
-        ("poetry", "run", "alembic", "upgrade", "head"),
-        cwd=PROJECT_ROOT,
-        env=command_environment,
-        check=True,
+    database_server: MySQLDatabaseServer | None = None
+    try:
+        database_server = MySQLDatabaseServer.from_environment(command_environment)
+        database_status = ensure_runtime_database(
+            DatabaseBootstrapConfig(
+                environment=environment,
+                database_name=command_environment["DB_NAME"],
+                auto_create=(
+                    command_environment["DB_AUTO_CREATE"].strip().lower() == "true"
+                ),
+            ),
+            database_server,
+        )
+    except DatabaseBootstrapError as exc:
+        print(f"[ERROR] database: {exc}")
+        raise SystemExit(2) from None
+    finally:
+        if database_server is not None:
+            database_server.close()
+    print(
+        f"[OK] database environment={_normalize_local_environment(environment)} "
+        f"status={database_status}"
     )
-    subprocess.run(
-        ("poetry", "run", "alembic", "heads"),
-        cwd=PROJECT_ROOT,
-        env=command_environment,
-        check=True,
-    )
+    try:
+        subprocess.run(
+            ("poetry", "run", "alembic", "upgrade", "head"),
+            cwd=PROJECT_ROOT,
+            env=command_environment,
+            check=True,
+        )
+        subprocess.run(
+            ("poetry", "run", "alembic", "heads"),
+            cwd=PROJECT_ROOT,
+            env=command_environment,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        print("[ERROR] database: RUNTIME_DATABASE_MIGRATION_FAILED")
+        raise SystemExit(exc.returncode or 1) from None
     return command_environment
 
 
@@ -576,8 +725,30 @@ def _terminate_processes(processes: Sequence[subprocess.Popen[bytes]]) -> None:
                 process.wait(timeout=5)
 
 
+def start_service_process(
+    command: tuple[str, ...],
+    *,
+    project_root: Path,
+    environment: Mapping[str, str],
+) -> subprocess.Popen[bytes]:
+    """让子服务脱离终端信号组，由 supervisor 统一优雅回收。"""
+    return subprocess.Popen(
+        command,
+        cwd=project_root,
+        env=dict(environment),
+        start_new_session=True,
+    )
+
+
+def supervised_service_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """前台 supervisor 已托管进程，禁用 Uvicorn 嵌套 reloader 避免泄漏子进程资源。"""
+    result = dict(environment)
+    result["RELOAD"] = "false"
+    return result
+
+
 def _start(environment: str) -> None:
-    command_environment = _prepare(environment)
+    command_environment = supervised_service_environment(_prepare(environment))
     api_command, launcher_command, worker_command, reconciler_command = build_service_commands()
     processes: list[subprocess.Popen[bytes]] = []
     stopping = False
@@ -589,14 +760,34 @@ def _start(environment: str) -> None:
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
-        api = subprocess.Popen(api_command, cwd=PROJECT_ROOT, env=command_environment)
+        api = start_service_process(
+            api_command,
+            project_root=PROJECT_ROOT,
+            environment=command_environment,
+        )
         processes.append(api)
         _wait_until_ready(api, command_environment.get("MEMORY_RUNTIME_BASE_URL", "http://127.0.0.1:8010"))
         processes.append(
-            subprocess.Popen(launcher_command, cwd=PROJECT_ROOT, env=command_environment)
+            start_service_process(
+                launcher_command,
+                project_root=PROJECT_ROOT,
+                environment=command_environment,
+            )
         )
-        processes.append(subprocess.Popen(worker_command, cwd=PROJECT_ROOT, env=command_environment))
-        processes.append(subprocess.Popen(reconciler_command, cwd=PROJECT_ROOT, env=command_environment))
+        processes.append(
+            start_service_process(
+                worker_command,
+                project_root=PROJECT_ROOT,
+                environment=command_environment,
+            )
+        )
+        processes.append(
+            start_service_process(
+                reconciler_command,
+                project_root=PROJECT_ROOT,
+                environment=command_environment,
+            )
+        )
         print("[OK] AgentRuntime API/Worker/Reconciler started; Ctrl-C stops all processes")
         while not stopping:
             exited = next((process for process in processes if process.poll() is not None), None)
@@ -611,7 +802,7 @@ def _start(environment: str) -> None:
 
 def _prompt_setup(environment: str) -> LocalSetup:
     normalized = _normalize_local_environment(environment)
-    default_database = "couple_diary_dev" if normalized == "development" else "couple_diary_test"
+    default_database = _RUNTIME_DATABASE_NAMES[normalized]
 
     def prompt(label: str, default: str) -> str:
         value = input(f"{label} [{default}]: ").strip()

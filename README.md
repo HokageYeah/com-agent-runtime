@@ -61,7 +61,7 @@
 - `app/middleware/request_logging.py`：请求日志与 `request_id` 入口
 - `app/middleware/exception_handlers.py`：统一错误返回入口
 - `app/scripts/set_env.py`：环境切换与命令转发入口
-- `app/scripts/manage_db.py`：数据库迁移与重置入口
+- `agent-runtime.sh`：AgentRuntime 配置检查、安全建库、Alembic 迁移与进程托管入口
 
 ### 最常用命令速查
 
@@ -69,8 +69,8 @@
 # 安装依赖
 poetry install
 
-# 首次初始化开发环境数据库
-poetry run python -m app.scripts.set_env development bootstrap
+# 首次初始化 AgentRuntime 开发专库
+./agent-runtime.sh prepare development
 
 # 启动开发环境
 ./run.sh development
@@ -176,11 +176,10 @@ poetry run ruff check app tests
 - 本地真实密码优先放在 `.env.development.local`、`.env.test.local`、`.env.local`
 
 六、数据库与脚本规范
-- 环境切换命令入口：`app/scripts/set_env.py`
-- 数据库管理入口：`app/scripts/manage_db.py`
-- 推荐启动入口：`./run.sh <env>`
-- 首次初始化某个环境时，优先使用：
-  - `poetry run python -m app.scripts.set_env development bootstrap`
+- AgentRuntime 唯一安全建库/迁移/启动入口：`./agent-runtime.sh`
+- 首次初始化开发专库：`./agent-runtime.sh prepare development`
+- 完整启动：`./agent-runtime.sh start <env>`
+- 原模板 `set_env.py/manage_db.py/init_database.py` 不得用于 AgentRuntime 建库、重置或兜底
 - 如果是数据库结构演进，优先走 Alembic，而不是只用 `create_all()`
 
 七、日志与排障规范
@@ -243,7 +242,9 @@ poetry install
 
 `SERVICE_BASE_URL`、外部 exporter 治理、client/tool HMAC、Snapshot Fernet key、JWT secret 以及 S3/MinIO/COS 私有媒体桶的生成、一致性、轮换和无凭据检查方法，详见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
 
-启动前需要先准备好 MySQL 数据库和 Redis。`start` 会执行 `alembic upgrade head`，但不会创建数据库账号、启动 MySQL/Redis 容器或覆盖现有配置。按 `Ctrl-C` 后，脚本会回收它启动的所有进程。
+启动前需要有可连接的 MySQL 服务和 Redis。development/test 默认 `DB_AUTO_CREATE=true`：`start` 会在 AgentRuntime 专库缺失时创建库，再通过 `alembic upgrade head` 创建或升级表；库已存在时直接检查并迁移。脚本不会创建 MySQL 账号、启动 MySQL/Redis 容器或覆盖现有配置。按 `Ctrl-C` 后，脚本会排空日志队列并回收它启动的所有进程；为避免嵌套进程，该模式固定关闭 Uvicorn reloader。
+
+AgentRuntime 仅允许 `couple_diary_agent_runtime_dev/test/prod`，会在连接前拒绝正在运行的业务库 `couple_diary_dev/test/prod`。数据库自动创建、生产首次 bootstrap 和权限配置详见 [AgentRuntime 环境配置说明](ENV_CONFIG.md#3-agentruntime-专用数据库)。
 
 如果你只想在隔离容器中验收真实 PostgreSQL、Redis、API、Worker 和 Reconciler，运行：
 
@@ -600,7 +601,8 @@ DB_USER=root
 DB_PASSWORD=password
 DB_HOST=localhost
 DB_PORT=3306
-DB_NAME=couple_diary_dev
+DB_AUTO_CREATE=true
+DB_NAME=couple_diary_agent_runtime_dev
 DB_CHARSET=utf8mb4
 
 # API配置
@@ -671,51 +673,34 @@ MYSQL_PASSWORD=你的真实密码
 
 ## 数据库操作
 
-这里的数据库脚本分成三类：
-
-- `bootstrap`：首次初始化环境时使用，最省心
-- `upgrade/downgrade/migrate`：后续日常迁移维护时使用
-- `init_database` / `create_all()`：仅作为迁移异常时的兜底方案
-
-### 创建数据库
-
-推荐通过环境脚本执行：
+对 AgentRuntime 只使用 `agent-runtime.sh` 作为建库和迁移入口。它在连接前强制环境与专库名映射，会拒绝 `couple_diary_dev/test/prod` 三个正在运行的业务库。
 
 ```bash
-poetry run python -m app.scripts.set_env development create_db
+# 检查配置，不连接和修改数据库
+./agent-runtime.sh doctor development
+
+# 库不存在时按 DB_AUTO_CREATE 建库，然后迁移到 head
+./agent-runtime.sh prepare development
+
+# 日常启动；已有库和表时只执行幂等迁移
+./agent-runtime.sh start development
 ```
 
-或者直接执行底层脚本：
+预期首次缺库输出 `status=created`，后续输出 `status=existing`，Alembic 只有 `20260729_1000 (head)`。development/test 默认允许创建固定专库；production 默认 `DB_AUTO_CREATE=false`，应由 DBA 预建库并分配最小权限。
 
-```bash
-poetry run python -m app.scripts.create_database
-```
-
-如果你是首次初始化某个环境，推荐直接执行一键准备命令：
-
-```bash
-poetry run python -m app.scripts.set_env development bootstrap
-```
-
-这个命令会按当前环境依次执行：
-
-- 创建数据库
-- 执行 Alembic 迁移
-- 如果迁移不可用，则回退到 `create_all()` 初始化表结构
-
-如果第一步建库本身就失败，`bootstrap` 会直接中断，不会再继续执行后续迁移。这样日志里的首个报错，就是最接近真实根因的报错。
+`app.scripts.create_database` / `set_env ... bootstrap` / `manage_db reset` 是原模板的通用管理工具，不提供 AgentRuntime 专库名保护，不得用于本项目的 Runtime 启动、建库或重置。不使用 `create_all()` 作为迁移失败的自动回退，也不自动 `stamp`。详细的库名、权限与首次 bootstrap 见 [AgentRuntime 环境配置说明](ENV_CONFIG.md#3-agentruntime-专用数据库)。
 
 ### 常用数据库命令
 
 ```bash
 # 开发环境首次初始化
-poetry run python -m app.scripts.set_env development bootstrap
+./agent-runtime.sh prepare development
 
 # 测试环境首次初始化
-poetry run python -m app.scripts.set_env test bootstrap
+./agent-runtime.sh prepare test
 
-# 生产环境首次初始化
-poetry run python -m app.scripts.set_env production bootstrap
+# 生产环境：DBA 预建专库并完成 doctor 后迁移
+./agent-runtime.sh prepare production
 
 # 查看当前迁移版本
 poetry run python -m app.scripts.manage_db current
@@ -723,42 +708,17 @@ poetry run python -m app.scripts.manage_db current
 # 查看迁移历史
 poetry run python -m app.scripts.manage_db history
 
-# 重置当前环境数据库
-poetry run python -m app.scripts.manage_db reset
 ```
 
 ### 初始化数据库表
 
-方式一：使用 SQLAlchemy 直接创建表
+Runtime 表只由受保护的 `prepare` 通过 Alembic 创建：
 
 ```bash
-poetry run python -m app.scripts.init_database
+./agent-runtime.sh prepare development
 ```
 
-方式二：使用 Alembic 进行数据库迁移（推荐）
-
-```bash
-# 创建迁移脚本
-poetry run alembic revision --autogenerate -m "创建初始表结构"
-
-# 应用迁移
-poetry run alembic upgrade head
-```
-
-当前仓库已经内置了首个正式迁移版本。首次初始化环境时，优先建议使用 `bootstrap` 或 `alembic upgrade head`，把 Alembic 作为正式的表结构演进入口。
-
-也可以通过 `set_env.py` 管理迁移流程：
-
-```bash
-# 创建迁移脚本
-poetry run python -m app.scripts.set_env development migrate revision --autogenerate -m "pro_table"
-
-# 应用迁移
-poetry run python -m app.scripts.set_env development upgrade
-
-# 回滚迁移
-poetry run python -m app.scripts.set_env development downgrade
-```
+禁止使用 `init_database.py` / `create_all()` 绕过迁移谱系，禁止在三个业务库上运行 Alembic。需要新建迁移时，先执行 `doctor` 并在隔离的 development Runtime 专库生成、审阅和测试。
 
 ### 数据库字段更新
 
@@ -808,10 +768,10 @@ poetry run python -m app.scripts.set_env development downgrade
 
 该脚本会把 `ENVIRONMENT` 传给应用，再通过 Poetry 启动服务。
 
-如果当前环境数据库还没有创建，应用会在启动阶段直接报错。首次运行请先执行：
+如果当前 AgentRuntime 专库还没有创建，首次运行请先执行安全准备入口：
 
 ```bash
-poetry run python -m app.scripts.set_env development bootstrap
+./agent-runtime.sh prepare development
 ```
 
 脚本内容如下：
@@ -822,7 +782,7 @@ set -e
 
 APP_ENV="${1:-development}"
 echo "使用环境: ${APP_ENV}"
-echo "如果是首次运行，请先执行: poetry run python -m app.scripts.set_env ${APP_ENV} bootstrap"
+echo "如果是首次运行，请先执行: ./agent-runtime.sh prepare ${APP_ENV}"
 echo "如果看到 your_mysql_user / your_mysql_password 相关报错，请检查 .env.${APP_ENV}.local 或 .env.local"
 ENVIRONMENT="$APP_ENV" poetry run python run_app.py
 ```
@@ -888,13 +848,13 @@ GET /readyz
 首次启动某个环境：
 
 1. `poetry install`
-2. `poetry run python -m app.scripts.set_env <env> bootstrap`
-3. `./run.sh <env>`
+2. `./agent-runtime.sh doctor <env>`
+3. `./agent-runtime.sh start <env>`
 
 已经初始化过数据库后的日常启动：
 
-1. `./run.sh development`
-2. 或 `poetry run python -m app.scripts.set_env development runserver`
+1. `./agent-runtime.sh start development`
+2. 仅调试 FastAPI 时才使用 `./run.sh development`
 
 ## 日志系统
 

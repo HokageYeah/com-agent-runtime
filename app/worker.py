@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
-from app.core.logging_uru import setup_logging
+from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.dispatcher import Dispatcher
 from app.models import AgentDefinition, AgentRun
@@ -542,32 +542,36 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging()
     database.connect()
-    session_factory = database.get_session_factory()
-    drain_controller = WorkerDrainController()
-    install_drain_signal_handlers(drain_controller)
-    loop = WorkerLoop(
-        session_factory,
-        configured_executor,
-        worker_id=args.worker_id,
-        is_draining=drain_controller.is_draining,
-        callback_gateway=configured_callback_gateway(),
-    )
-    logging.info(
-        "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s",
-        settings.runtime_id,
-        "root-database-outbox",
-        args.once,
-    )
-    if args.once:
-        loop.run_once()
-        return
-    while True:
-        loop.run_once()
-        # 信号处理器不会抛异常中断当前节点；RunQueue/Executor 已在安全边界
-        # heartbeat、checkpoint 后停止后续模型/工具调用并释放 lease 给 reaper。
-        if drain_controller.is_draining():
+    try:
+        session_factory = database.get_session_factory()
+        drain_controller = WorkerDrainController()
+        install_drain_signal_handlers(drain_controller)
+        loop = WorkerLoop(
+            session_factory,
+            configured_executor,
+            worker_id=args.worker_id,
+            is_draining=drain_controller.is_draining,
+            callback_gateway=configured_callback_gateway(),
+        )
+        logging.info(
+            "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s",
+            settings.runtime_id,
+            "root-database-outbox",
+            args.once,
+        )
+        if args.once:
+            loop.run_once()
             return
-        sleep(max(args.poll_seconds, 0.1))
+        while True:
+            loop.run_once()
+            # 信号处理器不会抛异常中断当前节点；RunQueue/Executor 已在安全边界
+            # heartbeat、checkpoint 后停止后续模型/工具调用并释放 lease 给 reaper。
+            if drain_controller.is_draining():
+                return
+            sleep(max(args.poll_seconds, 0.1))
+    finally:
+        database.close()
+        shutdown_logging()
 
 
 if __name__ == "__main__":

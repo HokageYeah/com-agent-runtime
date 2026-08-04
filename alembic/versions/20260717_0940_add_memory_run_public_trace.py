@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260717_0940"
 down_revision = "20260717_0900"
@@ -19,6 +20,8 @@ depends_on = None
 
 def upgrade() -> None:
     """新增只含节点展示状态的 JSON 字段，已有引用默认空轨迹。"""
+    if memory_schema_created_at_head():
+        return
     op.add_column(
         "memory_agent_run_refs",
         sa.Column("public_trace_json", sa.JSON(), nullable=False, server_default="[]"),

@@ -3,6 +3,7 @@
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import runtime_schema_created_at_head
 
 revision = "20260728_0900"
 down_revision = "20260727_0900"
@@ -11,6 +12,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if runtime_schema_created_at_head():
+        return
     op.create_table(
         "runtime_traffic_events",
         sa.Column("id", sa.Integer(), primary_key=True),

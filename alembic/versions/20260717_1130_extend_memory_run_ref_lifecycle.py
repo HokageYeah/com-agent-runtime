@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260717_1130"
 down_revision = "20260717_0940"
@@ -19,6 +20,8 @@ depends_on = None
 
 def upgrade() -> None:
     """为已有绑定补默认 row_version，其他元数据可随安全重试逐步补齐。"""
+    if memory_schema_created_at_head():
+        return
     op.add_column(
         "memory_agent_run_refs",
         sa.Column("row_version", sa.Integer(), nullable=False, server_default="1"),

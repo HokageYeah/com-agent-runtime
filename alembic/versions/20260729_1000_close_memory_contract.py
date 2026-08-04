@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260729_1000"
 down_revision = "20260729_0900"
@@ -28,6 +29,8 @@ _ENHANCEMENT_STATUS_CHECK = (
 
 def upgrade() -> None:
     """先补可空快照列、归一化旧状态，再冻结状态枚举。"""
+    if memory_schema_created_at_head(op.get_bind()):
+        return
     with op.batch_alter_table("memory_archives") as batch:
         batch.add_column(
             sa.Column("partner_nickname_snapshot", sa.String(length=100), nullable=True)

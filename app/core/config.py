@@ -236,16 +236,17 @@ class Settings(BaseSettings):
     )
 
     MYSQL_ROOT_PASSWORD: str = ""
-    MYSQL_DATABASE: str = "couple_diary_dev"
+    MYSQL_DATABASE: str = "couple_diary_agent_runtime_dev"
     MYSQL_USER: str = ""
     MYSQL_PASSWORD: str = ""
 
     DB_DRIVER: str = "mysql+mysqlconnector"
+    DB_AUTO_CREATE: bool = False
     DB_USER: str = "root"
     DB_PASSWORD: str = ""
     DB_HOST: str = "localhost"
     DB_PORT: int = 3306
-    DB_NAME: str = "couple_diary_dev"
+    DB_NAME: str = "couple_diary_agent_runtime_dev"
     DB_CHARSET: str = "utf8mb4"
     DB_ECHO: bool = False
     DB_POOL_SIZE: int = 5

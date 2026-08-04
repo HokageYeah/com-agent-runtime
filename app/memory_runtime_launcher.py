@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 import httpx
 
 from app.core.config import settings
-from app.core.logging_uru import setup_logging
+from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.services.memory_agent_adapter import (
     MemoryAgentAdapter,
@@ -68,6 +68,7 @@ def main() -> None:
         run_once()
     finally:
         database.close()
+        shutdown_logging()
 
 
 if __name__ == "__main__":

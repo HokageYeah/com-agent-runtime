@@ -53,3 +53,14 @@ def test_setup_logging_reads_level_from_settings_logging_group() -> None:
 
     console_handler_kwargs = mock_add.call_args_list[0].kwargs
     assert console_handler_kwargs["level"] == "WARNING"
+
+
+def test_shutdown_logging_drains_and_closes_handlers() -> None:
+    with (
+        patch.object(logging_uru.logger, "complete") as complete,
+        patch.object(logging_uru.logger, "remove") as remove,
+    ):
+        logging_uru.shutdown_logging()
+
+    complete.assert_called_once_with()
+    remove.assert_called_once_with()

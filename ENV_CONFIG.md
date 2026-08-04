@@ -36,9 +36,44 @@ poetry run python -c 'from cryptography.fernet import Fernet; print(Fernet.gener
 
 命令会把密钥显示在本机终端；不得开启录屏、shell 输出采集或 CI 命令回显。生产环境应使用 secret manager 自带的安全随机生成能力，不在普通终端生成。
 
-## 3. `SERVICE_BASE_URL`（生产必须手动配置）
+## 3. AgentRuntime 专用数据库
 
-### 3.1 它的作用
+AgentRuntime 与正在运行的回忆录业务库必须物理分离。启动器只允许以下固定映射：
+
+| 环境 | AgentRuntime 专库 | 受保护、禁止迁移的业务库 | `DB_AUTO_CREATE` 默认 |
+|---|---|---|---|
+| development | `couple_diary_agent_runtime_dev` | `couple_diary_dev` | `true` |
+| test | `couple_diary_agent_runtime_test` | `couple_diary_test` | `true` |
+| production | `couple_diary_agent_runtime_prod` | `couple_diary_prod` | `false` |
+
+```dotenv
+DB_AUTO_CREATE=true
+DB_NAME=couple_diary_agent_runtime_dev
+```
+
+`doctor` 在连接 MySQL 前就会检查该映射。任何业务库名或自定义库名都返回 `DB_NAME:RUNTIME_DATABASE_NAME_MISMATCH`，不执行建库、建表、stamp 或迁移。
+
+`prepare/start` 的数据库行为：
+
+1. 使用不带库名的 MySQL 服务器连接查询 `information_schema`；
+2. 库不存在且 `DB_AUTO_CREATE=true` 时，仅创建当前环境的固定 Runtime 专库；
+3. 库已存在时不重复创建；
+4. 统一执行 `alembic upgrade head`，空库创建表，已有可解析历史的库升级表；
+5. 未知 revision 或不可信 schema 固定拒绝，不会自动 `stamp`。
+
+创建新库的 MySQL 账号必须拥有 `CREATE DATABASE`。如果没有权限，脚本返回 `RUNTIME_DATABASE_CREATE_FAILED`，不输出密码或 DSN。
+
+生产首次 bootstrap 推荐流程：
+
+1. 由 DBA 预建 `couple_diary_agent_runtime_prod` 并向运行账号授予该库的最小权限；
+2. 保持 `DB_AUTO_CREATE=false`，执行 `./agent-runtime.sh prepare production`；
+3. 如必须由脚本创建，仅首次临时使用具有建库权限的受控账号并设置 `DB_AUTO_CREATE=true`，完成 `prepare` 后立即切回最小权限运行账号和 `false`。
+
+预期输出：首次缺库为 `[OK] database environment=<env> status=created`，后续启动为 `status=existing`。
+
+## 4. `SERVICE_BASE_URL`（生产必须手动配置）
+
+### 4.1 它的作用
 
 `SERVICE_BASE_URL` 是 `.env.*.local` 模板中的复用变量，用于同时生成：
 
@@ -48,7 +83,7 @@ poetry run python -c 'from cryptography.fernet import Fernet; print(Fernet.gener
 
 它不是 `app.core.config.Settings` 的正式字段。Python dotenv 加载 `.env.production.local` 时可以展开 `${SERVICE_BASE_URL}`；Docker Compose、Kubernetes 或云平台直接注入环境变量时，不应假设它们会在 JSON 字符串内自动展开。这类部署应直接注入展开后的 `MEMORY_RUNTIME_BASE_URL`、`RUNTIME_BUSINESS_CONNECTORS_JSON` 和 `RUNTIME_CALLBACK_TARGETS_JSON`。
 
-### 3.2 值的要求
+### 4.2 值的要求
 
 生产值必须：
 
@@ -75,9 +110,9 @@ curl -fsS https://api.example.com/api/v1/runtime/health/ready
 
 预期：两条命令返回 HTTP 200，TLS 证书校验成功，响应不包含配置 URL、密钥或业务内容。
 
-## 4. 外部 exporter 治理
+## 5. 外部 exporter 治理
 
-### 4.1 默认配置
+### 5.1 默认配置
 
 development/test/production 都应默认关闭外部 exporter：
 
@@ -93,7 +128,7 @@ RUNTIME_EXTERNAL_EXPORTER_PRIVACY_PURGE_SUPPORTED=false
 
 关闭时不需要“生成”这四个值，保持空值即可。不要为了让配置看起来完整而填入虚构值。
 
-### 4.2 启用时的完整配置
+### 5.2 启用时的完整配置
 
 只有安全/法务/数据治理评审完成后才能开启。当 `RUNTIME_EXTERNAL_EXPORTER_ENABLED=true` 时，以下七项必须同时满足：
 
@@ -130,9 +165,9 @@ curl -fsS http://127.0.0.1:8010/api/v1/runtime/health/ready
 
 预期：HTTP 200，`external_exporter` 为 `governed`。任一治理项缺失时 readiness 应返回失败，`external_exporter` 为 `invalid`。
 
-## 5. Runtime HMAC 密钥
+## 6. Runtime HMAC 密钥
 
-### 5.1 生成
+### 6.1 生成
 
 development/test 优先交给脚本：
 
@@ -151,7 +186,7 @@ development/test 优先交给脚本：
 openssl rand -hex 32
 ```
 
-### 5.2 一致性关系
+### 6.2 一致性关系
 
 client secret 必须同时出现在：
 
@@ -182,9 +217,9 @@ MEMORY_TOOL_TRUSTED_RUNTIMES_JSON='{"agent-runtime-production":{"keys":{"product
 
 轮换时不要直接覆盖原 key ID：先为接收方增加新 key ID，再切换发送方，等待旧 lease/callback 窗口耗尽后删除旧 key。转换期间不得把新旧 secret 写入日志或审计。
 
-## 6. Snapshot Fernet 密钥
+## 7. Snapshot Fernet 密钥
 
-### 6.1 生成与配置
+### 7.1 生成与配置
 
 `MEMORY_SNAPSHOT_FERNET_KEY` 是 URL-safe Base64 编码的 32-byte Fernet key，不能用普通密码或 `openssl rand -hex` 的结果代替。
 
@@ -208,7 +243,7 @@ ENVIRONMENT=development poetry run python -c 'from cryptography.fernet import Fe
 
 预期：只输出 `FERNET_KEY_OK`，不输出 key。测试/生产将 `ENVIRONMENT` 分别改为 `test` / `production`。
 
-## 7. 用户 JWT 验签密钥
+## 8. 用户 JWT 验签密钥
 
 `USER_AUTH_JWT_SECRET` 用于验证登录模块签发的 HS256 JWT，并不是 Runtime 自行生成用户 token 的独立密钥。
 
@@ -224,9 +259,9 @@ USER_AUTH_JWT_ISSUER=couple-diary
 
 JWT 轮换会影响已签发 token。生产轮换前必须确定旧 token TTL、过渡窗口、重新登录策略和签发端/验签端的发布顺序。当前验签器只接受一个 secret，不得假设它能自动回退到旧 key。
 
-## 8. S3 兼容私有媒体桶
+## 9. S3 兼容私有媒体桶
 
-### 8.1 关闭媒体能力
+### 9.1 关闭媒体能力
 
 如果当前不需要图片/音频签名访问，以下五项必须全部保持空值：
 
@@ -241,7 +276,7 @@ MEMORY_MEDIA_SIGNED_URL_TTL_SECONDS=60
 
 此时媒体代理不装配，媒体 API fail-closed；不会创建签名 URL，也不应因为能力关闭而访问网络。
 
-### 8.2 启用媒体能力
+### 9.2 启用媒体能力
 
 以下五项必须全部填写，任意一项缺失都会拒绝应用启动：
 
@@ -275,7 +310,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 预期：五项全空时只输出 `MEDIA_DISABLED`；五项完整且格式合法时只输出 `MEDIA_CONFIG_OK`；半配置、非法桶名、非法 TTL 或生产 HTTP endpoint 应以固定配置错误失败。此命令不应输出 access key、secret、endpoint 或签名 URL。
 
-## 9. 最终检查顺序
+## 10. 最终检查顺序
 
 ### development / test
 

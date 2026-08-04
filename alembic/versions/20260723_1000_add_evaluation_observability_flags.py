@@ -3,6 +3,7 @@
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import runtime_schema_created_at_head
 
 revision = "20260723_1000"
 down_revision = "20260723_0900"
@@ -11,6 +12,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if runtime_schema_created_at_head():
+        return
     """历史评测保留未知值，不伪造通过率。"""
     with op.batch_alter_table("agent_evaluations") as batch_op:
         batch_op.add_column(sa.Column("schema_passed", sa.Boolean(), nullable=True))

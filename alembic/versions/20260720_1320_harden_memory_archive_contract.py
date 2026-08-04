@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260720_1320"
 down_revision = "20260720_1300"
@@ -18,6 +19,8 @@ depends_on = None
 
 def upgrade() -> None:
     """只补版本字段和正数约束，不迁移任何加密快照或播放正文。"""
+    if memory_schema_created_at_head():
+        return
     for table_name in (
         "memory_snapshots", "memory_playback_documents", "memory_scenes", "memory_actions",
     ):

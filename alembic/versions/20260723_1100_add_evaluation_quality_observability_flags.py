@@ -3,6 +3,7 @@
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import runtime_schema_created_at_head
 
 revision = "20260723_1100"
 down_revision = "20260723_1000"
@@ -11,6 +12,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if runtime_schema_created_at_head():
+        return
     """历史评测保持未知，避免将未计算的引用或编造风险伪造为通过。"""
     with op.batch_alter_table("agent_evaluations") as batch_op:
         batch_op.add_column(sa.Column("material_reference_passed", sa.Boolean(), nullable=True))

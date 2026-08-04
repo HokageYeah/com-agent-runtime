@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260722_0900"
 down_revision = "20260721_0900"
@@ -17,6 +18,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if memory_schema_created_at_head():
+        return
     """只建立无内容的外部副作用意图表，不迁移快照或播放文档。"""
     op.create_table(
         "memory_runtime_compensation_events",

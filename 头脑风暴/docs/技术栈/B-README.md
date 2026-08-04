@@ -614,7 +614,8 @@ DB_USER=root
 DB_PASSWORD=password
 DB_HOST=localhost
 DB_PORT=3306
-DB_NAME=couple_diary_dev
+DB_AUTO_CREATE=true
+DB_NAME=couple_diary_agent_runtime_dev
 DB_CHARSET=utf8mb4
 
 # API配置

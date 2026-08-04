@@ -7,6 +7,7 @@ Revises: 20260720_1320
 from __future__ import annotations
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260721_0900"
 down_revision = "20260720_1320"
@@ -15,6 +16,8 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if memory_schema_created_at_head():
+        return
     """仅补领域约束，不回填、复制或解密任何播放文档与快照正文。"""
     op.create_unique_constraint(
         "uq_memory_document_archive_id",

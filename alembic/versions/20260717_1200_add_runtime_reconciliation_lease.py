@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import runtime_schema_created_at_head
 
 revision = "20260717_1200"
 down_revision = "20260717_1130"
@@ -19,6 +20,8 @@ depends_on = None
 
 def upgrade() -> None:
     """创建单行租约表，过期后允许另一实例接管。"""
+    if runtime_schema_created_at_head():
+        return
     op.create_table(
         "runtime_reconciliation_leases",
         sa.Column("lease_key", sa.String(80), primary_key=True),

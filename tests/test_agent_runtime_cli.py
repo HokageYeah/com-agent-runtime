@@ -1,20 +1,43 @@
 from __future__ import annotations
 
 import stat
+import sys
 from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
+from unittest.mock import Mock, patch
 
 import pytest
 
 from app.scripts.agent_runtime_cli import (
+    DatabaseBootstrapConfig,
+    DatabaseBootstrapError,
     LocalSetup,
     build_parser,
     build_service_commands,
     create_local_config,
+    ensure_runtime_database,
     inspect_configuration,
     run_launcher_loop,
     run_real_harness,
+    start_service_process,
+    supervised_service_environment,
 )
+
+
+class _FakeDatabaseServer:
+    def __init__(self, *, exists: bool) -> None:
+        self.exists = exists
+        self.created: list[str] = []
+
+    def database_exists(self, database_name: str) -> bool:
+        del database_name
+        return self.exists
+
+    def create_database(self, database_name: str) -> None:
+        self.created.append(database_name)
+
+    def close(self) -> None:
+        pass
 
 
 def _setup() -> LocalSetup:
@@ -24,10 +47,89 @@ def _setup() -> LocalSetup:
         database_password="database-secret",
         database_host="127.0.0.1",
         database_port=3306,
-        database_name="runtime_test",
+        database_name="couple_diary_agent_runtime_test",
         redis_url="redis://127.0.0.1:6379/15",
         service_base_url="http://127.0.0.1:8002",
     )
+
+
+def test_prepare_creates_only_the_environment_specific_runtime_database() -> None:
+    server = _FakeDatabaseServer(exists=False)
+
+    result = ensure_runtime_database(
+        DatabaseBootstrapConfig(
+            environment="development",
+            database_name="couple_diary_agent_runtime_dev",
+            auto_create=True,
+        ),
+        server,
+    )
+
+    assert result == "created"
+    assert server.created == ["couple_diary_agent_runtime_dev"]
+
+
+def test_prepare_reuses_an_existing_runtime_database_without_creating_it() -> None:
+    server = _FakeDatabaseServer(exists=True)
+
+    result = ensure_runtime_database(
+        DatabaseBootstrapConfig(
+            environment="test",
+            database_name="couple_diary_agent_runtime_test",
+            auto_create=True,
+        ),
+        server,
+    )
+
+    assert result == "existing"
+    assert server.created == []
+
+
+@pytest.mark.parametrize(
+    ("environment", "database_name"),
+    (
+        ("development", "couple_diary_dev"),
+        ("test", "couple_diary_test"),
+        ("production", "couple_diary_prod"),
+        ("development", "arbitrary_database"),
+    ),
+)
+def test_prepare_refuses_business_or_noncanonical_database_names(
+    environment: str,
+    database_name: str,
+) -> None:
+    server = _FakeDatabaseServer(exists=True)
+
+    with pytest.raises(
+        DatabaseBootstrapError,
+        match="RUNTIME_DATABASE_NAME_MISMATCH",
+    ):
+        ensure_runtime_database(
+            DatabaseBootstrapConfig(
+                environment=environment,
+                database_name=database_name,
+                auto_create=True,
+            ),
+            server,
+        )
+
+    assert server.created == []
+
+
+def test_prepare_requires_explicit_auto_create_for_a_missing_database() -> None:
+    server = _FakeDatabaseServer(exists=False)
+
+    with pytest.raises(DatabaseBootstrapError, match="RUNTIME_DATABASE_MISSING"):
+        ensure_runtime_database(
+            DatabaseBootstrapConfig(
+                environment="production",
+                database_name="couple_diary_agent_runtime_prod",
+                auto_create=False,
+            ),
+            server,
+        )
+
+    assert server.created == []
 
 
 def test_create_local_config_writes_private_file_without_overwriting(tmp_path: Path) -> None:
@@ -60,6 +162,7 @@ def test_create_local_config_writes_private_file_without_overwriting(tmp_path: P
     assert all(lines[index - 1].startswith("# ") for index in assignment_indexes)
     assert "HOST=127.0.0.1" in content
     assert "PORT=8002" in content
+    assert "DB_AUTO_CREATE=true" in content
     assert "DB_USER=runtime_test" in content
     assert "RUNTIME_REDIS_URL=redis://127.0.0.1:6379/15" in content
     assert "MODEL_ROUTES_JSON=[]" in content
@@ -96,6 +199,38 @@ def test_inspect_configuration_reports_field_names_without_secret_values(
     assert "do-not-print-this" not in rendered
 
 
+def test_doctor_refuses_a_business_database_name_before_migration(
+    tmp_path: Path,
+) -> None:
+    secret_values = iter(("client-secret", "tool-secret", "jwt-secret"))
+    path = create_local_config(
+        tmp_path,
+        "development",
+        LocalSetup(
+            **{
+                **_setup().__dict__,
+                "database_name": "couple_diary_agent_runtime_dev",
+            }
+        ),
+        secret_factory=lambda: next(secret_values),
+        fernet_key_factory=lambda: "fernet-key",
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "DB_NAME=couple_diary_agent_runtime_dev",
+            "DB_NAME=couple_diary_dev",
+        ),
+        encoding="utf-8",
+    )
+
+    rendered = "\n".join(
+        f"{item.field}:{item.code}"
+        for item in inspect_configuration(tmp_path, "development", process_env={})
+    )
+
+    assert "DB_NAME:RUNTIME_DATABASE_NAME_MISMATCH" in rendered
+
+
 def test_production_can_be_checked_but_cannot_write_a_local_secret_file(
     tmp_path: Path,
 ) -> None:
@@ -105,7 +240,8 @@ def test_production_can_be_checked_but_cannot_write_a_local_secret_file(
         "DB_PASSWORD": "database-secret",
         "DB_HOST": "mysql.internal",
         "DB_PORT": "3306",
-        "DB_NAME": "runtime_prod",
+        "DB_NAME": "couple_diary_agent_runtime_prod",
+        "DB_AUTO_CREATE": "false",
         "RUNTIME_REDIS_URL": "redis://redis.internal:6379/15",
         "RUNTIME_TRUSTED_CLIENTS_JSON": '{"client":{"keys":{"v1":"secret"}}}',
         "RUNTIME_BUSINESS_CONNECTORS_JSON": '{"connector":{"enabled":true}}',
@@ -141,7 +277,8 @@ def test_production_doctor_rejects_unsafe_runtime_flags(tmp_path: Path) -> None:
         "DB_PASSWORD": "database-secret",
         "DB_HOST": "mysql.internal",
         "DB_PORT": "3306",
-        "DB_NAME": "runtime_prod",
+        "DB_NAME": "couple_diary_agent_runtime_prod",
+        "DB_AUTO_CREATE": "false",
         "RUNTIME_REDIS_URL": "redis://redis.internal:6379/15",
         "RUNTIME_TRUSTED_CLIENTS_JSON": "{}",
         "RUNTIME_BUSINESS_CONNECTORS_JSON": "{}",
@@ -179,34 +316,57 @@ def test_production_doctor_rejects_unsafe_runtime_flags(tmp_path: Path) -> None:
 
 def test_build_service_commands_starts_launcher_api_worker_and_reconciler() -> None:
     assert build_service_commands() == (
-        ("poetry", "run", "python", "run_app.py"),
+        (sys.executable, "run_app.py"),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.scripts.agent_runtime_cli",
             "_launcher-loop",
         ),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.worker",
             "--worker-id",
             "agent-runtime-worker",
         ),
         (
-            "poetry",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "app.reconciler",
             "--interval-seconds",
             "300",
         ),
     )
+
+
+def test_service_process_uses_its_own_signal_session(tmp_path: Path) -> None:
+    process = Mock()
+    command = (sys.executable, "run_app.py")
+
+    with patch("app.scripts.agent_runtime_cli.subprocess.Popen", return_value=process) as popen:
+        result = start_service_process(
+            command,
+            project_root=tmp_path,
+            environment={"ENVIRONMENT": "development"},
+        )
+
+    assert result is process
+    popen.assert_called_once_with(
+        command,
+        cwd=tmp_path,
+        env={"ENVIRONMENT": "development"},
+        start_new_session=True,
+    )
+
+
+def test_supervisor_disables_nested_uvicorn_reloader() -> None:
+    original = {"ENVIRONMENT": "development", "RELOAD": "true"}
+
+    supervised = supervised_service_environment(original)
+
+    assert supervised == {"ENVIRONMENT": "development", "RELOAD": "false"}
+    assert original["RELOAD"] == "true"
 
 
 def test_internal_launcher_loop_is_not_listed_as_a_public_command() -> None:
@@ -238,8 +398,8 @@ def test_launcher_loop_consumes_new_outbox_events_on_each_cycle(tmp_path: Path) 
     )
 
     assert commands == [
-        ("poetry", "run", "python", "-m", "app.memory_runtime_launcher"),
-        ("poetry", "run", "python", "-m", "app.memory_runtime_launcher"),
+        (sys.executable, "-m", "app.memory_runtime_launcher"),
+        (sys.executable, "-m", "app.memory_runtime_launcher"),
     ]
     assert sleeps == [5]
 

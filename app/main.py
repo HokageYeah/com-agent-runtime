@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 from app.api.api import api_router
 from app.api.endpoints.health_api import RuntimeHealth
 from app.core.config import settings
-from app.core.logging_uru import setup_logging
+from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.middleware.exception_handlers import (
     http_exception_handler,
@@ -70,6 +70,7 @@ async def lifespan(_: FastAPI):
             gateway.close()
         logging.info("应用生命周期结束，准备关闭数据库连接")
         database.close()
+        shutdown_logging()
 
 
 app = FastAPI(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 
 from alembic import op
+from app.db.alembic_schema_bootstrap import memory_schema_created_at_head
 
 revision = "20260720_1300"
 down_revision = "20260720_1200"
@@ -18,6 +19,8 @@ depends_on = None
 
 def upgrade() -> None:
     """仅保存来源类型和 ID，禁止把日记正文复制到反查索引。"""
+    if memory_schema_created_at_head():
+        return
     op.create_table(
         "memory_source_references",
         sa.Column("id", sa.Integer(), primary_key=True),
