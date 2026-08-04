@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentRuntime 会话开发"
+  short_description: "在新会话中加载 AgentRuntime 上下文并按任务选择开发流程"
+  default_prompt: "使用 $agent-runtime-session 处理以下 AgentRuntime 需求："
