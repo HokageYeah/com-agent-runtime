@@ -170,7 +170,7 @@ docker volume ls --filter name=agent-runtime-redis-harness
 | 数据库 | `DB_DRIVER/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT/DB_NAME` | 使用独立账号，先备份再迁移，不使用生产库做验收 |
 | Runtime 入站 | `RUNTIME_ID/RUNTIME_TRUSTED_CLIENTS_JSON/RUNTIME_SIGNATURE_TOLERANCE_SECONDS` | 每个 client/key 独立，配置 agent/business/callback/connector/data-domain allowlist 和授权版本 |
 | 工具与 callback | `RUNTIME_BUSINESS_CONNECTORS_JSON/RUNTIME_CALLBACK_TARGETS_JSON/MEMORY_TOOL_TRUSTED_RUNTIMES_JSON` | 只允许预注册 HTTPS 目标，禁止凭据进入 URL，密钥不共用 |
-| 回忆录适配 | `MEMORY_RUNTIME_BASE_URL/CLIENT_ID/KEY_ID/SECRET` | 必须与 Runtime trusted client 中的 client/key 匹配 |
+| 回忆录联通调用方 | 不适用 | `MEMORY_RUNTIME_BASE_URL`、`MEMORY_RUNTIME_CLIENT_ID`、`MEMORY_RUNTIME_KEY_ID`、`MEMORY_RUNTIME_SECRET` 与 `MEMORY_RUNTIME_TIMEOUT_SECONDS` 仅由 `couple-diary-b` 持有并创建出站 HMAC；AgentRuntime 仅作为已签名 `/api/v1/runtime/capabilities` 目标，继续使用本表既有 Runtime 入站认证配置 |
 | 加密与登录 | `MEMORY_SNAPSHOT_FERNET_KEY/USER_AUTH_JWT_SECRET/USER_AUTH_JWT_ISSUER` | 从 secret manager 注入；轮换前先制定旧数据解密和 token 过渡方案 |
 | 共享流控 | `RUNTIME_REDIS_URL` | 使用独立 namespace/DB，故障时模型调用 fail-closed |
 | 模型路由 | `MODEL_ROUTES_JSON/MEMOIR_MODEL_NODE_ROUTES_JSON` | 只从部署配置读取，业务请求、Package 和 prompt 不能覆盖 |
@@ -423,9 +423,48 @@ unset AGENT_RUNTIME_TEST_POSTGRES_DSN AGENT_RUNTIME_TEST_REDIS_URL PGPASSWORD PO
 
 预期：容器和命名 volume 均被删除。必须在 `down -v` 之后再 `unset POSTGRES_HARNESS_PASSWORD`，因为 Compose 解析清理命令时仍需要该必填变量。
 
-## uni-app 回忆录手动验证
+## 方案 A 回忆录 Runtime 连接级验收
 
-前端工作区：`/Users/yuye/YeahWork/Python项目/uni-com-project-template`。前端只调用情侣日记业务 API；不要配置或访问 Runtime URL。
+当前验证证据只使用真实前端工程 `couple-diary-f`、真实业务后端 `couple-diary-b` 和本
+AgentRuntime 工程。按以下顺序执行三端验证：
+
+1. 在 `couple-diary-f` 根目录运行：
+
+   ```bash
+   node --test script/tests/memoir-runtime-connectivity-contract.test.cjs
+   npm run type-check
+   ```
+
+   预期：开发/测试环境仅从“我的 -> 回忆录档案 -> Runtime 联通测试”进入；前端只使用
+   `/memory/runtime-connectivity` 请求 `couple-diary-b`，不添加 `/api/v1`，不直连
+   AgentRuntime。
+
+2. 在 `couple-diary-b` 根目录运行：
+
+   ```bash
+   poetry run pytest tests/test_memory_runtime_connectivity.py -q
+   ```
+
+   预期：业务后端在 development/test 才开放该代理，负责 Runtime HMAC 和安全摘要裁剪；
+   production 的后端环境门禁拒绝该请求。
+
+3. 在本 AgentRuntime 根目录运行：
+
+   ```bash
+   poetry run pytest tests/test_runtime_capabilities.py -q
+   ```
+
+   预期：Runtime capabilities 的已验签兼容合同成立，且验证输出不含密钥或完整 Runtime
+   响应。
+
+这三步绿色只证明连接级联通与兼容合同成立，**不**代表 Agent Run、Archive、Snapshot、
+Worker、Callback 或 Published Revision 已可执行；这些 B1/B2 后续能力及完整回忆录生成
+闭环必须另行验证。
+
+## 历史 uni-app 回忆录手动说明（非方案 A 验收证据）
+
+`/Users/yuye/YeahWork/Python项目/uni-com-project-template` 是旧前端目录，仅保留以下
+历史说明；不得将其路径、构建结果或测试结果作为方案 A 或当前回忆录链路的验收证据。
 
 ```bash
 cd /Users/yuye/YeahWork/Python项目/uni-com-project-template
