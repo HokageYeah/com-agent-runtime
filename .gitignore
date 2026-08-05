@@ -55,3 +55,4 @@ logs/
 
 # Codex 本地隔离 worktree，禁止提交其工作副本内容。
 .worktrees/
+.ace-tool/
