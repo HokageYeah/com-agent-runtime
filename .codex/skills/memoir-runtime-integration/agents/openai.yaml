@@ -1,0 +1,4 @@
+interface:
+  display_name: "回忆录跨项目联调"
+  short_description: "对齐心约手帐与 AgentRuntime 的回忆录设计、开发和联调"
+  default_prompt: "使用 $memoir-runtime-integration 处理回忆录跨项目设计、开发或联调需求。"
