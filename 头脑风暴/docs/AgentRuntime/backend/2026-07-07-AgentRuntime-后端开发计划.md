@@ -1,5 +1,7 @@
 # AgentRuntime 后端 Implementation Plan
 
+> **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在当前 com-agent-runtime 根工程内建设公共 AgentRuntime 模块，提供公共 Agent 注册、运行、工具调用、模型调用、checkpoint、评价、callback 和观测能力，并以 `memoir_agent@1.0.0` 跑通第一版 Workflow Agent 闭环。
@@ -45,8 +47,8 @@
 
 ## 1. 成功标准
 
-- `/health/live`、`/health/ready` 和鉴权的 `/api/v1/runtime-capabilities` 可用，draining 与依赖故障语义符合契约。
-- `POST /api/v1/agent-runs(start_mode=held)` 快速返回 `run_id/contract_version/package_digest/authorization_version`，显式 `/start` 后才允许执行。
+- `/api/v1/runtime/health/live`、`/api/v1/runtime/health/ready` 和鉴权的 `/api/v1/runtime/capabilities` 可用，draining 与依赖故障语义符合契约。
+- `POST /api/v1/runtime/agent-runs(start_mode=held)` 快速返回 `run_id/contract_version/package_digest/authorization_version`，显式 `/start` 后才允许执行。
 - create/start/retry/cancel/human-approval/purge 校验 caller/tenant、时间戳、HMAC、`X-Agent-Key-Id`、target/connector allowlist 和 `Idempotency-Key`。
 - AgentRun 与 steps 查询校验服务身份、签名和 caller 可见性，但不要求 `Idempotency-Key`。
 - Runtime Contract 为 API/Event/Tool/Artifact 导出版本化 JSON Schema，并有 major/minor 兼容性测试。
@@ -240,22 +242,22 @@
 
 | 接口 | 方法 | 责任 |
 |---|---|---|
-| `/health/live` | GET | 进程与事件循环存活检查 |
-| `/health/ready` | GET | 数据库 schema、Registry、outbox/queue、签名配置和 draining 检查 |
-| `/api/v1/runtime-capabilities` | GET | 鉴权返回 Contract、Agent、逻辑 policy 和可选能力 |
+| `/api/v1/runtime/health/live` | GET | 进程与事件循环存活检查 |
+| `/api/v1/runtime/health/ready` | GET | 数据库 schema、Registry、outbox/queue、签名配置和 draining 检查 |
+| `/api/v1/runtime/capabilities` | GET | 鉴权返回 Contract、Agent、逻辑 policy 和可选能力 |
 
 ### 3.2 AgentRun API
 
 | 接口 | 方法 | 责任 |
 |---|---|---|
-| `/api/v1/agent-runs` | POST | 创建 AgentRun |
-| `/api/v1/agent-runs/{run_id}/start` | POST | 幂等执行 held -> queued |
-| `/api/v1/agent-runs/{run_id}` | GET | 查询 Run 摘要 |
-| `/api/v1/agent-runs/{run_id}/steps` | GET | 查询步骤摘要 |
-| `/api/v1/agent-runs/{run_id}/retry` | POST | 从失败节点重试 |
-| `/api/v1/agent-runs/{run_id}/cancel` | POST | 取消 Run |
-| `/api/v1/agent-runs/{run_id}/human-approval` | POST | 最小 approve/reject 状态迁移，无复杂审核台 |
-| `/api/v1/agent-runs/{run_id}/purge-private-data` | POST | 写 privacy tombstone/version 并请求清理 |
+| `/api/v1/runtime/agent-runs` | POST | 创建 AgentRun |
+| `/api/v1/runtime/agent-runs/{run_id}/start` | POST | 幂等执行 held -> queued |
+| `/api/v1/runtime/agent-runs/{run_id}` | GET | 查询 Run 摘要 |
+| `/api/v1/runtime/agent-runs/{run_id}/steps` | GET | 查询步骤摘要 |
+| `/api/v1/runtime/agent-runs/{run_id}/retry` | POST | 从失败节点重试 |
+| `/api/v1/runtime/agent-runs/{run_id}/cancel` | POST | 取消 Run |
+| `/api/v1/runtime/agent-runs/{run_id}/human-approval` | POST | 最小 approve/reject 状态迁移，无复杂审核台 |
+| `/api/v1/runtime/agent-runs/{run_id}/purge-private-data` | POST | 写 privacy tombstone/version 并请求清理 |
 
 ### 3.3 创建 AgentRun 请求
 
@@ -269,14 +271,12 @@
   "input": {
     "archive_id": "archive_123",
     "snapshot_id": "snapshot_456",
-    "owner_user_id": "user_789",
-    "space_id": "space_1",
-    "relationship_segment_no": 2,
     "generation_epoch": 1,
     "locale": "zh-CN"
   },
-  "callback_target_id": "couple_diary_memory_callback",
-  "business_connector_id": "couple_diary_backend"
+  "callback_target_id": "memory_callback",
+  "business_connector_id": "couple_diary_backend",
+  "data_domain": "couple_memory"
 }
 ```
 
@@ -639,6 +639,7 @@ unique(client_id, idempotency_key, scope)
 - Produces: `contract_version=1.0.0` 的 API/Event/Tool/Artifact JSON Schema；后续任务只依赖该契约包。
 
 - [✅] 写 create/start/query/retry/cancel/human-approval/purge、RuntimeEvent、ToolRequest/Result/Error、ArtifactEnvelope 的 Pydantic 模型。
+- [ ] 将写命令模型接入真实 HTTP 路由而非仅导出：start/retry 解析可选 `expected_status_version`，cancel/purge 解析必填稳定 `reason_code`，human approval 保持必填 `decision + expected_status_version`；同步 OpenAPI、稳定 JSON Schema fixture 与跨仓 consumer fixture。
 - [✅] Tool Contract 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri` 和 AI SDK 等价 tool schema fixture；第一版只做序列化/兼容性测试，不建立 MCP 连接或 ToolLoopAgent。
 - [✅] 固定 RuntimeEvent 枚举 `run_started/step_started/model_call_started/model_call_finished/tool_call_started/tool_call_finished/step_failed/fallback_used/human_review_requested/partial_succeeded/run_succeeded/run_failed/run_cancelled`，并定义到安全 callback `run_started/step_changed/waiting_human/partial_succeeded/run_succeeded/run_failed/run_cancelled` 的确定性映射；`waiting_human` 仅在 AgentPackage 显式启用时发送。
 - [✅] 固定错误码或治理分类 `IDEMPOTENCY_CONFLICT/RUNTIME_OVERLOADED/MODEL_TIMEOUT/MODEL_PARSE_FAILED/TOOL_TIMEOUT/TOOL_PERMISSION_DENIED/BUSINESS_DATA_INVALID/SAFETY_BLOCKED/COST_LIMIT_EXCEEDED/CALLBACK_SIGNATURE_INVALID/CALLBACK_OUT_OF_ORDER/RECONCILIATION_NEEDED/INDIRECT_PROMPT_INJECTION/GENERATION_SUPERSEDED/DISPATCH_FAILED/PACKAGE_REVOKED/PRIVATE_DATA_PURGED/AUTHORIZATION_REVOKED/SEMANTIC_VALIDATION_FAILED`。
@@ -667,12 +668,12 @@ unique(client_id, idempotency_key, scope)
 - Create: `tests/conftest.py`
 
 **Interfaces:**
-- Produces: FastAPI app、`GET /health/live`、`GET /health/ready`、`GET /api/v1/runtime-capabilities`。
+- Produces: FastAPI app、`GET /api/v1/runtime/health/live`、`GET /api/v1/runtime/health/ready`、`GET /api/v1/runtime/capabilities`。
 
 - [✅] 建立 `pyproject.toml`，依赖包含 FastAPI、uvicorn、pydantic-settings、SQLAlchemy、Alembic、httpx、pytest、ruff、mypy。
 - [✅] 定义 `Settings`，包含 `DATABASE_URL`、`REDIS_URL`、`RUNTIME_ID`、`AGENT_PACKAGE_ROOT`、`CALLBACK_ALLOWED_HOSTS`、`TRUSTED_CLIENTS_JSON`、`SIGNATURE_TOLERANCE_SECONDS`、`RUN_QUEUE_NAME`、`MODEL_TRAFFIC_NAMESPACE`、`MODEL_PERMIT_TTL_SECONDS`、`MAX_STEPS`、`MAX_MODEL_CALLS`、`MAX_TOOL_CALLS`、`MAX_RUN_SECONDS`、`MAX_AUTO_RETRY_PER_STEP`、`MAX_MANUAL_RUN_RETRY_COUNT`、`MAX_ESTIMATED_COST`、`HELD_TTL_SECONDS`、`QUEUE_TTL_SECONDS`、`APPROVAL_TTL_SECONDS`、`MAX_WALL_CLOCK_SECONDS`、`LEASE_TIMEOUT_SECONDS`、`CALLBACK_MAX_ATTEMPTS`、`CALLBACK_RETRY_ALERT_THRESHOLD`、`OUTBOX_RETENTION_DAYS`、`IDEMPOTENCY_TTL_DAYS`、`RECONCILIATION_INTERVAL_SECONDS`、`RECONCILIATION_FAILURE_THRESHOLD`、`AUDIT_SINK_DSN`、`AUDIT_RETENTION_DAYS`、`AUDIT_ALLOWED_ROLES`。模型流量控制固定 fail closed，不提供切换为进程内无限调用的配置。
-- [✅] 新增 `/health/live`，只检查进程与事件循环。
-- [✅] 新增 `/health/ready`，检查数据库 schema、Registry、outbox/queue、部署声明启用的 outbox event type 均有 handler、签名配置；draining 或启用类型缺 handler 时返回 503。
+- [✅] 新增 `/api/v1/runtime/health/live`，只检查进程与事件循环。
+- [✅] 新增 `/api/v1/runtime/health/ready`，检查数据库 schema、Registry、outbox/queue、部署声明启用的 outbox event type 均有 handler、签名配置；draining 或启用类型缺 handler 时返回 503。
 - [✅] 新增鉴权 capabilities，返回 Contract、Agent 版本、逻辑 model policy 和能力开关，禁止返回密钥、真实 provider/connector endpoint 和租户配额。
 - [✅] 定义 `RuntimeAuditEvent(audit_id, actor_type, actor_id, action, resource_type, resource_id, reason_code, outcome, occurred_at, trace_id, metadata_summary)` 和追加写 `AuditService`；生产环境未配置持久、访问受限的 audit sink 时 readiness 失败。
 - [✅] 写测试覆盖 live/ready、依赖失败、draining 和 capabilities 脱敏。
@@ -753,7 +754,7 @@ unique(client_id, idempotency_key, scope)
 - Test: `tests/test_admission_controller.py`
 
 **Interfaces:**
-- Produces: `POST /api/v1/agent-runs`、`POST /start`、`GET /api/v1/agent-runs/{run_id}`、`GET /api/v1/agent-runs/{run_id}/steps`、`POST /retry`、`POST /cancel`、`POST /human-approval`、`POST /purge-private-data`。
+- Produces: `POST /api/v1/runtime/agent-runs`、`POST /start`、`GET /api/v1/runtime/agent-runs/{run_id}`、`GET /api/v1/runtime/agent-runs/{run_id}/steps`、`POST /retry`、`POST /cancel`、`POST /human-approval`、`POST /purge-private-data`。
 - Produces: `AuthorizationService.authorize_run_action(...)`、`AdmissionService.reserve_transition(run_or_identity, from_state, to_state, limits)`、`OutboxService.append_run_dispatch(...)` 和 `OutboxService.append_callback(...)`，后续任务复用而不重复实现。
 
 - [✅] 定义创建、start、查询、重试、取消、human approval、purge 的 Pydantic schema，并复用 Contract Layer。
@@ -767,9 +768,11 @@ unique(client_id, idempotency_key, scope)
 - [✅] 固定容量迁移矩阵：create `none -> held|queued`、start `held -> queued`、retry/approval/fallback `none -> queued`、直接 cancel/终止 `held|queued -> none`；claimed run 的释放由 Worker 安全终止事务执行，API 的 cancel/purge 请求本身不等待也不受 Admission 拒绝。
 - [✅] 创建 held run，设置 `held_expires_at`、package digest、contract、authorization version 和 capability snapshot；相同 key 与 request hash 的重复创建重放首次创建响应，当前 run 状态由 AgentRun 查询接口返回。
 - [✅] `/start` 条件更新 held -> queued，并在同一事务完成 Admission `held -> queued`、写 `queued_at`、run_dispatch outbox 和幂等响应；相同 key/hash 重放首次响应，使用新 key 请求已 queued/claimed 的 run 时返回当前安全摘要且不重复迁移配额或写 outbox。held 超时、已取消/结束、package revoked、privacy 非 active 或授权失效时拒绝。
+- [ ] 路由按冻结合同解析全部写命令 body：start/retry 的 `expected_status_version` 提供时必须参与条件写，版本不匹配不改变状态/计数/outbox；cancel/purge 的 `reason_code` 必填并进入无自由文本的 RuntimeAuditEvent。补齐缺 body、非法 body、陈旧版本、原因码透传和幂等 request-hash 测试。
 - [✅] 相同 `Idempotency-Key` 的 method、normalized path 或 body hash 任一项不一致时返回 HTTP `409 Conflict`，错误码 `IDEMPOTENCY_CONFLICT`；不同 `run_id` 不能因空 body 相同而复用旧结果。
 - [✅] auto create 才在创建事务写 run_dispatch outbox；任何 HTTP 请求都不执行 workflow。
 - [✅] 查询接口返回当前 `status/dispatch_state/status_version/last_event_seq/execution_attempt/privacy_state/privacy_version/privacy_purge_requested_at/private_data_purged_at/updated_at`、progress、current_step、public_trace 和安全错误摘要，不返回 lease/fencing、私密 payload 或内部错误堆栈。
+- [ ] 将 `app/contracts/api.py::AgentRunQuery` 与 HTTP `RunDetail/StepSummary` 收敛为同一导出 schema：`progress` 限定 0..100，`current_step` 为安全 Step 对象或 null，顶层与 Step 只暴露稳定 `error_code`，移除跨项目自由 `error_message`；更新 endpoint、JSON fixture、provider/consumer tests，并确认 callback 仍不携带 progress/current_step。
 - [✅] 取消与 retry/approval 互斥：`pending + held/queued` 或 `waiting_human + finished` 在 API 事务内直接写 `cancel_requested_at/status=cancelled/dispatch_state=finished`、递增 `status_version` 并创建 callback outbox；claimed run 只写取消请求，由有效 fencing worker 在安全边界终止，迟到 dispatch 认领失败。
 - [✅] 重试接口只允许原 caller 或内部审计身份调用，且只允许 `failed/partial`、存在 checkpoint、`manual_retry_count < 3` 的 run 重新入队。
 - [✅] `partial` retry 只执行 Runtime 未完成的可选步骤，复用已发布 revision，不重新执行主作品发布；业务媒体 worker 失败不触发 AgentRun retry。（依赖 Task 6/10 写入步骤状态、可选节点与 checkpoint 语义。）
@@ -846,7 +849,7 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: `WorkflowExecutor.run(run_id: str, lease_context: LeaseContext) -> AgentRunResult` 并实现 Task 4.5 的 RunExecutor 协议，复用既有 LeaseContext/AgentRunResult，不重新定义返回类型。
 
-> 阶段完成基础（不新增计划任务）：已实现可注入的 mock `WorkflowExecutor` 验证链路，按静态 AgentPlan 写 `AgentStep.running/succeeded` 与安全 checkpoint 进度摘要；每次节点写入前复用 LeaseService 拒绝失效 fencing context。原有 Task 6 条目仍按完整验收语义逐项标记。
+> 阶段完成基础：已实现可注入的 mock `WorkflowExecutor` 验证链路，按静态 AgentPlan 写 `AgentStep.running/succeeded` 与 checkpoint 安全摘要；每次节点写入前复用 LeaseService 拒绝失效 fencing context。**2026-08-06 复核更正：** `state_summary` 虽安全，但密文仍序列化完整 `AgentState`；下列原实现记录保留，内容最小化以 Task 10 新增未完成项为准。
 - [✅] 定义 `AgentState`，包含 `run_input`、`snapshot`、`sanitized_material`、`stats`、`highlights`、`chapter_plan`、`scenes`、`actions`、`playback_document`、`publish_result`、`media_tasks`、`safety_report`、`trust_metadata`、`errors`、`fallback_flags`。
 - [✅] 将已冻结 `AgentPlan.steps_json` 编译为受控 LangGraph `StateGraph`；第一版仅允许线性静态 DAG，图状态只保存已访问 node ID，拒绝分支、动态节点和动态边，真实节点仍由 Executor 复用 fencing/privacy/cancel 等条件闸执行。
 - [✅] 每个节点执行前校验 fencing、cancel、privacy version、authorization version 与 Package revoked 状态；任一失效不启动新节点，撤销只写无内容审计结论。
@@ -888,13 +891,14 @@ unique(client_id, idempotency_key, scope)
 - [✅] 使用 httpx 调业务工具接口，支持 timeout 和 retry。
 - [✅] 每个物理调用使用独立 `tool_call_id/execution_attempt/tool_attempt`。side effect 请求先条件写 `AgentToolCall.running`、稳定 logical operation key、业务幂等键和规范签名 body 的 `request_digest`，提交成功后才允许发送 HTTP 请求；重试与接管复用相同 logical key、幂等键和 digest。
 - [✅] 工具返回后只在 fencing、privacy 和 authorization 条件仍有效时把 ToolCall/AgentState 推进为 succeeded/failed；条件失效或结果不确定时保留 running 供对账用原幂等键查询，禁止用迟到结果推进 run。
-- [✅] 结构化处理业务工具错误：`error_code`、`error_type`、`retryable`、`safe_message`、`details_visible_to_model`；默认 false，不把 details、堆栈、内部地址或私密字段放入模型上下文。
+- [ ] 结构化处理业务工具错误：非 2xx 解析冻结 `ToolError(error_code/error_type/retryable/safe_message/details_visible_to_model)`，v1 只接受 allowlist code 且强制 `details_visible_to_model=false`；校验 HTTP/code/retryable 一致性后驱动 ToolCall 审计、受控重试或不可重试终止，不把 FastAPI detail、堆栈、内部地址、响应原文或私密字段放入模型上下文。当前 `ToolGateway` 只按 HTTP 状态抛错，尚未完成本项。
 - [✅] side effect 工具业务幂等结果默认保留 30 天；HTTP retry、resume 和 worker 接管复用原逻辑键。
 - [✅] 业务端返回 `409 IDEMPOTENCY_CONFLICT` 时校验本次 digest 与已记录 digest，按不可重试契约/实现错误终止并写安全审计，不能生成新 key 绕过冲突。
 - [✅] 按 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 传播取消；不可中止或已提交工具只用原逻辑幂等键查询结果，不允许旧 fencing/privacy version 推进状态。
 - [✅] 每次调用前复核 authorization version；业务服务按当前 archive/owner/generation epoch 二次鉴权。
 - [✅] authorization version 变化、撤销拒绝和 connector/target 授权失败写 RuntimeAuditEvent，不记录凭据、endpoint secret 或业务 payload。
 - [✅] 测试 `memory.get_snapshot` 和 `memory.publish_playback_document` 参数映射、key 轮换、稳定幂等、超时/接管、SSRF、权限撤销和 `GENERATION_SUPERSEDED`。
+- [ ] 补齐冻结 `ToolRequest/ToolResult` 与发送实现的差距：从可信 Run/Step 生成 `input+context`，发送 `X-Agent-Run-Id/X-Agent-Tool-Name`，仅在存在权威物理 ToolCall 时发送 `X-Agent-Tool-Attempt`；先校验响应顶层 `schema_version=1.0.0` 再读取 `output`，并对 Snapshot payload 内层 `schema_version` 独立做 major 兼容校验。新增双向 contract test，当前仅 `{"input":...}`/只读取 `output` 的测试不得继续作为目标合同。
 
 ### Task 8: ModelGateway、PromptRegistry、ContextManager、结构化输出
 
@@ -1000,10 +1004,10 @@ unique(client_id, idempotency_key, scope)
 
 **Files:**
 - Create: `app/runtime/checkpoint.py`
-- Create: `app/runtime/artifact_store.py`
+- Create: `app/runtime/artifact.py`
 - Modify: `app/runtime/executor.py`
-- Test: `tests/test_checkpoint_resume.py`
-- Test: `tests/test_artifact_store.py`
+- Test: `tests/runtime_test_checkpoint_resume.py`
+- Test: `tests/runtime_test_workflow_executor.py`
 
 **Interfaces:**
 - Produces: `CheckpointStore.save(run_id, step_name, state, lease_context)`、`CheckpointStore.load_latest(run_id, actor, reason_code) -> CheckpointState`、`WorkflowExecutor.resume(run_id, lease_context) -> AgentRunResult`；读写均复用 Task 4.5 的 fencing/privacy/authorization 上下文，读取必须产生审计事件。
@@ -1019,6 +1023,8 @@ unique(client_id, idempotency_key, scope)
 - [✅] 工具 side effect 节点恢复前检查幂等键。
 - [✅] 实现 `template_highlights`、`template_chapters`、`template_scenes`、`default_actions` fallback。
 - [✅] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
+- [ ] 修正 `WorkflowExecutor` checkpoint 输入：仅投影路由进度、fallback 标记、副作用稳定逻辑键/安全结果引用与 digest，禁止 Snapshot/tool payload、`sanitized_material`、prompt/模型中间文本、Scene 和 PlaybackDocument 进入密文。
+- [ ] 修正 resume：按当前 privacy/authorization 重取 Snapshot 并重算无副作用内容节点，已发布等副作用只按稳定键 query-after-commit；为旧完整状态 checkpoint 增加版本拒绝、撤销/purge 与防复活回归。
 
 ### Task 11: Callback Dispatcher 与 Public Trace
 
@@ -1094,6 +1100,7 @@ unique(client_id, idempotency_key, scope)
 - Produces: `memoir_agent@1.0.0` 可执行 workflow。
 
 - [✅] 实现 `load_snapshot` 工具节点。
+- [ ] 扩展 `load_snapshot`/Snapshot reader 到跨工程 Snapshot Tool v1：读取 `schema_version + materials[]`，每项只接收 `material_type/source_ref/sanitized_payload`，目标类型限定为 `diary/completed_bet/handbook_note/matured_wish/bucket_list_completion`；把现有 `bet_items/bets`、`bet:<id>` 限定在显式 legacy reader，并在可信 allowlist 建立前单向归一化为 `completed_bet:<id>`。同一 Snapshot 混用新旧赌约引用时 fail-closed，新 provider 与发布 payload 不得输出旧格式。
 - [✅] 实现 `sanitize_materials`，脱敏用户 ID、昵称、手机号、地址、openid、token。
 - [✅] 实现 `compute_stats`，不依赖 AI 计算基础统计。
 - [✅] 实现 `extract_highlights` 模型节点与 `template_highlights`。
@@ -1102,10 +1109,11 @@ unique(client_id, idempotency_key, scope)
 - [✅] 实现 `generate_actions` 规则节点与 `default_actions`。
 - [✅] 实现 `safety_review`。
 - [✅] 构建完整 `MemoryPlaybackDocument + scenes + actions + media_manifest`，执行引用、数量、时长和 schema 语义校验；每个 AI Scene 的 `source_refs_json` 只保留由当前 snapshot allowlist 归一化通过的 material/source ID，并随发布 payload 原样提交。第一版媒体能力关闭时生成必填空清单，不省略契约字段。
-- [✅] 实现 `publish_playback_document` 调 `memory.publish_playback_document`，单次传完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定逻辑幂等键；业务后端按 scenes/actions/`media_manifest` 的规范化内容计算或复核 digest，Runtime 接收并保存 `revision/content_digest` 到 `publish_result`。
+- [✅] legacy 基线已实现 `publish_playback_document` 调 `memory.publish_playback_document`，以 `{"input":{...}}` 单次传 snake_case 完整 document/scenes/actions/`media_manifest`、`run_id/snapshot_id/generation_epoch` 和稳定逻辑幂等键；Runtime 与业务后端均对补默认值前的原始 `document` 以 UTF-8/不 ASCII 转义/键排序/紧凑分隔符规范 JSON 计算 digest，Runtime 接收并保存 `revision/content_digest` 到 `publish_result`。本勾选只证明发布与 digest 基线；`input+context`、关联 header 和外层 `ToolResult.schema_version` 仍属于 Task 7 未完成项。
 - [✅] 只有发布成功后才允许 AgentRun 进入 succeeded/partial；`GENERATION_SUPERSEDED` 停止旧 run 的剩余副作用。
 - [✅] 第一版预留 `enabled=false` 的 `memory.enqueue_tts` 契约；`enqueue_media_tasks` 在 capability 关闭时确定性返回 `skipped(CAPABILITY_DISABLED)`，不创建媒体任务或触网。业务 callback 只推进未发布内容运行/失败态，发布工具独占 `content_status=succeeded + published_revision`，enhancement 保持 `disabled`。
 - [✅] 测试无素材、只有日记、只有赌局、`source_refs_json` 丢失或含已删除/未知/跨 owner/跨关系段引用、强制拉黑表达、缺失/非法 `media_manifest` 被拒绝、媒体关闭时空 `media_manifest` 被接受、digest 不一致、发布与删除/新一轮生成竞态及原子回滚。
+- [ ] 增补 Snapshot Tool v1 五类 canonical material、legacy `bet` 单向归一化、同一 Snapshot 新旧赌约引用混用拒绝，以及发布 payload 不含 `bet:<id>` 的契约测试。
 
 ### Task 13: 最小评测集与端到端测试
 
@@ -1117,7 +1125,7 @@ unique(client_id, idempotency_key, scope)
 **Interfaces:**
 - Produces: 可重复执行的 MemoirAgent MVP 验收集。
 
-- [✅] 准备无日记无赌局 fixture。
+- [✅] 准备空核心素材 Snapshot fixture（仅验证已合法创建 Run 后的 Runtime 模板兜底；不代表业务后端允许为该场景创建 Archive/Run）。
 - [✅] 准备只有日记 fixture。
 - [✅] 准备只有赌局 fixture。
 - [✅] 准备双方同日记录 fixture。
@@ -1164,7 +1172,7 @@ unique(client_id, idempotency_key, scope)
 | 取消 held/queued/waiting_human | API 直接终止并生成 callback，不等待不存在的 worker；迟到 dispatch 无法认领 |
 | workflow 请求人工确认 | 先保存恢复 checkpoint，再原子写 waiting_expires_at、释放 lease/Admission 并发送带 event_seq/status_version 的 waiting_human callback；未启用 callback 时 package 不能注册人工等待分支 |
 | waiting_human 超时与审批并发 | 只有 status_version 条件成功的一方推进；超时按 package 策略 fallback、failed 或 cancelled，迟到审批不能覆盖结果 |
-| 无日记无赌局 | 生成基础卡或模板卡 |
+| 已合法创建 Run 的空核心素材 Snapshot | Runtime 生成基础卡或模板卡；业务侧门槛与 Archive 创建由 `couple-diary-b` 单独验收 |
 | 只有日记 | 生成日记统计和高光 |
 | 只有赌局 | 生成赌局统计和高光 |
 | 模型输出脏 JSON | repair 成功或进入 fallback |

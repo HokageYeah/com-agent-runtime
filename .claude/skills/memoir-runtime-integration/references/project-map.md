@@ -37,12 +37,50 @@
 - 模块整体、列表、详情页指南：`头脑风暴/docs/superpowers/回忆录/designs/回忆录模块前端设计指南.md`、`头脑风暴/docs/superpowers/回忆录/designs/回忆录列表/回忆录列表页前端设计指南.md`、`头脑风暴/docs/superpowers/回忆录/designs/回忆录详情/回忆录详情页前端设计指南.md`
 - 原型与参考实现：`头脑风暴/docs/superpowers/回忆录/designs/回忆录列表/code/`、`头脑风暴/docs/superpowers/回忆录/designs/回忆录详情/code/`
 - 开发计划入口：`头脑风暴/docs/superpowers/回忆录/plans/README.md`
+- 唯一总控计划：`头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`
+- 前端详细计划：`头脑风暴/docs/superpowers/回忆录/frontend/2026-08-06-回忆录-前端开发计划.md`
+- 后端与 Runtime 详细计划：`头脑风暴/docs/superpowers/回忆录/backend/2026-08-06-回忆录-后端开发计划.md`
 - 前端工程约定：`frontend/couple-diary-f/README.md`、`frontend/couple-diary-f/.claude/rules/UniApp模块化工程规范.md`
 - 后端工程约定：`backend/couple-diary-b/README.md`
 
-回忆录 `plans/README.md` 当前是索引与编写要求，不是可执行总控计划。需要实施计划时，使用 `couple-diary-planner` 基于当前需求、两边代码和 Runtime 契约生成，不把 Runtime 总控计划直接复制为业务计划。
+回忆录计划已经生成完毕。`plans/README.md` 是导航入口，`2026-08-06-回忆录-总控开发计划.md` 是唯一执行与交接入口；后续应校准或更新现有计划，不得再生成第二套并行总控。Runtime 总控/后端计划用于证明公共能力的实现状态和承接 R0–R4，不得覆盖情侣日记总控中的产品需求、业务所有权或跨仓顺序。
 
-## 3. 项目技能路由
+## 3. 已确认的整体开发计划
+
+### 3.1 计划权威与阅读顺序
+
+| 层级 | 权威文件 | 作用 |
+|---|---|---|
+| 跨项目总控 | 心约手帐 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md` | 唯一执行入口；冻结共享契约、M0–M5 顺序、REQ/AC 映射、V-01–V-16 验收与交接记录 |
+| 前端子计划 | 心约手帐 `头脑风暴/docs/superpowers/回忆录/frontend/2026-08-06-回忆录-前端开发计划.md` | F0–F8：密码入口、列表、日期预检、生成状态、重试、详情播放器、隐私与发布门禁 |
+| 后端与 Runtime 子计划 | 心约手帐 `头脑风暴/docs/superpowers/回忆录/backend/2026-08-06-回忆录-后端开发计划.md` | B0–B12 与 R0–R4：业务数据底座、生成编排、Tool/callback、Runtime 对齐、迁移与联调 |
+| Runtime 公共能力计划 | AgentRuntime 总控与后端详细计划 | Runtime 实现状态、公共契约和验证证据；保留历史勾选事实，按 R0–R4 校准架构归属 |
+
+开始实施前依次读取跨项目总控、当前里程碑对应的子计划、Runtime 公共能力计划与实际代码/测试。当前代码只用于重新校准“已实现/部分实现/未实现/待确认”，不能覆盖已确认的 `REQ-001~011`、`AC-001~011` 或总控冻结契约。
+
+### 3.2 M0–M5 执行地图
+
+| 里程碑 | 任务范围 | 可独立验收的结果 |
+|---|---|---|
+| M0 契约与迁移门禁 | B0、R0–R1、F0 | provider/consumer fixture、写命令、Tool/callback、HMAC、幂等、epoch 和文件所有权冻结；Runtime 遗留业务实现只作迁移源 |
+| M1 业务数据底座与门禁 | B1–B4、F1–F2 | 密码/grant、五类素材 projection、业务 Archive/Snapshot/Playback 模型、资格/选日领域服务及前端类型/API 骨架 |
+| M2 两类创建与 Snapshot 物化 | B5–B7、F3–F4 | 手动作用品与解绑双方作品可确定性创建，revision 0 baseline、manifest、Outbox 和 Snapshot 失败重放闭环 |
+| M3 Runtime 生成闭环 | B8–B10、R2–R3 | held create/bind/start、真实 Business Tool provider、原子发布、callback/主动对账、五类 Snapshot 和公共 ToolGateway 对齐 |
+| M4 列表管理与播放器 | B11、F5–F7 | owner 隔离的列表/详情/状态/重试/置顶/删除 API，前端轮询、失败 baseline 与安全 Scene/Action runner |
+| M5 迁移、联调与交付 | R4、B12、F8、M5-V | 隔离环境迁移演练、旧路由停用、V-01–V-16、隐私扫描及两仓原生门禁；缺 staging/密钥/回滚证据时不得宣称生产闭环 |
+
+顺序原则：先共享契约，再业务后端事实源，再 Runtime connector/workflow，最后前端消费与跨仓联调。里程碑内可按子计划标明的依赖并行，但不得让前端直连 Runtime，也不得在 Runtime 新增业务事实表/API。
+
+### 3.3 计划状态基线
+
+- **已实现：** 开发/测试环境 Runtime capabilities 安全代理；它只证明连接级合同。
+- **部分实现：** Runtime 公共 Run/Worker/Tool/callback/MemoirAgent、稳定空间/关系段、五类素材的部分模型或读取能力；均仍有总控所列的真实 connector、契约、隐私或投影缺口。
+- **未实现：** 目标业务仓中的 Archive/Snapshot/密码/Playback 正式闭环，以及回忆录正式前端页面；Runtime 同名遗留实现不得算作目标业务仓完成。
+- **待确认/上线门禁：** Runtime 遗留业务数据是否有生产记录、staging HTTPS、生产密钥轮换、合法域名、备份与回滚证据。
+
+每次执行后只在唯一总控与对应子计划更新 checkbox/执行记录，并用代码、迁移、测试和 Git 状态刷新本基线。技能地图只提供导航与稳定边界，不替代计划内的逐项验收。
+
+## 4. 项目技能路由
 
 | 项目 | 技能 | 用途 |
 |---|---|---|
@@ -55,7 +93,7 @@
 
 其它技能按风险选用：根因不明用诊断流程，合同改动用 TDD，大型已确认计划用执行计划流程，合入前用代码评审/完成验证。不因为跨项目就机械叠加所有技能。
 
-## 4. 总体设计思路
+## 5. 总体设计思路
 
 ```text
 couple-diary-f
@@ -82,7 +120,7 @@ couple-diary-f
 | `content_status=succeeded` 和 `published_revision` 切换 | `memory.publish_playback_document` 所在业务事务 |
 | 安全进度、页面状态、轮播执行 | 业务后端读模型 + 前端 |
 
-## 5. 当前里程碑与契约注意
+## 6. 当前里程碑与契约注意
 
 - 回忆录需求文档当前明确：已有改动仅是开发/测试环境的 Runtime capabilities 连接级验证；前端经 `/memory/runtime-connectivity` 调业务后端，后端代签并裁剪安全摘要。production 必须隐藏并拒绝该调试入口。
 - 该阶段不创建 AgentRun、Archive、Snapshot、Worker、Callback 或 Published Revision。以后任务必须重新审计代码和测试，不把本条作为永久进度结论。
@@ -90,7 +128,7 @@ couple-diary-f
 - 第一版小程序进度以业务后端 HTTP 退避轮询为基线；Runtime 原生 SSE、TTS、封面/图片/视频媒体生成不是第一版必须闭环。
 - 正常 MemoirAgent MVP 作品为 3–8 张 Scene，单卡主体不超过 80 字，绝不发布超过 16 张的作品；媒体关闭时仍显式提交空 `media_manifest`。
 
-## 6. 联调验收最小矩阵
+## 7. 联调验收最小矩阵
 
 | 场景 | 必须证明 |
 |---|---|
