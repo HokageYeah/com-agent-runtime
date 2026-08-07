@@ -35,7 +35,7 @@ def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> No
             },
             "workflow_nodes": [],
         },
-        package_digest="sha256:test", contract_version="1", status="active",
+        package_digest="sha256:test", contract_version="1.0.0", status="active",
         status_changed_at=datetime.now(UTC), status_changed_by="test",
         status_change_reason="fixture",
     ))
@@ -67,7 +67,7 @@ def test_create_freezes_authoritative_authorization_version() -> None:
     session = sessionmaker(bind=engine)()
     session.add(AgentDefinition(
         agent_id="agent", version="1", runtime_type="workflow", definition_json={},
-        package_digest="sha256:test", contract_version="1", status="active",
+        package_digest="sha256:test", contract_version="1.0.0", status="active",
         status_changed_at=datetime.now(UTC), status_changed_by="test", status_change_reason="fixture",
     ))
     session.commit()

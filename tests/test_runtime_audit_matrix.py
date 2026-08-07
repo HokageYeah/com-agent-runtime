@@ -17,7 +17,7 @@ from app.services.reconciliation_service import ReconciliationService
 def _run(run_id: str, *, state: str = "pending", dispatch: str = "held") -> AgentRun:
     return AgentRun(
         run_id=run_id, agent_id="memoir_agent", agent_version="1.0.0",
-        package_digest="sha256:test", contract_version="1", business_type="memoir",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="memoir",
         business_id="archive", status=state, dispatch_state=dispatch, input_json={},
         authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
         callback_target_id="callback", business_connector_id="connector", trace_id="trace",
@@ -62,7 +62,7 @@ def test_package_lifecycle_and_approval_write_safe_audits(tmp_path) -> None:
         runtime_type="workflow",
         definition_json={},
         package_digest="sha256:test",
-        contract_version="1",
+        contract_version="1.0.0",
         status="active",
         status_changed_at=datetime.now(UTC),
         status_changed_by="admin",
@@ -87,7 +87,7 @@ def test_retry_with_checkpoint_writes_safe_audit_record() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    definition = AgentDefinition(agent_id="memoir_agent", version="1.0.0", runtime_type="workflow", definition_json={}, package_digest="sha256:test", contract_version="1", status="active", status_changed_at=datetime.now(UTC), status_changed_by="admin", status_change_reason="created")
+    definition = AgentDefinition(agent_id="memoir_agent", version="1.0.0", runtime_type="workflow", definition_json={}, package_digest="sha256:test", contract_version="1.0.0", status="active", status_changed_at=datetime.now(UTC), status_changed_by="admin", status_change_reason="created")
     failed = _run("retry", state="failed", dispatch="finished")
     session.add_all(
         [

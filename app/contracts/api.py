@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -49,6 +50,9 @@ class CreateAgentRunRequest(ContractModel):
     input: dict[str, Any]
     callback_target_id: str = Field(min_length=1, max_length=120)
     business_connector_id: str = Field(min_length=1, max_length=120)
+    # 数据域只能由受信业务服务声明，Runtime 再通过调用方 allowlist 校验。
+    # 默认值保留既有 v1 调用方兼容；新业务调用方仍应显式传入该字段。
+    data_domain: str = Field(default="couple_memory", min_length=1, max_length=80)
     contract_version: Literal["1.0.0"] = "1.0.0"
 
 
@@ -56,11 +60,25 @@ class AgentRunResponse(ContractModel):
     """创建成功的安全摘要，不返回 connector 地址或任何私密 payload。"""
 
     run_id: str
+    business_id: str
     status: AgentRunStatus
     dispatch_state: DispatchState
     contract_version: Literal["1.0.0"] = "1.0.0"
     package_digest: str
     authorization_version: int = Field(ge=1)
+    status_version: int = Field(ge=1)
+
+
+class StepSummary(ContractModel):
+    """Run 查询中的步骤安全摘要，禁止输出自由错误文本。"""
+
+    step_id: str
+    step_name: str
+    step_type: str
+    status: str
+    execution_attempt: int = Field(ge=0)
+    step_attempt: int = Field(ge=0)
+    error_code: str | None = None
 
 
 class StartAgentRunRequest(ContractModel):
@@ -85,10 +103,24 @@ class PurgePrivateDataRequest(ContractModel):
 
 
 class AgentRunQuery(ContractModel):
+    """跨项目对账只读取稳定状态与受控错误码。"""
+
     run_id: str
+    business_id: str
     status: AgentRunStatus
     dispatch_state: DispatchState
+    contract_version: Literal["1.0.0"] = "1.0.0"
+    package_digest: str
+    authorization_version: int = Field(ge=1)
     status_version: int = Field(ge=1)
     last_event_seq: int = Field(ge=0)
     execution_attempt: int = Field(ge=0)
     privacy_state: Literal["active", "purge_requested", "purged"]
+    privacy_version: int = Field(ge=1)
+    progress: int = Field(ge=0, le=100)
+    current_step: StepSummary | None = None
+    error_code: str | None = None
+    privacy_purge_requested_at: datetime | None = None
+    private_data_purged_at: datetime | None = None
+    updated_at: datetime | None = None
+    public_trace: list[dict[str, Any]] = Field(default_factory=list)

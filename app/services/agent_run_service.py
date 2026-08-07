@@ -170,9 +170,21 @@ class AgentRunService:
         )
         return self._summary(run)
 
-    def start(self, run_id: str, caller_id: str, idempotency_key: str) -> RunSummary:
+    def start(
+        self,
+        run_id: str,
+        caller_id: str,
+        idempotency_key: str,
+        expected_status_version: int | None = None,
+    ) -> RunSummary:
         run = self._owned_run(run_id, caller_id)
         self._assert_authorization_current(run)
+        # 外部调用方提供版本时必须条件校验，避免旧 held 握手误启动新状态。
+        if (
+            expected_status_version is not None
+            and run.status_version != expected_status_version
+        ):
+            raise AgentRunServiceError("状态版本冲突")
         definition = self._session.scalar(
             select(AgentDefinition).where(
                 AgentDefinition.agent_id == run.agent_id,
@@ -224,15 +236,18 @@ class AgentRunService:
             record.status in {"succeeded", "skipped"} for record in step_records
         )
         progress = int(completed_count * 100 / planned_count) if planned_count else 0
+        # summary 已携带 status_version；RunDetail 在此基础上扩展查询字段，
+        # 因此显式覆盖时需先剔除 summary 中的同名字段，避免 keyword 冲突。
+        summary_dump = self._summary(run).model_dump()
+        summary_dump.pop("status_version", None)
         return RunDetail(
-            **self._summary(run).model_dump(),
+            **summary_dump,
             status_version=run.status_version,
             last_event_seq=run.last_event_seq,
             execution_attempt=run.execution_attempt,
             privacy_state=run.privacy_state,
             privacy_version=run.privacy_version,
             error_code=run.error_code,
-            error_message=run.error_message,
             privacy_purge_requested_at=run.privacy_purge_requested_at,
             private_data_purged_at=run.private_data_purged_at,
             updated_at=run.updated_at,
@@ -248,7 +263,12 @@ class AgentRunService:
         self._owned_run(run_id, caller_id, allow_auditor)
         return [self._step_summary(record) for record in self._step_records(run_id)]
 
-    def cancel(self, run_id: str, caller_id: str) -> RunSummary:
+    def cancel(
+        self,
+        run_id: str,
+        caller_id: str,
+        reason_code: str = "SYSTEM_REQUEST",
+    ) -> RunSummary:
         """held/queued 可同步终止；claimed 只写取消请求，由有效 Worker 收敛。"""
         run = self._owned_run(run_id, caller_id)
         run.cancel_requested_at = datetime.now(UTC)
@@ -261,12 +281,21 @@ class AgentRunService:
             self._admission.transition_run(run, previous_dispatch_state, "finished")
             self._outbox.append_callback(run, "cancelled")
         self._append_audit(
-            run, caller_id, "agent_run_cancelled", {"dispatch_state": run.dispatch_state}
+            run,
+            caller_id,
+            "agent_run_cancelled",
+            {"dispatch_state": run.dispatch_state},
+            reason_code=reason_code,
         )
         logging.info("请求取消 AgentRun run_id=%s state=%s", run_id, run.dispatch_state)
         return self._summary(run)
 
-    def purge(self, run_id: str, caller_id: str) -> RunDetail:
+    def purge(
+        self,
+        run_id: str,
+        caller_id: str,
+        reason_code: str = "SYSTEM_REQUEST",
+    ) -> RunDetail:
         """先建立 privacy 写屏障；Task 10 再负责加密 payload 的物理清理。"""
         run = self._owned_run(run_id, caller_id)
         if run.privacy_state == "active":
@@ -278,7 +307,10 @@ class AgentRunService:
                 run,
                 caller_id,
                 "agent_run_purge_requested",
-                {"privacy_version": str(run.privacy_version)},
+                {
+                    "privacy_version": str(run.privacy_version),
+                },
+                reason_code=reason_code,
             )
         logging.warning(
             "申请私密数据清理 run_id=%s privacy_version=%s", run_id, run.privacy_version
@@ -348,11 +380,21 @@ class AgentRunService:
         return True
 
     def retry(
-        self, run_id: str, caller_id: str, allow_auditor: bool = False
+        self,
+        run_id: str,
+        caller_id: str,
+        allow_auditor: bool = False,
+        expected_status_version: int | None = None,
     ) -> RunSummary:
         """仅原创建者或经 API 验证的内部审计身份可执行人工重试。"""
         run = self._owned_run(run_id, caller_id, allow_auditor)
         self._assert_authorization_current(run)
+        # 外部调用方提供版本时必须条件校验，防止对账线程覆盖较新的终态。
+        if (
+            expected_status_version is not None
+            and run.status_version != expected_status_version
+        ):
+            raise AgentRunServiceError("状态版本冲突")
         if run.status not in {"failed", "partial"} or run.manual_retry_count >= 3:
             raise AgentRunServiceError("Run 当前状态不允许 retry")
         if run.privacy_state != "active":
@@ -537,6 +579,8 @@ class AgentRunService:
         action: str,
         metadata_summary: dict[str, str],
         actor_type: str = "caller",
+        *,
+        reason_code: str | None = None,
     ) -> None:
         """只记录安全元数据，确保审计记录与 Run 状态处在相同数据库事务。"""
         self._audit.append(
@@ -551,6 +595,7 @@ class AgentRunService:
                 occurred_at=datetime.now(UTC),
                 trace_id=run.trace_id,
                 metadata_summary=metadata_summary,
+                reason_code=reason_code,
             )
         )
 
@@ -573,7 +618,6 @@ class AgentRunService:
             execution_attempt=record.execution_attempt,
             step_attempt=record.step_attempt,
             error_code=record.error_code,
-            error_message=record.error_message,
         )
 
     @staticmethod
@@ -636,11 +680,13 @@ class AgentRunService:
     def _summary(run: AgentRun) -> RunSummary:
         return RunSummary(
             run_id=run.run_id,
+            business_id=run.business_id,
             status=run.status,
             dispatch_state=run.dispatch_state,
             contract_version=run.contract_version,
             package_digest=run.package_digest,
             authorization_version=run.authorization_version,
+            status_version=run.status_version,
         )
 
     @staticmethod
@@ -685,5 +731,16 @@ class AgentRunService:
             if python_type and (
                 not isinstance(value[key], python_type)
                 or (expected in {"integer", "number"} and isinstance(value[key], bool))
+            ):
+                raise AgentRunServiceError("input schema 校验失败")
+            # 数值字段需校验 minimum，避免 generation_epoch=0 绕过冻结契约。
+            minimum = field_schema.get("minimum")
+            if (
+                expected in {"integer", "number"}
+                and isinstance(minimum, (int, float))
+                and not isinstance(minimum, bool)
+                and isinstance(value[key], (int, float))
+                and not isinstance(value[key], bool)
+                and value[key] < minimum
             ):
                 raise AgentRunServiceError("input schema 校验失败")

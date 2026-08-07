@@ -10,13 +10,13 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.connectors import ConnectorRegistry, ConnectorValidationError
 from app.core.security import SignatureError, request_hash, verify_signature
-from app.schemas.agent_run import (
-    ApprovalCommand,
-    CreateRunCommand,
-    RunDetail,
-    RunSummary,
-    StepSummary,
+from app.contracts.api import (
+    CancelAgentRunRequest,
+    PurgePrivateDataRequest,
+    RetryAgentRunRequest,
+    StartAgentRunRequest,
 )
+from app.schemas.agent_run import ApprovalCommand, CreateRunCommand, RunDetail, RunSummary, StepSummary
 from app.services.admission_service import AdmissionLimits, AdmissionRejected
 from app.services.agent_run_service import AgentRunService, AgentRunServiceError
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
@@ -173,7 +173,9 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
 
 
 @router.post("/{run_id}/start", response_model=RunSummary)
-async def start_run(run_id: str, request: Request) -> RunSummary:
+async def start_run(
+    run_id: str, body: StartAgentRunRequest, request: Request
+) -> RunSummary:
     caller, _, body = await _caller(request, write=True)
     existing = _existing_write(request, caller, "start", body)
     if existing:
@@ -187,7 +189,10 @@ async def start_run(run_id: str, request: Request) -> RunSummary:
                 request.app.state.settings.trusted_clients
             ).authorization_version(run.caller_id),
         ).start(
-            run_id, caller, request.headers["Idempotency-Key"]
+            run_id,
+            caller,
+            request.headers["Idempotency-Key"],
+            body.expected_status_version,
         )
         IdempotencyService(session).store(
             caller, "start", request.headers["Idempotency-Key"],
@@ -234,14 +239,16 @@ async def get_run_steps(run_id: str, request: Request) -> list[StepSummary]:
 
 
 @router.post("/{run_id}/cancel", response_model=RunSummary)
-async def cancel_run(run_id: str, request: Request) -> RunSummary:
+async def cancel_run(
+    run_id: str, body: CancelAgentRunRequest, request: Request
+) -> RunSummary:
     caller, _, body = await _caller(request, write=True)
     existing = _existing_write(request, caller, "cancel", body)
     if existing:
         return RunSummary.model_validate(existing)
     session = request.app.state.session_factory()
     try:
-        result = AgentRunService(session).cancel(run_id, caller)
+        result = AgentRunService(session).cancel(run_id, caller, body.reason_code)
         IdempotencyService(session).store(
             caller, "cancel", request.headers["Idempotency-Key"],
             request_hash(request.method, request.url.path, body),
@@ -254,7 +261,9 @@ async def cancel_run(run_id: str, request: Request) -> RunSummary:
 
 
 @router.post("/{run_id}/retry", response_model=RunSummary)
-async def retry_run(run_id: str, request: Request) -> RunSummary:
+async def retry_run(
+    run_id: str, body: RetryAgentRunRequest, request: Request
+) -> RunSummary:
     caller, _, body = await _caller(request, write=True)
     existing = _existing_write(request, caller, "retry", body)
     if existing:
@@ -271,7 +280,10 @@ async def retry_run(run_id: str, request: Request) -> RunSummary:
                 request.app.state.settings.trusted_clients
             ).authorization_version(run.caller_id),
         ).retry(
-            run_id, caller, allow_auditor=auditor
+            run_id,
+            caller,
+            allow_auditor=auditor,
+            expected_status_version=body.expected_status_version,
         )
         IdempotencyService(session).store(
             caller, "retry", request.headers["Idempotency-Key"],
@@ -315,14 +327,16 @@ async def approve_run(
 
 
 @router.post("/{run_id}/purge-private-data", response_model=RunDetail, status_code=202)
-async def purge_run(run_id: str, request: Request) -> RunDetail:
+async def purge_run(
+    run_id: str, body: PurgePrivateDataRequest, request: Request
+) -> RunDetail:
     caller, _, body = await _caller(request, write=True)
     existing = _existing_write(request, caller, "purge", body)
     if existing:
         return RunDetail.model_validate(existing)
     session = request.app.state.session_factory()
     try:
-        result = AgentRunService(session).purge(run_id, caller)
+        result = AgentRunService(session).purge(run_id, caller, body.reason_code)
         IdempotencyService(session).store(
             caller, "purge", request.headers["Idempotency-Key"],
             request_hash(request.method, request.url.path, body),

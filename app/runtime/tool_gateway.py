@@ -15,6 +15,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.contracts.api import CONTRACT_VERSION
+from app.contracts.tools import ToolError, ToolRequest, ToolResult
+
 from app.core.tool_security import tool_signature
 from app.models import AgentToolCall
 from app.runtime.interfaces import LeaseContext

@@ -1,0 +1,228 @@
+{
+  "contract_version": "1.0.0",
+  "schema_version": "1.0.0",
+  "runtime_paths": {
+    "capabilities": "/api/v1/runtime/capabilities",
+    "health_ready": "/api/v1/runtime/health/ready",
+    "create_run": "/api/v1/runtime/agent-runs",
+    "start_run": "/api/v1/runtime/agent-runs/{run_id}/start",
+    "query_run": "/api/v1/runtime/agent-runs/{run_id}",
+    "cancel_run": "/api/v1/runtime/agent-runs/{run_id}/cancel",
+    "purge_private_data": "/api/v1/runtime/agent-runs/{run_id}/purge-private-data"
+  },
+  "memoir_create": {
+    "agent_id": "memoir_agent",
+    "agent_version": "1.0.0",
+    "business_type": "couple_memory",
+    "start_mode": "held",
+    "data_domain": "couple_memory",
+    "callback_target_id": "memory_callback",
+    "business_connector_id": "couple_diary_backend",
+    "request": {
+      "required": [
+        "business_id",
+        "agent_id",
+        "agent_version",
+        "business_type",
+        "start_mode",
+        "data_domain",
+        "callback_target_id",
+        "business_connector_id",
+        "input"
+      ],
+      "business_id_location": "outer",
+      "input": {
+        "required": ["archive_id", "snapshot_id", "generation_epoch"],
+        "optional": ["locale"],
+        "additional_properties": false,
+        "generation_epoch": {
+          "minimum": 1
+        }
+      }
+    }
+  },
+  "write_commands": {
+    "idempotency_key_header": "Idempotency-Key",
+    "idempotency_key_format": "bare",
+    "commands_requiring_idempotency_key": [
+      "create",
+      "start",
+      "retry",
+      "cancel",
+      "purge",
+      "human_approval"
+    ],
+    "create": {
+      "held_create_implicitly_starts": false
+    },
+    "start": {
+      "expected_status_version": "optional_positive_integer"
+    },
+    "retry": {
+      "expected_status_version": "optional_positive_integer"
+    },
+    "cancel": {
+      "reason_code": "required_stable_code"
+    },
+    "purge": {
+      "reason_code": "required_stable_code"
+    },
+    "human_approval": {
+      "decision": "required",
+      "expected_status_version": "required_positive_integer"
+    }
+  },
+  "responses": {
+    "forbidden_data_classes": [
+      "business_content",
+      "prompt_text",
+      "model_text",
+      "private_url",
+      "credentials"
+    ],
+    "create": {
+      "created": {
+        "http_status": 201,
+        "required_fields": [
+          "run_id",
+          "business_id",
+          "status",
+          "dispatch_state",
+          "status_version"
+        ]
+      },
+      "duplicate": {
+        "http_status": 200,
+        "same_run_for_idempotency_key": true,
+        "required_fields": [
+          "run_id",
+          "business_id",
+          "status",
+          "dispatch_state",
+          "status_version"
+        ]
+      },
+      "conflict": {
+        "http_status": 409,
+        "required_fields": ["error_code"]
+      }
+    },
+    "query": {
+      "ok": {
+        "http_status": 200,
+        "required_fields": [
+          "run_id",
+          "business_id",
+          "status",
+          "dispatch_state",
+          "status_version",
+          "last_event_seq",
+          "execution_attempt",
+          "privacy_state",
+          "privacy_version",
+          "progress",
+          "current_step",
+          "error_code",
+          "privacy_purge_requested_at",
+          "private_data_purged_at",
+          "updated_at",
+          "public_trace"
+        ]
+      },
+      "not_found": {
+        "http_status": 404,
+        "required_fields": ["error_code"]
+      }
+    }
+  },
+  "agent_run_query": {
+    "required": [
+      "run_id",
+      "business_id",
+      "status",
+      "dispatch_state",
+      "status_version",
+      "last_event_seq",
+      "execution_attempt",
+      "privacy_state",
+      "privacy_version",
+      "progress",
+      "current_step",
+      "error_code",
+      "privacy_purge_requested_at",
+      "private_data_purged_at",
+      "updated_at",
+      "public_trace"
+    ],
+    "forbidden": ["error_message"],
+    "current_step_fields": [
+      "step_id",
+      "step_name",
+      "step_type",
+      "status",
+      "execution_attempt",
+      "step_attempt",
+      "error_code"
+    ]
+  },
+  "tool_contract": {
+    "request_required": ["input", "context"],
+    "context_required": [
+      "agent_id",
+      "agent_version",
+      "run_id",
+      "step_id",
+      "business_type",
+      "business_id",
+      "trace_id"
+    ],
+    "success_required": ["output", "schema_version"],
+    "tool_headers": ["X-Agent-Run-Id", "X-Agent-Tool-Name"],
+    "snapshot_schema_version": "1.0.0",
+    "material_types": [
+      "diary",
+      "completed_bet",
+      "handbook_note",
+      "matured_wish",
+      "bucket_list_completion"
+    ],
+    "tool_error_required": [
+      "error_code",
+      "error_type",
+      "retryable",
+      "safe_message"
+    ],
+    "tool_error_details_visible_to_model": false
+  },
+  "callback": {
+    "path": "/api/v1/internal/agent-callbacks/memory",
+    "snake_case_only": true,
+    "required_headers": [
+      "X-Agent-Run-Id",
+      "X-Agent-Business-Id",
+      "X-Agent-Event-Id",
+      "X-Agent-Event-Seq"
+    ],
+    "required_body": [
+      "event",
+      "event_id",
+      "run_id",
+      "event_seq",
+      "status_version",
+      "agent_id",
+      "business_id",
+      "status",
+      "error",
+      "public_trace"
+    ]
+  },
+  "canonical_document_digest": {
+    "document": {
+      "actions": [],
+      "media_manifest": [],
+      "scenes": [],
+      "schema_version": "1.0.0"
+    },
+    "sha256": "10aff31578b8327eafc1807c4a13e424ee769de6abc313c53b51504af1ccf57c"
+  }
+}

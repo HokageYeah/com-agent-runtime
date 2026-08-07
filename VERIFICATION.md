@@ -1,5 +1,7 @@
 # AgentRuntime 验证流程
 
+> **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** 本文件涉及的回忆录业务路由（用户 `/api/v1/memory/*`、本地 `/api/v1/internal/agent-tools/memory.*`、业务回调 `/api/v1/internal/agent-callbacks/memory`、`memory_status_api`、`memory_callbacks_api` 以及 `app.memory_runtime_launcher` legacy 启动器）均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留作为迁移证据，不删除、不重写。R1 已在 `app/api/api.py` 落地环境门禁：`production` 仅注册 `/api/v1/runtime/*` provider，不再暴露业务路由；`development` / `test` 仍按现状注册以便审计与跨仓联调。原有验证步骤不变，新增 R1 路由表测试 `tests/test_runtime_route_gating.py` 作为门禁回归证据。
+
 ## 安全前提
 
 - 只在隔离 staging 环境执行；不得使用生产数据库、Redis、对象桶或密钥。

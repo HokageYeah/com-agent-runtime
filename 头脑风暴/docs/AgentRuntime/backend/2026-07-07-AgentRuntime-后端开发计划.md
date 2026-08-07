@@ -2,6 +2,8 @@
 
 > **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
 
+> **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** Task 6.5（归档/快照/播放文档收尾）与 Task 10.75（密码/列表/用户侧 API）对应的本仓代码均判定为“仓内历史实现已完成、目标架构待迁移”：模型、迁移、路由、service 不删除、不重写，作为迁移证据保留；本仓已在 R1 实现 `app/api/api.py` 的环境门禁——`production` 仅注册 `/api/v1/runtime/*` provider，业务路由仅在 `development` / `test` 注册以保留审计能力。下方 checkbox 维持历史勾选状态，不再作为目标 baseline 重审；目标实现以 `couple-diary-b` 计划为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在当前 com-agent-runtime 根工程内建设公共 AgentRuntime 模块，提供公共 Agent 注册、运行、工具调用、模型调用、checkpoint、评价、callback 和观测能力，并以 `memoir_agent@1.0.0` 跑通第一版 Workflow Agent 闭环。

@@ -206,7 +206,7 @@ def _run_session() -> tuple[object, LeaseContext]:
     now = datetime.now(UTC)
     session.add(AgentRun(
         run_id="run-1", agent_id="agent", agent_version="1", package_digest="digest",
-        contract_version="1", business_type="memoir", business_id="business", status="pending",
+        contract_version="1.0.0", business_type="memoir", business_id="business", status="pending",
         dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller",
         tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback",
         business_connector_id="connector", trace_id="trace", execution_attempt=1,
@@ -1320,7 +1320,7 @@ def test_separate_session_cannot_overwrite_settled_usage(tmp_path: Path) -> None
     now = datetime.now(UTC)
     session_a.add(AgentRun(
         run_id="run-atomic", agent_id="agent", agent_version="1", package_digest="digest",
-        contract_version="1", business_type="memoir", business_id="business", status="pending",
+        contract_version="1.0.0", business_type="memoir", business_id="business", status="pending",
         dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller",
         tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback",
         business_connector_id="connector", trace_id="trace", execution_attempt=1,
@@ -1363,7 +1363,7 @@ def test_reconciler_does_not_overwrite_usage_settled_by_another_session(tmp_path
     now = datetime.now(UTC)
     session_a.add(AgentRun(
         run_id="run-reconcile", agent_id="agent", agent_version="1", package_digest="digest",
-        contract_version="1", business_type="memoir", business_id="business", status="pending",
+        contract_version="1.0.0", business_type="memoir", business_id="business", status="pending",
         dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller",
         tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback",
         business_connector_id="connector", trace_id="trace", execution_attempt=1,
@@ -1539,7 +1539,7 @@ def test_second_session_cannot_pass_call_limit_after_first_reserves_budget(tmp_p
     now = datetime.now(UTC)
     session_a.add(AgentRun(
         run_id="run-budget", agent_id="agent", agent_version="1", package_digest="digest",
-        contract_version="1", business_type="memoir", business_id="business", status="pending",
+        contract_version="1.0.0", business_type="memoir", business_id="business", status="pending",
         dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller",
         tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback",
         business_connector_id="connector", trace_id="trace", execution_attempt=1,
@@ -1608,7 +1608,7 @@ def test_concurrent_sessions_only_one_call_acquires_traffic_for_one_run_budget(
     now = datetime.now(UTC)
     setup.add(AgentRun(
         run_id="run-concurrent", agent_id="agent", agent_version="1", package_digest="digest",
-        contract_version="1", business_type="memoir", business_id="business", status="pending",
+        contract_version="1.0.0", business_type="memoir", business_id="business", status="pending",
         dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller",
         tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback",
         business_connector_id="connector", trace_id="trace", execution_attempt=1,
@@ -2185,7 +2185,7 @@ def test_created_run_freezes_server_route_and_residency_governance() -> None:
     session.add(AgentDefinition(
         agent_id="created-agent", version="1", runtime_type="workflow",
         definition_json={"allowed_business_types": ["memoir"], "workflow_nodes": []},
-        package_digest="digest", contract_version="1", status="active",
+        package_digest="digest", contract_version="1.0.0", status="active",
         status_changed_at=datetime.now(UTC), status_changed_by="test", status_change_reason="fixture",
     ))
     created = AgentRunService(

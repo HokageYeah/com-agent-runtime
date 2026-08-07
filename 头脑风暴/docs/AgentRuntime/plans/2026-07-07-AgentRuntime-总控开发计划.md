@@ -2,6 +2,8 @@
 
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
+> **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** Task 6.5（情侣日记归档/快照/播放文档底座）、Task 10.75（回忆录密码/列表/用户侧业务 API）以及本仓内旧前端联调相关条目对应的实现代码均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留在仓库内作为迁移证据与审计回放来源，不删除、不重写。本仓 Runtime 已在 R1 落地生产配置路由门禁：`production` 环境下 FastAPI 仅注册 `/api/v1/runtime/*` provider（health / capabilities / agent-runs），不再挂载 `/api/v1/memory/*` 用户业务、`/api/v1/internal/agent-tools/memory.*` 本地工具 handler、`/api/v1/internal/agent-callbacks/memory` 业务回调 consumer，也不启用 `app.memory_runtime_launcher` legacy 启动器；`development` / `test` 仍按现状注册以便审计与跨仓联调。下方原 checkbox 状态保持不变，仅作为历史勾选证据；目标 baseline 以情侣日记仓库计划为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 统筹公共 AgentRuntime、`MemoirAgent`、情侣日记 FastAPI 后端工具 API、uni-app 回忆录播放器的开发顺序，按“契约冻结 -> 可靠运行底座 -> 原子业务发布 -> 前端 baseline/轮询 -> 故障与隐私验收”的路径完成第一版闭环。
