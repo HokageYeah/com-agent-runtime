@@ -518,14 +518,18 @@ def _validate_document_source_references(
     archive: MemoryArchive,
     snapshot: MemorySnapshot | None,
 ) -> set[tuple[str, str]]:
-    """校验发布引用来自当前 archive 的冻结快照，返回去重后的最小反查键。"""
+    """校验发布引用来自当前 archive 的冻结快照，返回去重后的最小反查键。
+
+    R2 后回忆录只接受规范前缀 ``diary:`` / ``completed_bet:``；legacy ``bet:``
+    在 Runtime 边界已被 legacy reader 单向归一化，发布端不再回写旧形状。
+    """
     references: set[tuple[str, str]] = set()
     for scene in document["scenes"]:
         for reference in scene.get("source_refs", []):
             if not isinstance(reference, str) or ":" not in reference:
                 raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
             source_type, source_id = reference.split(":", 1)
-            if source_type not in {"diary", "bet"} or not source_id:
+            if source_type not in {"diary", "completed_bet"} or not source_id:
                 raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
             references.add((source_type, source_id))
     if not references:
@@ -537,7 +541,12 @@ def _validate_document_source_references(
         raise ValueError("MEMORY_SOURCE_REF_NOT_FROZEN")
     allowed = {
         (source_type, str(source_id))
-        for manifest_key, source_type in (("diary_ids", "diary"), ("bet_ids", "bet"))
+        for manifest_key, source_type in (
+            ("diary_ids", "diary"),
+            # 旧 manifest 字段名 bet_ids 保留（数据层稳定），但反查键使用
+            # 规范前缀 completed_bet 与 Runtime 输出对齐。
+            ("bet_ids", "completed_bet"),
+        )
         for source_id in manifest.get(manifest_key, [])
         if isinstance(source_id, (str, int)) and not isinstance(source_id, bool)
     }

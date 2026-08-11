@@ -14,10 +14,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from pydantic import ValidationError
 
-from app.contracts.api import CONTRACT_VERSION
 from app.contracts.tools import ToolError, ToolRequest, ToolResult
-
 from app.core.tool_security import tool_signature
 from app.models import AgentToolCall
 from app.runtime.interfaces import LeaseContext
@@ -230,6 +229,31 @@ class ToolGateway:
         state.apply_tool_output(manifest.output_to or "", output)
         logging.info("工具结果安全写入 run_id=%s tool=%s target=%s", run_id, manifest.name, manifest.output_to)
 
+    @staticmethod
+    def to_tool_error(exc: Exception) -> ToolError:
+        """把 Gateway 抛出的异常映射为冻结 ToolError；统一未来失败语义转换入口。
+
+        决策（R3 路径 b）：worker/runner 当前 catch Exception 后写受控 audit code，
+        不直接消费 ToolError；因此 Gateway 仍抛 ValueError 以保持现有异常处理契约，
+        仅提供该助手作为未来统一的 ToolError 转换入口。
+
+        铁律：``details_visible_to_model`` 永远 False，业务错误详情不进入模型上下文。
+        ValueError 的字符串内容（如 'TOOL_OUTPUT_INVALID'）原样映射到 error_code；
+        非 ValueError 给出 'TOOL_UNKNOWN' 兜底。``retryable`` 默认 False，调用方
+        按受控码自行决定是否覆盖，避免在助手内臆造重试策略。
+        """
+        if isinstance(exc, ValueError) and str(exc):
+            error_code = str(exc)
+        else:
+            error_code = "TOOL_UNKNOWN"
+        return ToolError(
+            error_code=error_code,
+            error_type=type(exc).__name__,
+            retryable=False,
+            safe_message="工具调用失败，详情见审计日志",
+            details_visible_to_model=False,
+        )
+
     def get_snapshot(
         self,
         connector_id: str,
@@ -304,7 +328,12 @@ class ToolGateway:
                 self._audit_rejection(run_id, CONNECTOR_DISABLED)
             raise ValueError("BUSINESS_CONNECTOR_UNAVAILABLE")
         connector_origin = self._connector_origins[connector_id]
-        content = httpx.Request("POST", "http://tool.local", json={"input": input_data}).content
+        # R3：构造冻结 ToolRequest 形状后序列化请求体，确保含 input 与 context 两个字段。
+        # context 字段当前无冻结语义（契约冻结记录与 tools.py 均未规定其内容），
+        # 置空是最保守不臆造做法；未来冻结后由调用方填充。本地 handler 只读 input，
+        # 加 context={} 向后兼容。序列化结果仍为 {"input":..., "context":{}}。
+        tool_request = ToolRequest(input=input_data, context={})
+        content = httpx.Request("POST", "http://tool.local", json=tool_request.model_dump()).content
         timestamp = str(int(time.time()))
         headers = {"X-Agent-Runtime-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret)}
         if tool_call is not None:
@@ -312,6 +341,13 @@ class ToolGateway:
             if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
                 raise ValueError("TOOL_ATTEMPT_INVALID")
             headers["X-Agent-Tool-Attempt"] = str(attempt)
+        # R3 补充：业务上下文 header 辅助业务端定位 Run/Tool，不参与 HMAC 签名原文。
+        # 签名原文仍是 METHOD\npath\ntimestamp\nbody_sha256，新 header 仅随请求发送。
+        # run_id 缺失或非字符串时不写该 header，后续授权校验会按既定路径拒绝。
+        header_run_id = input_data.get("run_id")
+        if isinstance(header_run_id, str):
+            headers["X-Agent-Run-Id"] = header_run_id
+        headers["X-Agent-Tool-Name"] = tool_name
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         attempts = 2 if retry_transport else 1
@@ -398,10 +434,41 @@ class ToolGateway:
                 connector_id,
                 response.status_code,
             )
+        # R3 补充：非 2xx 响应 body 自称 ToolError 形状时按冻结铁律 fail closed。
+        # 仅当 body 能解析为 ToolError 且显式声明 details_visible_to_model=true 时
+        # 提前抛受控错误码，阻止业务错误详情通过模型可见通道进入 AgentState/日志。
+        # 其他非 2xx 响应（FastAPI 默认 detail / 空 body 等）继续交给 raise_for_status，
+        # 保持 runner 对 409/404 的 HTTPStatusError 捕获契约不变。
+        ToolGateway._fail_closed_if_response_claims_unsafe_tool_error(response, tool_name)
         response.raise_for_status()
-        output = response.json().get("output")
-        if not isinstance(output, dict):
-            raise ValueError("TOOL_OUTPUT_INVALID")
+        # R3：响应解析升级为冻结 ToolResult，强制 schema_version 与当前协议版本对齐。
+        # ToolResult.schema_version 默认 '1.0.0'，缺失字段走默认值视为匹配；显式声明
+        # 其他版本按不匹配拒绝，避免业务端单方面升级协议绕过 Runtime 校验。
+        try:
+            tool_result = ToolResult.model_validate(response.json())
+        except ValidationError as exc:
+            logging.info("HTTP Business Tool 响应违反 ToolResult 契约 tool=%s code=%s", tool_name, "TOOL_OUTPUT_INVALID")
+            raise ValueError("TOOL_OUTPUT_INVALID") from exc
+        if tool_result.schema_version != "1.0.0":
+            logging.info(
+                "HTTP Business Tool 响应 schema_version 不匹配 tool=%s expected=1.0.0 got=%s",
+                tool_name,
+                tool_result.schema_version,
+            )
+            raise ValueError("TOOL_OUTPUT_SCHEMA_VERSION_INVALID")
+        output = tool_result.output
+        # R3 补充：Snapshot 形态的 output 自带内层 schema_version 字段，与外层信封独立。
+        # 业务端 MemorySnapshotService 序列化时写入该字段，Runtime 必须独立校验，
+        # 防止单方升级内层 schema 但外层信封仍伪装成 1.0.0。
+        # 字段缺失（如 publish 结果）不触发该校验，保持各工具自有 output 形状。
+        inner_version = output.get("schema_version")
+        if isinstance(inner_version, str) and inner_version != "1.0.0":
+            logging.info(
+                "HTTP Business Tool 输出内层 schema_version 不匹配 tool=%s expected=1.0.0 got=%s",
+                tool_name,
+                inner_version,
+            )
+            raise ValueError("TOOL_OUTPUT_SCHEMA_VERSION_INVALID")
         logging.info("HTTP Business Tool 成功 tool=%s connector=%s", tool_name, connector_id)
         self._validate_output(output)
         return output
@@ -531,6 +598,56 @@ class ToolGateway:
             "run_id": run_id,
             "generation_epoch": generation_epoch,
         }
+
+    @staticmethod
+    def _fail_closed_if_response_claims_unsafe_tool_error(
+        response: httpx.Response, tool_name: str
+    ) -> None:
+        """非 2xx 响应若 body 自称 ToolError 且违反冻结铁律，一律 fail closed。
+
+        R3 补充（运行手册 L558）：仅当 body 能完整解析为 ToolError 形状时介入；
+        介入条件目前只覆盖契约明确禁止的 ``details_visible_to_model=True``——这是
+        冻结合约里唯一的硬性不安全声明，必须无条件拒绝，防止业务错误详情灌入
+        模型上下文。
+
+        ponytail: 跳过 coordinator 提到的「未知 error_code」「HTTP 状态码 vs
+        (error_code+retryable) 语义矛盾」两类检查——目前仓库没有冻结的
+        error_code 枚举或状态码↔可重试映射表，引入即臆造策略。等 R4+ 冻结枚举
+        与映射表后再扩展本方法，已在 VERIFICATION.md 风险项登记。
+
+        body 不构成 ToolError（如 FastAPI 默认 ``{"detail": ...}``、空 body）时
+        不介入，让 ``raise_for_status`` 按 409/404 现有契约传播 HTTPStatusError。
+        """
+        if not response.is_error:
+            return
+        try:
+            parsed = response.json()
+        except ValueError:
+            return
+        if not isinstance(parsed, dict):
+            return
+        # 仅在 body 自称 ToolError（含全部 4 个必填字段）时介入；非 ToolError 形状
+        # 由 raise_for_status 按状态码处理，保留 runner 既有捕获契约。
+        required_keys = {"error_code", "error_type", "retryable", "safe_message"}
+        if not required_keys.issubset(parsed):
+            return
+        try:
+            candidate = ToolError.model_validate(parsed)
+        except ValidationError:
+            # 自称 ToolError 但 shape 不合法，按受控码拒绝，不透传 body 内容。
+            logging.info(
+                "HTTP Business Tool 非 2xx 响应自称 ToolError 但 shape 非法 tool=%s code=%s",
+                tool_name,
+                "TOOL_ERROR_SHAPE_INVALID",
+            )
+            raise ValueError("TOOL_ERROR_SHAPE_INVALID") from None
+        if candidate.details_visible_to_model:
+            logging.info(
+                "HTTP Business Tool 非 2xx 响应非法声明 details_visible_to_model=True tool=%s code=%s",
+                tool_name,
+                "TOOL_ERROR_SHAPE_INVALID",
+            )
+            raise ValueError("TOOL_ERROR_SHAPE_INVALID")
 
     @staticmethod
     def _validate_output(output: dict[str, Any]) -> None:

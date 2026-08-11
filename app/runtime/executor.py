@@ -38,6 +38,33 @@ class RetryableWorkflowNodeError(RuntimeError):
     """节点明确声明的瞬时失败；Executor 才可按冻结额度重新执行该节点。"""
 
 
+# R2 checkpoint 白名单：只允许写入恢复路由所必需的元数据。
+# snapshot/sanitized_material/scenes/actions/playback_document/publish_result/
+# media_tasks/safety_report/stats/highlights/chapter_plan/run_input/trust_metadata/
+# errors 均含正文或可重算的中间内容，绝不进加密 checkpoint。
+_SAFE_CHECKPOINT_KEYS = frozenset(
+    {"completed_steps", "completed_node_ids", "fallback_flags", "resume_from_node_id"}
+)
+
+
+def _safe_checkpoint_state(state: AgentState, completed_steps: int) -> dict[str, object]:
+    """构造恢复路由所需的最小 checkpoint 视图，剔除一切正文与中间内容。
+
+    - ``completed_steps`` / ``completed_node_ids`` / ``fallback_flags``：路由与
+      进度，恢复时由 Executor 直接读取。
+    - 副作用重放控制由 Runner 通过 query-after-commit（audit + logical_key）
+      独立完成；checkpoint 不再保存 ``publish_result`` 等业务字段，避免密文
+      被解密后泄漏作品或发布结果正文。
+    - 即便 Fernet 密钥被泄漏，五类素材正文、Scene、PlaybackDocument 也不在
+      解密结果中（规格 L550 新增断言由此保证）。
+    """
+    return {
+        "completed_steps": completed_steps,
+        "completed_node_ids": list(state.completed_node_ids),
+        "fallback_flags": list(state.fallback_flags),
+    }
+
+
 class WorkflowExecutor:
     """按已落库静态计划执行节点，并在每个成功节点后写安全 checkpoint。"""
 
@@ -191,13 +218,16 @@ class WorkflowExecutor:
         if state_data is None:
             state = AgentState(run_input=run.input_json, completed_node_ids=sorted(completed_node_ids))
         else:
-            state = AgentState.model_validate(
-                {
-                    key: value
-                    for key, value in state_data.items()
-                    if key not in {"completed_steps", "resume_from_node_id"}
-                }
-            )
+            # R2 白名单过滤：即便解密出旧版完整 checkpoint，也只接受恢复路由所需
+            # 字段。snapshot/sanitized_material/scenes/playback_document 等正文
+            # 一律丢弃，旧 checkpoint 必须通过 purge 路径清理，不能作为新版恢复输入。
+            safe_payload = {
+                key: value
+                for key, value in state_data.items()
+                if key in _SAFE_CHECKPOINT_KEYS
+                and key not in {"completed_steps", "resume_from_node_id"}
+            }
+            state = AgentState.model_validate(safe_payload)
             state.completed_node_ids = sorted(completed_node_ids)
         skipping = resume_from_node_id is not None
         partial_optional_failure = False
@@ -348,10 +378,10 @@ class WorkflowExecutor:
             already_recorded_ms = max(0, run.active_elapsed_ms - node_active_elapsed_before)
             run.active_elapsed_ms += max(0, node_elapsed_ms - already_recorded_ms)
             active_started_at = monotonic()
-            checkpoint_state = {
-                "completed_steps": completed_steps,
-                **state.model_dump(mode="json"),
-            }
+            # R2 隐私铁律：checkpoint 只允许保存路由/fallback/进度元数据，
+            # snapshot/sanitized_material/scenes/playback_document 等正文即便加密
+            # 也不进密文 blob。旧的全量 model_dump 在迁移期由 purge 路径清除。
+            checkpoint_state = _safe_checkpoint_state(state, completed_steps)
             if node_result.get("waiting_human") is True:
                 fallback_node_id = plan.fallback_policy_json.get(
                     "waiting_human_fallback_node"

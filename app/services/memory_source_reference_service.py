@@ -30,7 +30,7 @@ class MemorySourceReferenceService:
         self, source_type: str, source_id: int | str,
     ) -> list[PublishedSourceReference]:
         """仅返回未删除 archive 的当前发布指针，忽略宽限期旧 revision。"""
-        if source_type not in {"diary", "bet"} or isinstance(source_id, bool):
+        if source_type not in {"diary", "completed_bet"} or isinstance(source_id, bool):
             raise ValueError("MEMORY_SOURCE_REF_INVALID")
         normalized_id = str(source_id)
         if not normalized_id:

@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -63,9 +64,11 @@ def test_snapshot_envelope_is_consumed_without_copying_control_fields():
     runner.run_node({"node_id": "sanitize_materials"}, run, state)
 
     assert state.stats == {"diary_count": 1, "bet_count": 1, "has_material": True}
+    # R2 后 legacy bet_items 经 legacy reader 单向归一化为 completed_bet 前缀，
+    # 不再向 sanitized_material / 下游 allowlist 回写 bet: 形状。
     assert [item["source_ref"] for item in state.sanitized_material["materials"]] == [
         "diary:d1",
-        "bet:b1",
+        "completed_bet:b1",
     ]
     assert "snapshot-name" not in str(state.sanitized_material)
 
@@ -141,11 +144,11 @@ def test_extract_highlights_uses_stable_source_ids_without_copying_content():
         sanitized_material={"materials": [
             {"source_ref": "diary:d-1", "type": "diary", "sensitive": False, "summary": "摘要"},
             {"source_ref": "diary:d-2", "type": "diary", "sensitive": False, "summary": "摘要"},
-            {"source_ref": "bet:b-1", "type": "bet", "sensitive": False, "summary": "摘要"},
+            {"source_ref": "completed_bet:b-1", "type": "completed_bet", "sensitive": False, "summary": "摘要"},
         ]},
     )
     assert runner.run_node({"node_id": "extract_highlights"}, run, state) == {"node_id": "extract_highlights", "fallback": True}
-    assert state.highlights == {"source_refs": ["diary:d-1", "diary:d-2", "bet:b-1"], "mode": "template"}
+    assert state.highlights == {"source_refs": ["diary:d-1", "diary:d-2", "completed_bet:b-1"], "mode": "template"}
     assert "私密正文" not in str(state.highlights)
 
 
@@ -168,14 +171,14 @@ def test_template_chapters_scenes_and_actions_form_playable_fallback():
     run = type("Run", (), {"run_id": "r"})()
     state = AgentState(
         stats={"diary_count": 2, "bet_count": 1, "has_material": True},
-        highlights={"source_refs": ["diary:d-1", "bet:b-1"], "mode": "template"},
+        highlights={"source_refs": ["diary:d-1", "completed_bet:b-1"], "mode": "template"},
     )
     assert runner.run_node({"node_id": "plan_chapters"}, run, state) == {"node_id": "plan_chapters", "fallback": True}
     assert runner.run_node({"node_id": "generate_scenes"}, run, state) == {"node_id": "generate_scenes", "fallback": True}
     assert runner.run_node({"node_id": "generate_actions"}, run, state) == {"node_id": "generate_actions", "fallback": True}
-    assert state.chapter_plan == {"chapters": [{"chapter_id": "chapter-1", "source_refs": ["diary:d-1", "bet:b-1"], "kind": "memory_overview"}]}
+    assert state.chapter_plan == {"chapters": [{"chapter_id": "chapter-1", "source_refs": ["diary:d-1", "completed_bet:b-1"], "kind": "memory_overview"}]}
     assert state.scenes == [
-        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "bet:b-1"]},
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "completed_bet:b-1"]},
         {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
         {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
     ]
@@ -244,3 +247,78 @@ def test_safety_review_replaces_forbidden_emotional_wording_without_logging_body
 
     assert state.safety_report == {"decision": "fallback", "reason": "INVALID_PLAYBACK_STRUCTURE"}
     assert "都怪你" not in caplog.text  # type: ignore[attr-defined]
+
+
+def test_sanitize_materials_fails_closed_when_legacy_and_canonical_bet_envelope_coexist() -> None:
+    """新旧 bet envelope 字段同时出现时 sanitize_materials 必须 fail closed。
+
+    R2 legacy reader：bet_items/bets 与 completed_bet_items/completed_bets 同现
+    会双计数并污染 allowlist；Runner 在 sanitize_materials 入口直接拒绝，
+    Executor 把 LegacyEnvelopeError 转为 WORKFLOW_NODE_FAILED，不进入 checkpoint。
+    """
+    from app.runtime.material_schema import LegacyEnvelopeError
+
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "bet_items": [{"id": "b1", "content": "safe fixture"}],
+            "completed_bet_items": [{"id": "b1", "content": "safe fixture"}],
+        }
+    )
+
+    with pytest.raises(LegacyEnvelopeError, match="LEGACY_ENVELOPE_MIXED_WITH_CANONICAL"):
+        runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+
+def test_sanitize_materials_emits_completed_bet_for_legacy_envelope_only() -> None:
+    """只有 legacy bet_items/bets 时正常归一化为 completed_bet 前缀。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "diary_items": [{"id": "d1", "content": "safe fixture"}],
+            "bets": [{"id": "b-legacy", "content": "safe fixture"}],
+        }
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    refs = [item["source_ref"] for item in state.sanitized_material["materials"]]
+    assert refs == ["diary:d1", "completed_bet:b-legacy"]
+    # 旧 bet: 前缀绝不进入 sanitized_material / 下游 allowlist。
+    assert all(not ref.startswith("bet:") for ref in refs)
+
+
+def test_sanitize_materials_recognizes_all_five_canonical_material_types() -> None:
+    """handbook_note/matured_wish/bucket_list_completion 三类只产出稳定 source_ref。
+
+    正文不进入 sanitized_material（sensitive=True 占位），allowlist/Scene 仍可引用。
+    """
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "diary_items": [{"id": "d1", "content": "safe"}],
+            "completed_bet_items": [{"id": "b1", "content": "safe"}],
+            "handbook_notes": [{"id": "h1", "content": "handbook-private"}],
+            "matured_wishes": [{"id": "w1", "content": "wish-private"}],
+            "bucket_list_completions": [{"id": "c1", "content": "checklist-private"}],
+        }
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    refs = [item["source_ref"] for item in state.sanitized_material["materials"]]
+    assert set(refs) == {
+        "diary:d1",
+        "completed_bet:b1",
+        "handbook_note:h1",
+        "matured_wish:w1",
+        "bucket_list_completion:c1",
+    }
+    serialized = str(state.sanitized_material)
+    # 后三类正文不进入 sanitized 视图。
+    assert "handbook-private" not in serialized
+    assert "wish-private" not in serialized
+    assert "checklist-private" not in serialized

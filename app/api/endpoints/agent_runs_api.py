@@ -176,8 +176,10 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
 async def start_run(
     run_id: str, body: StartAgentRunRequest, request: Request
 ) -> RunSummary:
-    caller, _, body = await _caller(request, write=True)
-    existing = _existing_write(request, caller, "start", body)
+    # raw_body 是验签用的原始 bytes；body 是 FastAPI 解析好的 Pydantic 模型，
+    # 二者不能同名，否则下面 body.expected_status_version 会访问 bytes 属性而崩溃。
+    caller, _, raw_body = await _caller(request, write=True)
+    existing = _existing_write(request, caller, "start", raw_body)
     if existing:
         return RunSummary.model_validate(existing)
     session = request.app.state.session_factory()
@@ -196,7 +198,7 @@ async def start_run(
         )
         IdempotencyService(session).store(
             caller, "start", request.headers["Idempotency-Key"],
-            request_hash(request.method, request.url.path, body),
+            request_hash(request.method, request.url.path, raw_body),
             result.model_dump(mode="json"), result.run_id,
         )
         session.commit()
@@ -242,8 +244,9 @@ async def get_run_steps(run_id: str, request: Request) -> list[StepSummary]:
 async def cancel_run(
     run_id: str, body: CancelAgentRunRequest, request: Request
 ) -> RunSummary:
-    caller, _, body = await _caller(request, write=True)
-    existing = _existing_write(request, caller, "cancel", body)
+    # raw_body 是验签用的原始 bytes；body 是 Pydantic 模型，二者不能同名。
+    caller, _, raw_body = await _caller(request, write=True)
+    existing = _existing_write(request, caller, "cancel", raw_body)
     if existing:
         return RunSummary.model_validate(existing)
     session = request.app.state.session_factory()
@@ -251,7 +254,7 @@ async def cancel_run(
         result = AgentRunService(session).cancel(run_id, caller, body.reason_code)
         IdempotencyService(session).store(
             caller, "cancel", request.headers["Idempotency-Key"],
-            request_hash(request.method, request.url.path, body),
+            request_hash(request.method, request.url.path, raw_body),
             result.model_dump(mode="json"), result.run_id,
         )
         session.commit()
@@ -264,8 +267,9 @@ async def cancel_run(
 async def retry_run(
     run_id: str, body: RetryAgentRunRequest, request: Request
 ) -> RunSummary:
-    caller, _, body = await _caller(request, write=True)
-    existing = _existing_write(request, caller, "retry", body)
+    # raw_body 是验签用的原始 bytes；body 是 Pydantic 模型，二者不能同名。
+    caller, _, raw_body = await _caller(request, write=True)
+    existing = _existing_write(request, caller, "retry", raw_body)
     if existing:
         return RunSummary.model_validate(existing)
     session = request.app.state.session_factory()
@@ -287,7 +291,7 @@ async def retry_run(
         )
         IdempotencyService(session).store(
             caller, "retry", request.headers["Idempotency-Key"],
-            request_hash(request.method, request.url.path, body),
+            request_hash(request.method, request.url.path, raw_body),
             result.model_dump(mode="json"), result.run_id,
         )
         session.commit()
@@ -330,8 +334,10 @@ async def approve_run(
 async def purge_run(
     run_id: str, body: PurgePrivateDataRequest, request: Request
 ) -> RunDetail:
-    caller, _, body = await _caller(request, write=True)
-    existing = _existing_write(request, caller, "purge", body)
+    # raw_body 是验签用的原始 bytes；body 是 Pydantic 模型，二者不能同名。
+    # 否则下面 body.reason_code 会访问 bytes 属性而崩溃（B8 孤儿补偿依赖 purge）。
+    caller, _, raw_body = await _caller(request, write=True)
+    existing = _existing_write(request, caller, "purge", raw_body)
     if existing:
         return RunDetail.model_validate(existing)
     session = request.app.state.session_factory()
@@ -339,7 +345,7 @@ async def purge_run(
         result = AgentRunService(session).purge(run_id, caller, body.reason_code)
         IdempotencyService(session).store(
             caller, "purge", request.headers["Idempotency-Key"],
-            request_hash(request.method, request.url.path, body),
+            request_hash(request.method, request.url.path, raw_body),
             result.model_dump(mode="json"), result.run_id, ttl_days=3650,
         )
         session.commit()

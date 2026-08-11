@@ -90,6 +90,50 @@ class SnapshotNodeRunner(DeterministicNodeRunner):
         return {"node_id": node["node_id"], "snapshot_loaded": True}
 
 
+class SensitiveStateNodeRunner(DeterministicNodeRunner):
+    """R2 哨兵 runner：在每个节点塞入五类正文 + Scene + PlaybackDocument + tool payload。
+
+    用来证明 checkpoint 即便加密也不含以下正文（L550 新增断言）：
+    - 五类素材正文（日记/赌局/手账/愿望/清单）
+    - Scene / PlaybackDocument / 模型中间文本 / sanitized_material / publish_result
+    """
+
+    SENTINELS = (
+        "diary-private-marker",
+        "completed_bet-private-marker",
+        "handbook_note-private-marker",
+        "matured_wish-private-marker",
+        "bucket_list_completion-private-marker",
+        "scene-private-marker",
+        "playback-private-marker",
+        "tool-payload-private-marker",
+    )
+
+    def run_node(
+        self, node: dict[str, object], run: AgentRun, state: AgentState
+    ) -> dict[str, object]:
+        # 把所有可能的私密字段都塞进 state；R2 checkpoint 白名单必须全部剔除。
+        state.snapshot = {
+            "diaries": [{"id": "d1", "content": "diary-private-marker"}],
+            "bet_items": [{"id": "b1", "content": "completed_bet-private-marker"}],
+            "handbook_notes": [{"id": "h1", "content": "handbook_note-private-marker"}],
+            "matured_wishes": [{"id": "w1", "content": "matured_wish-private-marker"}],
+            "bucket_list_completions": [{"id": "c1", "content": "bucket_list_completion-private-marker"}],
+        }
+        state.sanitized_material = {"materials": [{"source_ref": "diary:d1", "summary": "diary-private-marker"}]}
+        state.scenes = [{"scene_id": "scene-1", "scene_type": "summary", "source_refs": [], "body": "scene-private-marker"}]
+        state.actions = [{"action_id": "a", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 1000}]
+        state.chapter_plan = {"chapters": [{"chapter_id": "c", "source_refs": [], "kind": "memory_overview"}]}
+        state.highlights = {"source_refs": [], "mode": "template"}
+        state.playback_document = {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": [], "private": "playback-private-marker"}
+        state.publish_result = {"revision": 1, "content_digest": "tool-payload-private-marker"}
+        state.safety_report = {"decision": "passed"}
+        state.media_tasks = []
+        state.trust_metadata = {"hint": "tool-payload-private-marker"}
+        state.errors.append("tool-payload-private-marker")
+        return {"node_id": node["node_id"], "result": "ok"}
+
+
 def _executor(session, node_runner: DeterministicNodeRunner) -> WorkflowExecutor:
     """为每个测试注入独立密钥，避免依赖环境中的生产私钥。"""
     return WorkflowExecutor(
@@ -580,6 +624,7 @@ def test_agent_state_checkpoint_summary_never_contains_private_run_input() -> No
 
 
 def test_executor_encrypts_node_state_without_leaking_snapshot_to_artifact() -> None:
+    """R2：checkpoint 即便加密也只存恢复路由元数据；snapshot/正文永不进密文 blob。"""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
@@ -591,7 +636,14 @@ def test_executor_encrypts_node_state_without_leaking_snapshot_to_artifact() -> 
     cipher = FernetCheckpointCipher.generate()
     store = CheckpointStore(session, cipher)
     assert WorkflowExecutor(session, SnapshotNodeRunner(), store, ArtifactStore(session)).run("snapshot-run", context).status == "succeeded"
-    assert store.load_latest("snapshot-run", context)["snapshot"] == {"diaries": [{"content": "私密正文"}]}
+    # 解密后的 checkpoint 不得包含 snapshot 字段或正文哨兵；旧的全量持久化已撤销。
+    decrypted = store.load_latest("snapshot-run", context)
+    assert "snapshot" not in decrypted
+    assert "sanitized_material" not in decrypted
+    assert "scenes" not in decrypted
+    assert "playback_document" not in decrypted
+    assert "私密正文" not in str(decrypted)
+    assert decrypted["completed_node_ids"] == ["load_snapshot"]
     assert "私密正文" not in str(session.scalar(select(AgentArtifact)).summary_json)
 
 
@@ -812,3 +864,98 @@ def test_executor_draining_after_checkpoint_does_not_start_next_node() -> None:
     assert checkpoint is not None
     assert checkpoint.state_summary["completed_node_ids"] == ["load_snapshot"]
     assert len(session.scalars(select(AgentArtifact)).all()) == 1
+
+
+def test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_and_playback() -> None:
+    """R2 L550 新增断言：解密 checkpoint 也不含五类正文 + Scene + PlaybackDocument。
+
+    即便 Fernet 密钥被泄漏，攻击者从密文里也只能拿到 completed_node_ids /
+    fallback_flags / completed_steps 三类恢复路由元数据。旧的 ``**state.model_dump()``
+    全量持久化路径已被白名单取代。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(run_id="sentinel-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    session.add(AgentPlan(plan_id="sentinel-plan", run_id="sentinel-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
+    session.commit()
+    context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    runner = SensitiveStateNodeRunner()
+
+    result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).run("sentinel-run", context)
+
+    assert result.status == "succeeded"
+    checkpoints = session.scalars(select(AgentCheckpoint).where(AgentCheckpoint.run_id == "sentinel-run")).all()
+    assert len(checkpoints) == 2
+    for checkpoint in checkpoints:
+        # 解密 checkpoint 不含五类正文 + Scene + PlaybackDocument + tool payload。
+        decrypted = cipher.decrypt(checkpoint.encrypted_state_blob)
+        decrypted_text = str(decrypted)
+        for sentinel in SensitiveStateNodeRunner.SENTINELS:
+            assert sentinel not in decrypted_text, f"checkpoint 泄漏哨兵 {sentinel}: {decrypted}"
+        # 白名单字段必须仍在：恢复路由不能因为脱敏被破坏。
+        assert set(decrypted.keys()) <= {"completed_steps", "completed_node_ids", "fallback_flags", "resume_from_node_id"}
+        assert "snapshot" not in decrypted
+        assert "sanitized_material" not in decrypted
+        assert "scenes" not in decrypted
+        assert "playback_document" not in decrypted
+        assert "publish_result" not in decrypted
+        assert "chapter_plan" not in decrypted
+        assert "highlights" not in decrypted
+        assert "stats" not in decrypted
+        assert "safety_report" not in decrypted
+        assert "media_tasks" not in decrypted
+        assert "trust_metadata" not in decrypted
+        assert "errors" not in decrypted
+        assert "run_input" not in decrypted
+    # 同样校验公共 summary 列；审计摘要早已剔除正文，本次回归继续守护。
+    for checkpoint in checkpoints:
+        summary_text = str(checkpoint.state_summary)
+        for sentinel in SensitiveStateNodeRunner.SENTINELS:
+            assert sentinel not in summary_text
+
+
+def test_executor_resume_strips_legacy_full_state_checkpoint_to_safe_metadata() -> None:
+    """旧完整 checkpoint 解密出全量字段时，resume 只接受白名单；其余字段直接丢弃。
+
+    规格要求：旧完整状态 checkpoint 在迁移时撤销并 purge，不作为新版恢复输入。
+    本测试模拟迁移未完成时仍在 DB 中的旧 checkpoint；resume 不能因解密成功就把
+    私密字段塞回内存 AgentState，必须按白名单过滤后再继续执行。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(run_id="legacy-resume-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=2, lease_owner="worker-b", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    session.add(AgentPlan(plan_id="legacy-resume-plan", run_id="legacy-resume-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
+    session.commit()
+    context = LeaseContext(execution_attempt=2, lease_owner="worker-b", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    # 手工塞入旧版完整 checkpoint：snapshot/sanitized_material/scenes/playback_document
+    # 同时存在。resume 必须只取 completed_node_ids/fallback_flags，并把私密字段挡在
+    # 内存 AgentState 之外。
+    store.save(
+        "legacy-resume-run", "attempt:1:step:1",
+        {
+            "completed_node_ids": ["load_snapshot"],
+            "fallback_flags": [],
+            "snapshot": {"diaries": [{"content": "legacy-private-marker"}]},
+            "sanitized_material": {"materials": [{"summary": "legacy-private-marker"}]},
+            "scenes": [{"body": "legacy-private-marker"}],
+            "playback_document": {"private": "legacy-private-marker"},
+            "run_input": {"legacy": "legacy-private-marker"},
+        },
+        context,
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume("legacy-resume-run", context)
+
+    assert result.status == "succeeded"
+    # 只重跑未完成节点（resume 路由未被旧字段污染）。
+    assert runner.node_ids == ["compute_stats"]

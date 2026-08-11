@@ -184,7 +184,9 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
     )
     allowed_refs = {
         *(f"diary:{source_id}" for source_id in source_manifest["diary_ids"]),
-        *(f"bet:{source_id}" for source_id in source_manifest["bet_ids"]),
+        # R2 后 Runtime 经 legacy reader 单向归一化为 completed_bet 前缀；
+        # e2e allowed_refs 与发布端 memory_archive_service 校验同步使用规范前缀。
+        *(f"completed_bet:{source_id}" for source_id in source_manifest["bet_ids"]),
     }
     # 发布的引用只能来自当前冻结 manifest，Document 不保存 fixture 的素材正文。
     assert all(set(scene.source_refs_json) <= allowed_refs for scene in published.scenes)

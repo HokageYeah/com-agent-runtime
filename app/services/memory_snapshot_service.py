@@ -139,7 +139,12 @@ class MemorySnapshotService:
     def validate_document_references(
         document: object, snapshot: MemorySnapshot,
     ) -> None:
-        """发布前仅允许引用冻结 manifest 中的素材；MVP 暂不接受媒体资产。"""
+        """发布前仅允许引用冻结 manifest 中的素材；MVP 暂不接受媒体资产。
+
+        R2 后回忆录文档使用规范前缀 ``diary:`` / ``completed_bet:``；manifest
+        字段名 ``bet_ids`` 保持稳定，反查时按规范前缀 ``completed_bet`` 与
+        Runtime 输出对齐。
+        """
         if not isinstance(document, dict):
             raise ValueError("MEMORY_DOCUMENT_INVALID")
         manifest = snapshot.source_manifest_json
@@ -147,7 +152,7 @@ class MemorySnapshotService:
             raise ValueError("MEMORY_SNAPSHOT_MANIFEST_INVALID")
         allowed_refs = {
             f"{prefix}:{item_id}"
-            for key, prefix in (("diary_ids", "diary"), ("bet_ids", "bet"))
+            for key, prefix in (("diary_ids", "diary"), ("bet_ids", "completed_bet"))
             for item_id in (manifest.get(key, []) if isinstance(manifest.get(key, []), list) else [])
             if isinstance(item_id, (str, int)) and not isinstance(item_id, bool)
         }

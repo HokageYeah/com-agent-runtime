@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -269,7 +270,9 @@ def test_gateway_publishes_complete_document_with_run_snapshot_and_epoch() -> No
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("memory.publish_playback_document")
         assert request.headers["X-Agent-Tool-Attempt"] == "7"
-        assert json.loads(request.content) == {"input": {"archive_id": "a", "run_id": "r", "snapshot_id": "s", "generation_epoch": 2, "document": {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}}}
+        # R3：请求体升级为冻结 ToolRequest 形状后必须同时包含 input 与 context 字段；
+        # context 当前无冻结语义，置空，业务端 handler 仍只读 input 即向后兼容。
+        assert json.loads(request.content) == {"input": {"archive_id": "a", "run_id": "r", "snapshot_id": "s", "generation_epoch": 2, "document": {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}}, "context": {}}
         return httpx.Response(200, json={"output": {"revision": 3, "content_digest": "digest"}})
     gateway = ToolGateway({"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")}, httpx.Client(transport=httpx.MockTransport(handler)))
     audit = AgentToolCall(tool_call_id="call-7", run_id="r", tool_attempt=7, side_effect=True)
@@ -513,7 +516,8 @@ def test_generic_call_only_accepts_fixed_manifest_and_trusted_context() -> None:
     """通用入口只能从可信运行上下文取引用，不能由 Package 改写 connector 或路径。"""
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("memory.get_snapshot")
-        assert json.loads(request.content) == {"input": {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2}}
+        # R3：请求体升级为冻结 ToolRequest 形状，新增空 context 字段。
+        assert json.loads(request.content) == {"input": {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2}, "context": {}}
         return httpx.Response(200, json={"output": {"snapshot_digest": "safe-digest"}})
 
     gateway = ToolGateway({"couple_diary_backend": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")}, httpx.Client(transport=httpx.MockTransport(handler)))
@@ -578,3 +582,271 @@ def test_disabled_tts_contract_is_rejected_before_network() -> None:
             },
             idempotency_key="stable-key",
         )
+
+
+# ---------------------------------------------------------------------------
+# R3：ToolRequest/ToolResult/ToolError 契约升级测试
+# ---------------------------------------------------------------------------
+
+
+def _make_default_gateway(handler: Callable[[httpx.Request], httpx.Response]) -> ToolGateway:
+    """构造一个最小可用的 ToolGateway，供契约升级测试复用。"""
+    return ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_request_body_carries_frozen_tool_request_shape_with_empty_context() -> None:
+    """R3：请求体必须升级为冻结 ToolRequest 形状，含 input 与 context 两个字段。
+
+    context 当前无冻结语义，统一置空；后续冻结语义后再扩展，禁止业务端猜测字段。
+    """
+    captured_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.update(json.loads(request.content))
+        return httpx.Response(200, json={"output": {"snapshot_digest": "safe"}})
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0) == {"snapshot_digest": "safe"}
+
+    # 请求体形状必须严格是 {input, context}；context 必须存在且为空 dict。
+    assert set(captured_body) == {"input", "context"}
+    assert captured_body["context"] == {}
+    assert captured_body["input"] == {
+        "archive_id": "archive-1",
+        "snapshot_id": "snapshot-1",
+        "run_id": "run-1",
+        "generation_epoch": 0,
+    }
+
+
+def test_response_with_current_schema_version_is_accepted() -> None:
+    """R3：响应显式声明 schema_version='1.0.0' 视为匹配当前协议版本，正常返回 output。"""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"output": {"snapshot_digest": "safe"}, "schema_version": "1.0.0"},
+        )
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_snapshot("c", "a", "s", "r", 0) == {"snapshot_digest": "safe"}
+
+
+def test_response_with_unsupported_schema_version_is_rejected() -> None:
+    """R3：响应声明非 '1.0.0' 的 schema_version 必须按受控错误码拒绝，避免业务端单方升级协议。"""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"output": {"snapshot_digest": "safe"}, "schema_version": "2.0.0"},
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SCHEMA_VERSION_INVALID"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_response_with_missing_schema_version_falls_back_to_default_and_is_accepted() -> None:
+    """R3：缺失 schema_version 时走 ToolResult 默认值 '1.0.0'，视为匹配，避免过度拒绝历史业务响应。
+
+    向后兼容要点：本地 handler 历史响应已含 schema_version='1.0.0'；若未来某个新 handler
+    误删该字段，默认值兜底防止 Runtime 把合法响应误判为契约破坏。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        # 故意不返回 schema_version；ToolResult 默认 '1.0.0' 应当兜底。
+        return httpx.Response(200, json={"output": {"snapshot_digest": "safe"}})
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_snapshot("c", "a", "s", "r", 0) == {"snapshot_digest": "safe"}
+
+
+def test_to_tool_error_always_hides_details_from_model_and_maps_value_error_code() -> None:
+    """R3：ToolGateway.to_tool_error 静态助手把 ValueError 映射为冻结 ToolError。
+
+    铁律：details_visible_to_model 永远 False，避免业务错误详情污染模型上下文。
+    worker/runner 当前 catch Exception 后写受控 audit code，不直接消费 ToolError；
+    该助手是统一未来转换入口，不破坏现有异常处理契约。
+    """
+    from app.contracts.tools import ToolError
+
+    # 已知 TOOL_* 错误码必须原样映射到 ToolError.error_code。
+    exc = ValueError("TOOL_OUTPUT_INVALID")
+    tool_error = ToolGateway.to_tool_error(exc)
+    assert isinstance(tool_error, ToolError)
+    assert tool_error.error_code == "TOOL_OUTPUT_INVALID"
+    assert tool_error.error_type == "ValueError"
+    assert tool_error.retryable is False
+    assert tool_error.safe_message  # 必须有可读安全消息
+    # 铁律：业务错误详情默认绝不进入模型上下文。
+    assert tool_error.details_visible_to_model is False
+
+    # 非 ValueError 异常也必须给出受控 ToolError，不能透传类型/正文。
+    other = ToolGateway.to_tool_error(RuntimeError("unexpected boom"))
+    assert other.error_code  # 不能为空
+    assert other.details_visible_to_model is False
+
+
+def test_local_handler_shape_with_schema_version_is_backward_compatible() -> None:
+    """R3：本地 memory_tools_api 响应形状 {output, schema_version='1.0.0'} 必须仍可解析。
+
+    保护现有资产：runtime 仓内 memory_tools_api 已固定该形状，升级响应解析后必须
+    继续兼容，不应触发契约错误。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        # 与 app/api/endpoints/memory_tools_api.py 现有响应形状一致。
+        return httpx.Response(
+            200,
+            json={"output": {"revision": 9, "content_digest": "abc"}, "schema_version": "1.0.0"},
+        )
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_publish_result("c", "a", "r", "write-1") == {
+        "revision": 9,
+        "content_digest": "abc",
+    }
+
+
+# ---------------------------------------------------------------------------
+# R3 补充：业务上下文 header / 内层 schema_version / ToolError fail closed
+# ---------------------------------------------------------------------------
+
+
+def test_request_adds_business_context_headers_without_entering_signature_base() -> None:
+    """R3 补充：请求新增 X-Agent-Run-Id / X-Agent-Tool-Name 两个业务上下文 header。
+
+    这两个 header 辅助业务端定位 Run/Tool，但不参与 HMAC 签名原文；签名仍是
+    METHOD\\npath\\ntimestamp\\nbody_sha256。已有签名 header 集合保持不变。
+    """
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # httpx 大小写不敏感读取 header，按混合大小写名取值。
+        captured["run_id"] = request.headers["X-Agent-Run-Id"]
+        captured["tool_name"] = request.headers["X-Agent-Tool-Name"]
+        captured["timestamp"] = request.headers["X-Agent-Timestamp"]
+        captured["signature"] = request.headers["X-Agent-Signature"]
+        captured["body"] = request.content
+        return httpx.Response(200, json={"output": {"snapshot_digest": "safe"}})
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-ctx-9", 0) == {"snapshot_digest": "safe"}
+
+    # 业务上下文 header 必须存在并取自 runtime context / 当前 tool 名。
+    assert captured["run_id"] == "run-ctx-9"
+    assert captured["tool_name"] == "memory.get_snapshot"
+    # 签名原文不变：仍由 method/path/timestamp/body 派生，与未加新 header 时一致。
+    expected_sig = tool_signature(
+        "POST",
+        "/api/v1/internal/agent-tools/memory.get_snapshot",
+        captured["timestamp"],
+        captured["body"],
+        "secret",
+    )
+    assert captured["signature"] == expected_sig
+
+
+def test_response_output_with_inner_schema_version_equal_to_current_is_accepted() -> None:
+    """R3 补充：output 自带内层 schema_version='1.0.0' 时（如 Snapshot）必须独立校验通过。
+
+    Snapshot/Archive 由业务端序列化时自带 schema_version 字段，与外层 ToolResult 信封
+    的 schema_version 是两层不同语义，必须各自对齐当前协议版本。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                # 外层 ToolResult.schema_version
+                "schema_version": "1.0.0",
+                # 内层 output 自带 schema_version（Snapshot 形态）
+                "output": {
+                    "schema_version": "1.0.0",
+                    "source_range": {"relationship_id": "r-1"},
+                    "diary_items": [],
+                },
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    result = gateway.get_snapshot("c", "a", "s", "r", 0)
+    assert result["schema_version"] == "1.0.0"
+
+
+def test_response_output_with_inner_schema_version_mismatch_is_rejected() -> None:
+    """R3 补充：output 内层 schema_version 与当前协议不一致时必须按受控码拒绝。
+
+    防止业务端单方升级 Snapshot 内层 schema 但 Runtime 仍当 1.0.0 消费导致状态污染。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "1.0.0",
+                "output": {"schema_version": "2.0.0", "diary_items": []},
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SCHEMA_VERSION_INVALID"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_response_output_without_inner_schema_version_still_accepted() -> None:
+    """R3 补充：output 不含内层 schema_version 字段（如 publish 结果）时不触发内层校验。"""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        # publish 结果形状：revision + content_digest，不含 schema_version 字段。
+        return httpx.Response(
+            200,
+            json={"output": {"revision": 4, "content_digest": "abc"}, "schema_version": "1.0.0"},
+        )
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_publish_result("c", "a", "r", "write-1") == {"revision": 4, "content_digest": "abc"}
+
+
+def test_non_2xx_response_with_tool_error_claiming_model_visibility_fails_closed() -> None:
+    """R3 补充：非 2xx 响应 body 自称 ToolError 但声明 details_visible_to_model=true 必须 fail closed。
+
+    冻结 ToolError 铁律：details_visible_to_model 默认且必须为 False；任何反向声明都是
+    试图把业务错误详情灌入模型上下文的攻击面，一律按 TOOL_ERROR_SHAPE_INVALID 拒绝。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500,
+            json={
+                "error_code": "BUSINESS_INTERNAL",
+                "error_type": "ServerError",
+                "retryable": True,
+                "safe_message": "ok",
+                # 攻击面：试图让 Runtime 把错误详情送给模型。
+                "details_visible_to_model": True,
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_ERROR_SHAPE_INVALID"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_non_2xx_with_local_handler_default_shape_still_propagates_http_status_error() -> None:
+    """R3 补充：本地 handler 非 ToolError 形状（FastAPI 默认 detail）保持原 HTTPStatusError 流。
+
+    保护现有契约：runner 依赖 HTTPStatusError 捕获 409/404，gateway 不能把所有非 2xx
+    统统转成 ValueError；只有 body 明确违反 ToolError 铁律时才 fail closed。
+    """
+    # 形如 FastAPI HTTPException 默认响应：{"detail": "..."}，不是 ToolError 形状。
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "IDEMPOTENCY_CONFLICT"})
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        gateway.get_publish_result("c", "a", "r", "write-1")
+    assert exc_info.value.response.status_code == 409

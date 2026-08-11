@@ -18,6 +18,9 @@ from app.runtime.context_manager import ContextManager
 from app.runtime.evaluator import MemoirPlaybackEvaluator
 from app.runtime.guardrails import MemoirGuardrails
 from app.runtime.interfaces import LeaseContext
+from app.runtime.material_schema import (
+    detect_envelope_mixing,
+)
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
@@ -290,8 +293,13 @@ class MemoirNodeRunner:
         if node.get("node_id") == "compute_stats":
             # 统计只保留计数，不将任何日记/赌局正文写进后续可观测摘要。
             snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
+            # compute_stats 同样要求 envelope 不混用；与 sanitize_materials 共用 fail closed。
+            detect_envelope_mixing(snapshot)
             diaries = snapshot.get("diary_items", snapshot.get("diaries", []))
-            bets = snapshot.get("bet_items", snapshot.get("bets", []))
+            bets = snapshot.get(
+                "completed_bet_items",
+                snapshot.get("completed_bets", snapshot.get("bet_items", snapshot.get("bets", []))),
+            )
             diary_count = len(diaries) if isinstance(diaries, list) else 0
             bet_count = len(bets) if isinstance(bets, list) else 0
             state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
@@ -447,16 +455,30 @@ class MemoirNodeRunner:
 
     @staticmethod
     def _sanitize_materials(snapshot: object) -> tuple[list[dict[str, object]], int, int]:
-        """将快照转换为无正文泄漏的最小素材列表，并返回安全计数。"""
+        """将快照转换为无正文泄漏的最小素材列表，并返回安全计数。
+
+        R2 后：
+
+        - ``bet_items`` / ``bets`` 与 ``completed_bet_items`` / ``completed_bets``
+          不可同时出现，由 :func:`detect_envelope_mixing` 显式 fail closed。
+        - legacy ``bet_items`` / ``bets`` 单向归一化为 ``completed_bet:<id>`` 前缀，
+          不再向下游 allowlist/Scene/published document 回写 ``bet:`` 形状。
+        - 新增 ``handbook_note`` / ``matured_wish`` / ``bucket_list_completion``
+          三类只产出稳定 source_ref；正文不进入 Runtime 也不进入 sanitized 视图。
+        """
         if not isinstance(snapshot, Mapping):
             return [], 0, 0
+        # envelope 混用先于任何素材读取；fail closed 比产生漂移 allowlist 更安全。
+        detect_envelope_mixing(snapshot)
         materials: list[dict[str, object]] = []
         sensitive_count = invalid_count = 0
-        for fields, material_type in (
+        # diary 与 completed_bet 走完整脱敏：保留稳定引用 + 80 字摘要。
+        sanitize_slots: tuple[tuple[tuple[str, ...], str], ...] = (
             (("diary_items", "diaries"), "diary"),
-            (("bet_items", "bets"), "bet"),
-        ):
-            raw_items = snapshot.get(fields[0], snapshot.get(fields[1]))
+            (("completed_bet_items", "completed_bets", "bet_items", "bets"), "completed_bet"),
+        )
+        for fields, material_type in sanitize_slots:
+            raw_items = next((snapshot[field] for field in fields if field in snapshot), None)
             if not isinstance(raw_items, list):
                 continue
             for item in raw_items:
@@ -482,6 +504,34 @@ class MemoirNodeRunner:
                         "summary": summary,
                     }
                 )
+        # contract 五类中剩余三类当前不脱敏正文，只产出稳定 source_ref；下游
+        # allowlist / Scene 可正常引用，模型上下文不会拿到这些素材的正文。
+        ref_only_slots: tuple[tuple[tuple[str, ...], str], ...] = (
+            (("handbook_notes",), "handbook_note"),
+            (("matured_wishes",), "matured_wish"),
+            (("bucket_list_completions",), "bucket_list_completion"),
+        )
+        for fields, material_type in ref_only_slots:
+            raw_items = next((snapshot[field] for field in fields if field in snapshot), None)
+            if not isinstance(raw_items, list):
+                continue
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    invalid_count += 1
+                    continue
+                material_id = item.get("id")
+                if not isinstance(material_id, str) or not material_id:
+                    invalid_count += 1
+                    continue
+                materials.append(
+                    {
+                        "source_ref": f"{material_type}:{material_id}",
+                        "type": material_type,
+                        # 保守标 sensitive：模型不会拿到正文，发布端只看 source_ref。
+                        "sensitive": True,
+                    }
+                )
+                sensitive_count += 1
         return materials, sensitive_count, invalid_count
 
     @staticmethod

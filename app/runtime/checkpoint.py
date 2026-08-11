@@ -10,7 +10,7 @@ from typing import Any, Self
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import AgentCheckpoint, AgentRun
@@ -141,6 +141,37 @@ class CheckpointStore:
         assert run is not None
         self._append_audit("checkpoint_loaded", run, checkpoint)
         return state
+
+    def purge_for_run(self, run_id: str, context: LeaseContext) -> int:
+        """删除指定 Run 的全部 checkpoint；用于 R2 旧完整状态 checkpoint 撤销。
+
+        规格要求：旧版 ``state.model_dump()`` 完整 checkpoint 在迁移时撤销并
+        purge，不作为新版恢复输入。本方法只提供能力，**不**由 R2 自动触发真实
+        数据迁移（运行手册禁止）；运维或隐私清理 Worker 通过显式调用执行，
+        审计只记录 purge 事实与受影响条数，绝不输出密文或状态正文。
+
+        返回被删除的 checkpoint 行数；0 表示该 Run 无可清理 checkpoint。
+        """
+        run = self._require_writable_run(run_id, context)
+        existing = list(
+            self._session.scalars(
+                select(AgentCheckpoint).where(AgentCheckpoint.run_id == run_id)
+            ).all()
+        )
+        if not existing:
+            return 0
+        self._session.execute(
+            delete(AgentCheckpoint).where(AgentCheckpoint.run_id == run_id)
+        )
+        self._session.flush()
+        for checkpoint in existing:
+            self._append_audit("checkpoint_purged", run, checkpoint)
+        logging.info(
+            "已 purge checkpoint run_id=%s purged_count=%s",
+            run_id,
+            len(existing),
+        )
+        return len(existing)
 
     def _require_writable_run(self, run_id: str, context: LeaseContext) -> AgentRun:
         if not self._lease.can_write(run_id, context):
