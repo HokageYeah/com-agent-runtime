@@ -18,9 +18,14 @@ from app.models import (
     AgentRun,
     AgentStep,
     CallbackEvent,
+    RuntimeAuditRecord,
 )
 from app.runtime.artifact import ArtifactStore
-from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
+from app.runtime.checkpoint import (
+    CheckpointError,
+    CheckpointStore,
+    FernetCheckpointCipher,
+)
 from app.runtime.executor import RetryableWorkflowNodeError, WorkflowExecutor
 from app.runtime.interfaces import LeaseContext
 from app.runtime.state import AgentState
@@ -329,12 +334,15 @@ def test_executor_refuses_revoked_package_before_starting_any_node() -> None:
     assert runner.node_ids == []
 
 
-def test_executor_partial_resume_reruns_all_nodes_succeeds() -> None:
-    """R2：partial 恢复时全部节点重跑；发布副作用由 runner 的 query-after-commit 保证幂等。
+def test_executor_partial_resume_only_redoes_uncompleted_optional() -> None:
+    """R2 分类恢复：通用 Agent 显式 safe_to_rerun=False，partial 只重做未完成 optional。
 
-    snapshot/内容必须重算 → load_snapshot/publish_document/enqueue_media 全部重新
-    执行。发布副作用不靠 executor 跳过保护，而由 runner 层 query-after-commit
-    （logical_key）幂等；已提交则不重发，executor 无需区分节点类型。
+    enqueue_media 是 optional 节点，首轮失败 → partial，checkpoint 只记录已完成的
+    load_snapshot/publish_document。resume 时这两者显式声明 safe_to_rerun=False
+    故跳过（不盲目重放 publish 等非幂等副作用），只重做未完成的 enqueue_media
+    （第二次成功）。保护非 memoir Agent 的非幂等副作用不被 resume 重放。
+    注：legacy plan 缺 safe_to_rerun 键已改为 fail-closed（见
+    test_executor_resume_rejects_legacy_plan_missing_safe_to_rerun），故此处必须显式 False。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -354,9 +362,12 @@ def test_executor_partial_resume_reruns_all_nodes_succeeds() -> None:
         AgentPlan(
             plan_id="partial-retry-plan", run_id=run.run_id, strategy="static_workflow",
             steps_json=[
-                {"node_id": "load_snapshot", "node_type": "tool"},
-                {"node_id": "publish_document", "node_type": "tool"},
-                {"node_id": "enqueue_media", "node_type": "tool", "optional": True},
+                # 显式 safe_to_rerun=False：legacy 缺键已改为 fail-closed（见
+                # test_executor_resume_rejects_legacy_plan_missing_safe_to_rerun），
+                # 故通用 Agent 的"默认跳过"语义必须用显式 False 表达。
+                {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": False},
+                {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": False},
+                {"node_id": "enqueue_media", "node_type": "tool", "optional": True, "safe_to_rerun": False},
             ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
         ),
     ])
@@ -386,11 +397,11 @@ def test_executor_partial_resume_reruns_all_nodes_succeeds() -> None:
     second = executor.resume(run.run_id, second_context)
 
     assert second.status == "succeeded"
-    # R2：resume 重跑全部节点；enqueue_media 第二次成功。publish_document 虽被重访，
-    # 但发布幂等由真实 runner 的 query-after-commit 保证，此通用 runner 只记录访问。
+    # R2 分类恢复：通用 Agent 显式 safe_to_rerun=False，已完成的 load_snapshot/
+    # publish_document 跳过（不重放副作用），只重做首轮失败的 enqueue_media（第二次成功）。
     assert runner.node_ids == [
         "load_snapshot", "publish_document", "enqueue_media",
-        "load_snapshot", "publish_document", "enqueue_media",
+        "enqueue_media",
     ]
 
 
@@ -424,11 +435,12 @@ class QueryAfterCommitPublishRunner(DeterministicNodeRunner):
 
 
 def test_executor_resume_publish_idempotent_via_query_after_commit() -> None:
-    """R2：resume 重访 publish_document 不双发；幂等由 runner 的 query-after-commit 保证。
+    """R2 分类恢复：memoir publish 声明 safe_to_rerun=True，resume 重访但不双发。
 
-    executor 不靠跳过 publish 节点防双发（R2 要求全部节点重跑以重算 snapshot/内容），
-    而是由 runner 用 logical_key 查询业务侧是否已提交：首轮发布 1 次，resume 后节点
-    被重访（visit==2）但 actual_publishes 仍为 1。
+    memoir 读取/发布节点声明 safe_to_rerun=True，resume 时强制重访（重算 snapshot、
+    重发判定）；executor 不靠跳过 publish 防双发，而由 runner 用 logical_key 查询
+    业务侧是否已提交：首轮发布 1 次，resume 后节点被重访（visit==2）但
+    actual_publishes 仍为 1（query-after-commit 幂等）。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -446,9 +458,9 @@ def test_executor_resume_publish_idempotent_via_query_after_commit() -> None:
     session.add(AgentPlan(
         plan_id="pub-idempotent-plan", run_id="pub-idempotent-run", strategy="static_workflow",
         steps_json=[
-            {"node_id": "load_snapshot", "node_type": "tool"},
-            {"node_id": "publish_document", "node_type": "tool"},
-            {"node_id": "compute_stats", "node_type": "deterministic"},
+            {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+            {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": True},
+            {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
         ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
     ))
     session.commit()
@@ -609,10 +621,12 @@ def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
 
 
 def test_executor_resume_reruns_all_nodes_to_recompute_content() -> None:
-    """R2：resume 强制重跑全部节点，不再按 checkpoint 的 completed_node_ids 跳过。
+    """R2 分类恢复：memoir 节点声明 safe_to_rerun=True，resume 强制重跑重算。
 
-    snapshot/内容中间状态绝不从 checkpoint 恢复：load_snapshot 必须按当前
-    授权/隐私重读，内容节点必须重算。completed_node_ids 仅作进度记录。
+    snapshot/内容中间状态绝不从 checkpoint 恢复：load_snapshot 必须按当前授权/隐私
+    重读，内容节点必须重算。memoir 节点声明 safe_to_rerun=True，故即便已在
+    completed_node_ids 中也强制重跑（非 memoir 默认 False 会跳过已完成节点，见
+    partial 场景测试）。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -633,8 +647,8 @@ def test_executor_resume_reruns_all_nodes_to_recompute_content() -> None:
         AgentPlan(
             plan_id="resume-plan", run_id="resume-run", strategy="static_workflow",
             steps_json=[
-                {"node_id": "load_snapshot", "node_type": "tool"},
-                {"node_id": "compute_stats", "node_type": "deterministic"},
+                {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+                {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
             ],
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
@@ -663,7 +677,8 @@ def test_executor_resume_reruns_all_nodes_to_recompute_content() -> None:
     )
 
     assert result.status == "succeeded"
-    # R2：resume 强制重跑全部节点（snapshot/内容必须重算），不再跳过 completed_node_ids。
+    # R2 分类恢复：memoir safe_to_rerun=True → 即便 load_snapshot 在 completed_node_ids
+    # 也强制重跑（重读 Snapshot），compute_stats 重算。
     assert runner.node_ids == ["load_snapshot", "compute_stats"]
 
 
@@ -1036,12 +1051,13 @@ def test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_
             assert sentinel not in summary_text
 
 
-def test_executor_resume_rejects_legacy_full_state_checkpoint() -> None:
-    """R2：旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）一律拒绝。
+def test_executor_resume_rejects_legacy_full_state_checkpoint_and_purges() -> None:
+    """R3：旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）拒绝并 purge。
 
-    规格要求：旧完整状态 checkpoint 必须通过 purge 路径清理，不可作为新版恢复输入。
-    接受它等于从密文复活作品正文/中间内容。resume 见到任何非白名单键即返回
-    CHECKPOINT_STATE_INVALID，不进入执行循环，不读任何字段。
+    规格要求：旧完整状态 checkpoint 必须物理删除，不可作为新版恢复输入，也不可遗留在
+    密文中等待后续误读。resume 见到任何非白名单键即返回 CHECKPOINT_STATE_INVALID，
+    并经 CheckpointStore.purge_for_run（fencing 保护）删除该 run 全部 checkpoint 行，
+    不进入执行循环，不读任何字段。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -1054,8 +1070,8 @@ def test_executor_resume_rejects_legacy_full_state_checkpoint() -> None:
     cipher = FernetCheckpointCipher.generate()
     store = CheckpointStore(session, cipher)
     # 手工塞入旧版完整 checkpoint：snapshot/sanitized_material/scenes/playback_document
-    # 同时存在。resume 必须只取 completed_node_ids/fallback_flags，并把私密字段挡在
-    # 内存 AgentState 之外。
+    # 同时存在。resume 必须拒绝恢复并 purge，把私密字段挡在内存 AgentState 之外，
+    # 并物理删除该 run 的 checkpoint 行（R3 purge 闭环）。
     store.save(
         "legacy-resume-run", "attempt:1:step:1",
         {
@@ -1074,7 +1090,456 @@ def test_executor_resume_rejects_legacy_full_state_checkpoint() -> None:
 
     result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume("legacy-resume-run", context)
 
-    # R2：旧版完整 checkpoint（含正文键）一律拒绝，必须走 purge 路径，不可作为恢复输入。
+    # R3：旧版完整 checkpoint（含正文键）一律拒绝并 purge，不可作为恢复输入，也不可遗留。
     assert result.status == "failed"
     assert result.error_code == "CHECKPOINT_STATE_INVALID"
     assert runner.node_ids == []
+    # purge 闭环：该 run 的 checkpoint 行必须被物理删除，不能留在密文中等待后续误读。
+    leftover = session.scalars(
+        select(AgentCheckpoint).where(AgentCheckpoint.run_id == "legacy-resume-run")
+    ).all()
+    assert leftover == []
+
+
+def test_executor_resume_rejects_legacy_plan_missing_safe_to_rerun() -> None:
+    """P2：legacy memoir plan（safe_to_rerun 引入前冻结）resume 时不得静默跳过已完成节点。
+
+    memoir checkpoint 不存正文，resume 必须靠 safe_to_rerun=True 重算读取/内容节点。
+    在 safe_to_rerun 引入前冻结的 legacy plan，节点缺该键；旧实现 ``node.get("safe_to_rerun")``
+    把缺键当作默认 False 静默跳过 → resume 用空 state 产出残缺文档。新实现把"缺键"与
+    "显式 False"分离：缺键无法安全判定跳过 vs 重算，一律 fail closed
+    （PLAN_LEGACY_DEFINITION）交业务侧 undo/purge 重建；显式 False（非 memoir /
+    partial 已完成 optional）仍正常跳过。Executor 不硬编码 memoir 节点名——任何缺键
+    的已完成节点都触发 fail closed，与 business_type 解耦（不引入 Playback 业务事实）。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="legacy-plan-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace", execution_attempt=2,
+        lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    ))
+    # legacy plan：节点在 safe_to_rerun 引入前冻结，缺该键（区别于显式 False）。
+    session.add(AgentPlan(
+        plan_id="legacy-plan-def", run_id="legacy-plan-run", strategy="static_workflow",
+        steps_json=[
+            {"node_id": "load_snapshot", "node_type": "tool"},
+            {"node_id": "compute_stats", "node_type": "deterministic"},
+        ],
+        stop_conditions_json={}, fallback_policy_json={}, status="planned",
+    ))
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    # 合法新版 checkpoint：仅白名单键，load_snapshot 已完成。plan 是 legacy 缺键 →
+    # resume 不得静默跳过 load_snapshot，必须在跳过判定处 fail closed。
+    store.save(
+        "legacy-plan-run", "attempt:1:step:1",
+        {"completed_node_ids": ["load_snapshot"], "fallback_flags": []},
+        context,
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume(
+        "legacy-plan-run", context
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "PLAN_LEGACY_DEFINITION"
+    # fail closed 在首个已完成缺键节点（load_snapshot）的跳过判定处立即触发，不执行任何节点。
+    assert runner.node_ids == []
+
+
+def test_resume_legacy_checkpoint_purge_persists_across_session_via_finish_chain() -> None:
+    """P3：legacy checkpoint purge 经真实 resume→finish 链路 commit，跨 Session 可见。
+
+    规格要求：purge_for_run 只 flush 不 commit（注释「调用方自行决定事务提交时机」）；
+    生产 consume()→resume()→finish() 链路里，finish() 的 session.commit() 才让 purge
+    删除与 checkpoint_purged 审计真正落库。本测试用独立 Session B 验证 purge 不是同
+    Session 的 flush 幻象：AgentCheckpoint 行物理消失、checkpoint_purged 审计持久化且
+    metadata 只含 run_id/privacy_version/content_digest_prefix，绝不含正文/密文/键名。
+    legacy purge 属 R2 checkpoint/resume 收口（与 R3 反复活旧 checkpoint 的语义无关）。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session_a = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session_a.add(AgentRun(
+        run_id="purge-commit-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace", execution_attempt=2,
+        lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    ))
+    session_a.add(AgentPlan(
+        plan_id="purge-commit-plan", run_id="purge-commit-run", strategy="static_workflow",
+        steps_json=[
+            {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+            {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
+        ],
+        stop_conditions_json={}, fallback_policy_json={}, status="planned",
+    ))
+    session_a.commit()
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session_a, cipher)
+    context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    # 旧完整状态 checkpoint：含非白名单哨兵键。resume 必须拒绝恢复并 purge。
+    store.save(
+        "purge-commit-run", "attempt:1:step:1",
+        {
+            "completed_node_ids": ["load_snapshot"],
+            "fallback_flags": [],
+            "sentinel_legacy_key": {"private": "purge-commit-marker"},
+        },
+        context,
+    )
+    session_a.commit()
+
+    runner = RecordingNodeRunner()
+    # resume 在 session_a 上 flush purge（删行 + 写审计）但不 commit；模拟生产
+    # consume() 调 finish() 才把 purge 与审计提交落库。
+    result = WorkflowExecutor(session_a, runner, store, ArtifactStore(session_a)).resume(
+        "purge-commit-run", context
+    )
+    assert result.status == "failed"
+    assert result.error_code == "CHECKPOINT_STATE_INVALID"
+    assert runner.node_ids == []
+    LeaseService(session_a).finish(result, context)
+
+    # 新 Session 验证 purge 真正跨事务落库（不是同 Session 的 flush 幻象）。
+    session_b = sessionmaker(bind=engine)()
+    leftover = session_b.scalars(
+        select(AgentCheckpoint).where(AgentCheckpoint.run_id == "purge-commit-run")
+    ).all()
+    assert leftover == []
+    purged = session_b.scalars(
+        select(RuntimeAuditRecord).where(
+            RuntimeAuditRecord.action == "checkpoint_purged",
+            RuntimeAuditRecord.resource_type == "agent_checkpoint",
+        )
+    ).all()
+    assert len(purged) >= 1
+    for audit in purged:
+        meta = audit.metadata_summary
+        # 审计只含安全定位字段，绝不携带正文/密文/键名。
+        assert set(meta) <= {"run_id", "privacy_version", "content_digest_prefix"}
+        assert meta.get("run_id") == "purge-commit-run"
+        assert "purge-commit-marker" not in str(meta)
+        assert "sentinel_legacy_key" not in str(meta)
+    # run 终态经 finish() 提交落库。
+    run_b = session_b.scalar(select(AgentRun).where(AgentRun.run_id == "purge-commit-run"))
+    assert run_b.status == "failed"
+    assert run_b.error_code == "CHECKPOINT_STATE_INVALID"
+
+
+def test_resume_legacy_checkpoint_log_privacy_success_and_failure_fails_closed(caplog) -> None:
+    """P3：legacy checkpoint resume 日志只含 run_id/extra_key_count/purged_count/稳定 code。
+
+    规格要求：不得打印 sorted(extra_keys)（键名暗示正文结构）或 purge_exc 原文（异常文本
+    可夹带库错误/密文片段）。本测试注入哨兵键名与哨兵异常文本，断言二者均不出现在日志，
+    只出现计数与稳定 code。覆盖两条 purge 路径：(1) 成功 purge 输出 purged_count；
+    (2) purge 失败仍 fail closed——返回 CHECKPOINT_STATE_INVALID、不执行任何节点。
+    """
+    import logging as _logging
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+
+    def _seed(run_id: str) -> None:
+        session.add(AgentRun(
+            run_id=run_id, agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+            authorization_version=1, caller_id="caller", tenant_id="tenant",
+            create_idempotency_key="key", callback_target_id="callback",
+            business_connector_id="connector", trace_id="trace", execution_attempt=2,
+            lease_owner="worker-b", fencing_token=2,
+            lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+        ))
+        session.add(AgentPlan(
+            plan_id=f"{run_id}-plan", run_id=run_id, strategy="static_workflow",
+            steps_json=[
+                {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+            ],
+            stop_conditions_json={}, fallback_policy_json={}, status="planned",
+        ))
+        # 哨兵键名：若日志泄漏 sorted(extra_keys)，这个词会被命中。
+        store.save(
+            run_id, "attempt:1:step:1",
+            {
+                "completed_node_ids": ["load_snapshot"],
+                "fallback_flags": [],
+                "sentinel_legacy_extra_key": {"private": "log-privacy-marker"},
+            },
+            context,
+        )
+        session.commit()
+
+    # (1) 成功 purge 路径：真实 store。
+    _seed("log-success-run")
+    runner_ok = RecordingNodeRunner()
+    with caplog.at_level(_logging.INFO):
+        result_ok = WorkflowExecutor(
+            session, runner_ok, store, ArtifactStore(session)
+        ).resume("log-success-run", context)
+    assert result_ok.status == "failed"
+    assert result_ok.error_code == "CHECKPOINT_STATE_INVALID"
+    success_text = caplog.text
+    assert "extra_key_count=" in success_text
+    assert "purged_count=" in success_text
+    assert "sentinel_legacy_extra_key" not in success_text
+    assert "log-privacy-marker" not in success_text
+
+    # (2) purge 失败路径：包装 store 让 purge 抛带哨兵文本的 CheckpointError。
+    class _PurgeFailingStore(CheckpointStore):
+        def purge_for_run(self, run_id: str, context: LeaseContext) -> int:  # noqa: A002
+            raise CheckpointError("sentinel_purge_failure_text")
+
+    caplog.clear()
+    _seed("log-fail-run")
+    failing_store = _PurgeFailingStore(session, cipher)
+    runner_fail = RecordingNodeRunner()
+    with caplog.at_level(_logging.WARNING):
+        result_fail = WorkflowExecutor(
+            session, runner_fail, failing_store, ArtifactStore(session)
+        ).resume("log-fail-run", context)
+    # purge 失败也 fail closed：不执行任何节点，返回 CHECKPOINT_STATE_INVALID。
+    assert result_fail.status == "failed"
+    assert result_fail.error_code == "CHECKPOINT_STATE_INVALID"
+    assert runner_fail.node_ids == []
+    fail_text = caplog.text
+    assert "CHECKPOINT_PURGE_FAILED" in fail_text
+    assert "extra_key_count=" in fail_text
+    assert "sentinel_purge_failure_text" not in fail_text
+    assert "sentinel_legacy_extra_key" not in fail_text
+
+
+def test_resume_anti_revival_when_authorization_version_changed() -> None:
+    """P3：授权版本变化后 resume 不得经 checkpoint 复活旧 Run。
+
+    规格要求：授权撤销/变更后，旧 lease 不得继续执行。resume 经 _execute 里
+    _authorization_changed 检测 resolver 返回的当前版本 ≠ run.authorization_version，
+    立即返回 AUTHORIZATION_CHANGED（cancelled），不进入节点循环、不读 checkpoint 正文。
+    checkpoint 合法（仅白名单键）以保证 resume 能进入 _execute 触发授权检查。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="auth-revival-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace", execution_attempt=2,
+        lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    ))
+    session.add(AgentPlan(
+        plan_id="auth-revival-plan", run_id="auth-revival-run", strategy="static_workflow",
+        steps_json=[
+            {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+            {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
+        ],
+        stop_conditions_json={}, fallback_policy_json={}, status="planned",
+    ))
+    session.commit()
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    store.save(
+        "auth-revival-run", "attempt:1:step:1",
+        {"completed_node_ids": ["load_snapshot"], "fallback_flags": []},
+        context,
+    )
+    session.commit()
+
+    runner = RecordingNodeRunner()
+    # resolver 返回 2 ≠ run.authorization_version=1 → 授权已变更，拒绝复活。
+    executor = WorkflowExecutor(
+        session, runner, store, ArtifactStore(session),
+        authorization_version_resolver=lambda run: 2,
+    )
+    result = executor.resume("auth-revival-run", context)
+
+    assert result.status == "cancelled"
+    assert result.error_code == "AUTHORIZATION_CHANGED"
+    assert runner.node_ids == []
+
+
+def test_resume_anti_revival_when_privacy_version_changed() -> None:
+    """P3：隐私版本变化后 checkpoint 不得作为恢复输入复活旧 Run。
+
+    规格要求：隐私版本变更（用户撤销素材授权）后，旧 checkpoint 不可恢复。load_latest
+    检测 checkpoint.privacy_version ≠ context.privacy_version 抛 CheckpointError，resume
+    返回 CHECKPOINT_NOT_RESUMABLE，不读 checkpoint 正文、不执行任何节点。这是隐私防复活
+    的第一道闸门（在白名单键检查之前），确保授权撤销的素材不被旧 checkpoint 复读。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="privacy-revival-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace", execution_attempt=2,
+        lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    ))
+    session.commit()
+    cipher = FernetCheckpointCipher.generate()
+    store = CheckpointStore(session, cipher)
+    save_context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    store.save(
+        "privacy-revival-run", "attempt:1:step:1",
+        {"completed_node_ids": ["load_snapshot"], "fallback_flags": []},
+        save_context,
+    )
+    session.commit()
+
+    runner = RecordingNodeRunner()
+    # resume 用 privacy_version=2（≠ checkpoint 的 1）→ load_latest 拒绝 → CHECKPOINT_NOT_RESUMABLE。
+    resume_context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=2, authorization_version=1,
+    )
+    result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume(
+        "privacy-revival-run", resume_context
+    )
+
+    assert result.status == "failed"
+    assert result.error_code == "CHECKPOINT_NOT_RESUMABLE"
+    assert runner.node_ids == []
+
+
+def test_executor_resume_real_memoir_runner_publishes_once_via_query_after_commit() -> None:
+    """R2 端到端回归：真实 MemoirNodeRunner + 真实 ToolCallAuditService + countable gateway。
+
+    完整 memoir workflow 首轮 run 发布 1 次；resume 时所有节点 safe_to_rerun=True 全部
+    重跑（重读 snapshot、重算内容、重访 publish_document），但真实 runner 经
+    audit.latest_committed + gateway.get_publish_result 对账，不重发
+    publish_playback_document。证明 executor resume 分类恢复 + 真实 query-after-commit
+    在端到端流程下发布不双发（非 QueryAfterCommitPublishRunner 的简化模拟）。
+    """
+    from pathlib import Path
+
+    from app.agents.memoir_agent.runner import MemoirNodeRunner
+    from app.services.agent_package_service import AgentPackageService
+    from app.services.tool_call_audit_service import ToolCallAuditService
+
+    # 直接加载正式 workflow.graph 声明，保证测试用的是真实节点配置（含 safe_to_rerun）。
+    memoir_steps = [
+        node.model_dump()
+        for node in AgentPackageService._load_workflow_nodes(
+            Path(__file__).resolve().parents[1]
+            / "app/agents/memoir_agent/1.0.0/workflow.graph.py"
+        )
+    ]
+    snapshot_payload = {"diary_items": [{"id": "d1", "content": "今天阳光很好"}]}
+
+    class _CountableMemoirGateway:
+        def __init__(self) -> None:
+            self.publish_calls: list[tuple[object, ...]] = []
+            self.reconciliation_calls: list[tuple[object, ...]] = []
+            self.snapshot_calls = 0
+
+        def get_snapshot(self, *args: object) -> dict[str, object]:
+            self.snapshot_calls += 1
+            return snapshot_payload
+
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            self.publish_calls.append(args)
+            return {"revision": 1, "content_digest": "published-digest"}
+
+        def get_publish_result(self, *args: object) -> dict[str, object]:
+            self.reconciliation_calls.append(args)
+            return {"revision": 1, "content_digest": "published-digest"}
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    gateway = _CountableMemoirGateway()
+    audit = ToolCallAuditService(session)
+    runner = MemoirNodeRunner(gateway, audit, model_gateway=None)
+    run = AgentRun(
+        run_id="memoir-resume-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed",
+        input_json={"archive_id": "archive", "snapshot_id": "snapshot", "generation_epoch": 0},
+        authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback",
+        business_connector_id="connector", trace_id="trace",
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    )
+    session.add(run)
+    session.add(AgentPlan(
+        plan_id="memoir-resume-plan", run_id=run.run_id, strategy="static_workflow",
+        steps_json=memoir_steps, stop_conditions_json={}, fallback_policy_json={},
+        status="planned",
+    ))
+    session.commit()
+
+    executor = _executor(session, runner)
+    first = executor.run(run.run_id, _lease_context(now))
+    assert first.status == "succeeded"
+    # 首轮：publish_playback_document 实际写 1 次；尚未触发对账。
+    assert len(gateway.publish_calls) == 1
+    assert gateway.reconciliation_calls == []
+
+    # 模拟 retry 已重新认领的新 execution attempt；checkpoint completed_node_ids 已含全部节点。
+    run.status, run.dispatch_state = "pending", "claimed"
+    run.execution_attempt, run.fencing_token = 2, 2
+    run.lease_owner = "worker-b"
+    run.lease_expires_at = now + timedelta(seconds=60)
+    session.commit()
+    second_context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    second = executor.resume(run.run_id, second_context)
+
+    assert second.status == "succeeded"
+    # R2 端到端：resume 重访 publish_document（snapshot 重读、内容重算），但真实 runner
+    # 经 latest_committed + get_publish_result 对账，不重发 publish_playback_document。
+    assert len(gateway.publish_calls) == 1
+    assert len(gateway.reconciliation_calls) == 1
+    # load_snapshot 首轮 + resume 各读一次（safe_to_rerun=True 强制重读）。
+    assert gateway.snapshot_calls == 2

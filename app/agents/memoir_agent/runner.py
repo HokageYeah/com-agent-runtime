@@ -347,10 +347,14 @@ class MemoirNodeRunner:
                 raise ValueError("MEMORY_PUBLISH_REFERENCE_INVALID")
             logical_key = f"{run.run_id}:publish_document:memory.publish_playback_document:{epoch}"
             digest = hashlib.sha256(json.dumps(state.playback_document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            # query-after-commit 的首要查询坐标是稳定 logical_key，不是本次重算 digest：
+            # resume 时模型重算 scenes 会让 playback_document 的 digest 漂移，若用漂移 digest
+            # 查询，已提交的首轮 publish 查不到 → 被迫重发 → 双发。find_publish_attempt 只按
+            # run_id + logical_key 命中首轮 running/outcome_unknown/succeeded，digest 冲突保护
+            # （同一 logical_key 被另一文档复用必须拒绝）留在 begin_publish/409 分支——
+            # "查询已提交"与"detect 冲突"两件事彻底分离，消除摘要漂移吃掉首次提交这个特殊情况。
             committed = (
-                self._audit.latest_committed(
-                    run.run_id, logical_key, logical_key, digest
-                )
+                self._audit.find_publish_attempt(run.run_id, logical_key)
                 if self._audit
                 else None
             )

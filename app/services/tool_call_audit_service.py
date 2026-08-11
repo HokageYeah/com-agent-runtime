@@ -238,6 +238,33 @@ class ToolCallAuditService:
             .order_by(AgentToolCall.id.desc())
         )
 
+    def find_publish_attempt(
+        self, run_id: str, logical_key: str
+    ) -> AgentToolCall | None:
+        """按稳定 logical_key 查 publish 已提交/结果未知的 attempt，不依赖本次文档 digest。
+
+        这是 publish query-after-commit 的**首要查询坐标**。memoir 在 resume 时模型
+        会重算 scenes，让 playback_document 的 request_digest 漂移；若查询坐标带上
+        本次 digest（见 ``latest_committed``），已提交的首轮 publish 会因 digest 不匹配
+        而查不到，被迫重发 → 双发。本方法只按 run_id + logical_key 命中
+        running/outcome_unknown/succeeded，让首轮权威提交总能被定位、对账复用。
+
+        failed attempt 不返回：首次确定失败说明业务端未提交，不阻止后续按新 digest
+        重新 begin_publish 写入。digest 冲突保护（同一 logical_key 被另一文档复用必须
+        拒绝）留在 ``_begin``/runner 的 409 分支，与"按稳定键复用首次提交"彻底分离。
+        """
+        return self._session.scalar(
+            select(AgentToolCall)
+            .where(
+                AgentToolCall.run_id == run_id,
+                AgentToolCall.logical_operation_key == logical_key,
+                AgentToolCall.status.in_(
+                    ("running", "outcome_unknown", "succeeded")
+                ),
+            )
+            .order_by(AgentToolCall.id.desc())
+        )
+
     def _persist_result(
         self,
         record: AgentToolCall,

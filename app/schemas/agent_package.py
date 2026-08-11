@@ -22,6 +22,12 @@ class WorkflowNodeDefinition(PackageSchema):
     can_wait_for_human: bool = False
     # partial 只允许由发布完成后的非关键后处理节点触发；默认始终为主链节点。
     optional: bool = False
+    # resume 分类恢复：已完成节点是否允许安全重算。True 表示该节点无副作用，或
+    # 副作用由 runner 层 query-after-commit 保证幂等（如 memoir load_snapshot/
+    # 内容节点/publish_document），resume 时强制重跑以按当前 epoch/隐私/授权重读
+    # 与重算；False（默认）表示副作用幂等性未知，resume 时已完成则跳过，只执行
+    # 未完成节点，避免对非幂等副作用盲目重放（保护非 memoir Agent）。
+    safe_to_rerun: bool = False
 
 
 class ToolManifest(PackageSchema):

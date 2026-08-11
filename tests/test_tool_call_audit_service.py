@@ -200,6 +200,33 @@ def test_latest_committed_requires_original_logical_key_idempotency_and_digest()
     ) is None
 
 
+def test_find_publish_attempt_locates_committed_attempt_without_request_digest() -> None:
+    """模型重算导致 request_digest 漂移时，按稳定 logical_key 仍能定位已提交 attempt。
+
+    ``latest_committed`` 保留"原 digest 精确对账"语义；``find_publish_attempt`` 是
+    publish query-after-commit 的首要坐标——只按 run_id + logical_key 查
+    running/outcome_unknown/succeeded，不要求本次重算 digest 与旧提交一致。
+    failed attempt 不返回：首次确定失败不阻止后续按新 digest 重新写入。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    service = ToolCallAuditService(session)
+    committed = service.begin_publish("run-1", 1, "logical", "logical", "first-digest")
+    service.succeed(committed, 3, "first-content-digest")
+    failed = service.begin_publish("run-1", 2, "logical", "logical", "first-digest")
+    service.fail(failed, "HTTP_503", retryable=True)
+    session.commit()
+
+    # latest_committed 用漂移 digest 查不到首次 succeeded（保留原精确对账语义）。
+    assert service.latest_committed("run-1", "logical", "logical", "drifted-digest") is None
+    # find_publish_attempt 按稳定 logical_key 命中首次 succeeded，不受 digest 漂移影响。
+    found = service.find_publish_attempt("run-1", "logical")
+    assert found is not None
+    assert found.id == committed.id
+    assert found.status == "succeeded"
+
+
 def test_late_tool_result_cannot_settle_after_privacy_or_authorization_boundary_changes() -> None:
     """迟到结果只能保留原 running 记录，不能越过权威执行边界。"""
     engine = create_engine("sqlite://")

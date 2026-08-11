@@ -96,17 +96,21 @@ class WorkflowExecutor:
         )
 
     def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
-        """从最近兼容 checkpoint 恢复；按当前授权/隐私重读 Snapshot 并重算全部节点。
+        """从最近兼容 checkpoint 恢复；按节点级 ``safe_to_rerun`` 分类恢复。
 
         R2 安全模型（绝不从 checkpoint 恢复正文/中间内容）：
         - 旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）一律
           拒绝（CHECKPOINT_STATE_INVALID），必须走 purge 路径清理，不可作为恢复输入。
-        - 合法 checkpoint 只含路由元数据；恢复时 **忽略 completed_node_ids 的跳过
-          语义**，强制全部节点重跑：
-          * load_snapshot 按当前 generation_epoch/privacy_version/authorization
-            重新调 Business Tool 取 Snapshot（授权撤销/隐私版本变更 → gateway 拒绝）。
-          * 内容节点（sanitize/compute/.../safety）从 state 重算，不读 checkpoint 正文。
-          * publish_document 走 query-after-commit（logical_key）幂等：已提交则不重发。
+        - 合法 checkpoint 只含路由元数据（completed_node_ids/fallback_flags）。恢复时
+          把 completed_node_ids 传给 _execute，按节点级 ``safe_to_rerun`` 分类处理：
+          * memoir 读取/内容/发布节点声明 ``safe_to_rerun=True``，强制重跑：load_snapshot
+            按当前 generation_epoch/privacy_version/authorization 重新取 Snapshot（授权
+            撤销/隐私版本变更 → gateway 拒绝）；内容节点从 state 重算，不读 checkpoint
+            正文；publish_document 走 query-after-commit（logical_key）幂等，已提交则
+            不重发。
+          * 非 memoir Agent 节点默认 ``safe_to_rerun=False``，已完成则跳过，只执行未
+            完成节点——保护未声明幂等性的副作用不被盲目重放（partial 只重做未完成
+            optional）。
         """
         try:
             state = self._checkpoint_store.load_latest(run_id, lease_context)
@@ -118,15 +122,34 @@ class WorkflowExecutor:
                 execution_attempt=lease_context.execution_attempt,
                 error_code="CHECKPOINT_NOT_RESUMABLE",
             )
-        # 旧版完整 checkpoint（含正文/中间内容键）一律拒绝：接受它等于从密文复活
-        # 作品正文。这类 checkpoint 必须通过 purge 路径清理，不可作为新版恢复输入。
+        # 旧版完整 checkpoint（含正文/中间内容键）= 从密文复活作品正文的风险。
+        # 检测到必须立即 purge，让它永不作为新版恢复输入；purge 受 fencing/privacy/
+        # authorization 保护（_require_writable_run），审计只记事实与条数不输出密文。
+        # purge 成功或失败都 fail closed——本次 resume 绝不恢复，下次 resume 会因
+        # checkpoint 不存在而走 fresh 路径或 CHECKPOINT_NOT_RESUMABLE。
         extra_keys = set(state) - _SAFE_CHECKPOINT_KEYS
         if extra_keys:
+            # 日志隐私（P3）：只输出 run_id + 非白名单键计数 + purge 条数 + 稳定 code，
+            # 绝不打印 sorted(extra_keys)（键名可暗示正文结构）或 purge_exc 原文（异常
+            # 文本可能夹带库错误/密文片段）。事实细节由 checkpoint_purged 审计行安全记录。
             logging.warning(
-                "Workflow checkpoint 含非白名单键拒绝恢复 run_id=%s extra=%s",
+                "Workflow checkpoint 含非白名单键 拒绝恢复并 purge run_id=%s extra_key_count=%d",
                 run_id,
-                sorted(extra_keys),
+                len(extra_keys),
             )
+            try:
+                purged = self._checkpoint_store.purge_for_run(run_id, lease_context)
+            except CheckpointError:
+                logging.warning(
+                    "Workflow legacy checkpoint purge 失败 fail closed run_id=%s code=CHECKPOINT_PURGE_FAILED",
+                    run_id,
+                )
+            else:
+                logging.info(
+                    "Workflow legacy checkpoint 已 purge run_id=%s purged_count=%d",
+                    run_id,
+                    purged,
+                )
             return AgentRunResult(
                 run_id=run_id,
                 status="failed",
@@ -145,18 +168,20 @@ class WorkflowExecutor:
             )
         resume_from_node_id = state.get("resume_from_node_id")
         logging.info(
-            "Workflow 从 checkpoint 恢复 run_id=%s 重跑全部节点 checkpoint_completed=%s",
+            "Workflow 从 checkpoint 恢复 run_id=%s 分类恢复 checkpoint_completed=%s",
             run_id,
             len(raw_node_ids),
         )
-        # R2：completed_node_ids 仅作进度记录；恢复时强制重跑全部节点（load_snapshot
-        # 重新取 Snapshot、内容节点重算、publish 走 query-after-commit）。传空集让
-        # _execute 的 completed_node_ids 跳过分支永不命中；fallback 线性恢复
-        # （resume_from_node_id）路径不受影响。
+        # R2 分类恢复：把 checkpoint 的 completed_node_ids 传给 _execute，由节点级
+        # safe_to_rerun 决定已完成节点是否重跑。memoir 读取/内容/发布节点声明
+        # safe_to_rerun=True 强制重算（load_snapshot 重读 Snapshot、内容节点重算、
+        # publish 走 query-after-commit 幂等）；其他 Agent 默认 False 跳过已完成
+        # 节点，只执行未完成节点（保护非幂等副作用，partial 只重做未完成 optional）。
+        # fallback 线性恢复（resume_from_node_id）路径不受影响。
         return self._execute(
             run_id,
             lease_context,
-            completed_node_ids=set(),
+            completed_node_ids=set(raw_node_ids),
             state_data=state,
             resume_from_node_id=resume_from_node_id,
         )
@@ -251,8 +276,8 @@ class WorkflowExecutor:
             # R2 白名单过滤（纵深防御）：resume() 已在调用前拒绝含正文键的旧版
             # checkpoint，此处再次按 _SAFE_CHECKPOINT_KEYS 收敛，确保即便上游漏判
             # 也不会把 snapshot/scenes/playback_document 等正文注入 AgentState。
-            # completed_node_ids 用入参（resume 传空集 → 全部节点重跑）覆盖，
-            # 不从 checkpoint 恢复跳过语义。
+            # completed_node_ids 用入参（resume 传 checkpoint 的已完成集）覆盖，
+            # 由 _execute 主循环按节点级 safe_to_rerun 分类决定是否重跑。
             safe_payload = {
                 key: value
                 for key, value in state_data.items()
@@ -276,7 +301,19 @@ class WorkflowExecutor:
                 if skipping:
                     continue
             if node_id in completed_node_ids:
-                continue
+                if "safe_to_rerun" not in node:
+                    # P2 legacy plan guard：在 safe_to_rerun 引入前冻结的 plan，节点缺该键。
+                    # memoir checkpoint 不存正文，旧实现 node.get("safe_to_rerun") 把缺键当
+                    # 默认 False 静默跳过 → resume 用空 state 产出残缺文档。缺键无法安全判定
+                    # 跳过 vs 重算，一律 fail closed（PLAN_LEGACY_DEFINITION）交业务侧
+                    # undo/purge 重建。Executor 不硬编码 memoir 节点名：任何缺键的已完成节点
+                    # 都触发，与 business_type 解耦（不引入 Playback 业务事实）。
+                    return self._fail(run, lease_context, "PLAN_LEGACY_DEFINITION")
+                if not bool(node["safe_to_rerun"]):
+                    # R2 分类恢复：已完成且显式声明 safe_to_rerun=False 的节点跳过——保护未声明
+                    # 幂等性的副作用不被盲目重放（非 memoir Agent / partial 已完成 optional）。
+                    # safe_to_rerun=True 的节点（memoir 读取/内容/发布）落到下方正常重算。
+                    continue
             try:
                 self._policy.assert_can_continue(
                     run,

@@ -369,3 +369,179 @@ def test_publish_takeover_reconciles_committed_success_without_replaying_write()
     assert records[0].status == "succeeded"
     assert reconciliation_calls == [("connector", "archive", "run-1", key)]
     assert publish_calls == []
+
+
+def test_publish_resume_reconciles_first_commit_when_recomputed_digest_drifts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """模型重算让 playback_document digest 漂移时，按稳定 logical_key 复用首轮提交，不重发。
+
+    query-after-commit 的首要查询坐标是稳定 logical_key，不是本次重算 digest：首轮已成功
+    发布 document_A（digest_A），resume 重算得到 document_B（digest_B≠digest_A），仍能命中
+    首轮 succeeded attempt、对账复用业务端权威 revision，绝不第二次物理写入。修复前用漂移
+    digest 查 latest_committed 查不到 → begin_publish 触发 TOOL_CALL_OPERATION_CONFLICT。
+    """
+    first_document = {
+        "schema_version": "1.0.0",
+        "scenes": [{"scene_id": "s1", "scene_type": "summary", "source_refs": []}],
+        "actions": [{"action_id": "a1", "scene_id": "s1", "action_type": "show_card", "duration_ms": 3000}],
+        "media_manifest": [],
+    }
+    drifted_document = {
+        "schema_version": "1.0.0",
+        "scenes": [{"scene_id": "s1", "scene_type": "summary", "source_refs": [], "body": "RECOMPUTED_MODEL_BODY"}],
+        "actions": [{"action_id": "a1", "scene_id": "s1", "action_type": "show_card", "duration_ms": 3000}],
+        "media_manifest": [],
+    }
+    first_digest = hashlib.sha256(json.dumps(
+        first_document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    drifted_digest = hashlib.sha256(json.dumps(
+        drifted_document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    assert first_digest != drifted_digest  # 确认模型重算确实让 digest 漂移
+
+    key = "run-1:publish_document:memory.publish_playback_document:0"
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    audit = ToolCallAuditService(session)
+    # 首轮已成功发布 document_A，业务端权威 revision=5。
+    committed = audit.begin_publish("run-1", 1, key, key, first_digest)
+    audit.succeed(committed, 5, "business-published-digest")
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.reconcile_calls: list[tuple[object, ...]] = []
+
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            raise AssertionError("首轮已提交，digest 漂移后不得第二次物理写入")
+
+        def get_publish_result(self, *args: object) -> dict[str, object]:
+            self.reconcile_calls.append(args)
+            return {"revision": 5, "content_digest": "business-published-digest"}
+
+    gateway = Gateway()
+    state = AgentState(playback_document=drifted_document)
+    with caplog.at_level(logging.DEBUG):
+        assert MemoirNodeRunner(gateway, audit).run_node(
+            {"node_id": "publish_document"}, _run(), state
+        ) == {"node_id": "publish_document", "published": True}
+
+    assert gateway.reconcile_calls == [("connector", "archive", "run-1", key)]
+    assert state.publish_result == {"revision": 5, "content_digest": "business-published-digest"}
+    records = session.scalars(select(AgentToolCall)).all()
+    assert len(records) == 1  # 无第二次物理写入 attempt
+    assert records[0].status == "succeeded"
+    # 漂移后的模型正文不得进入任何级别日志。
+    assert "RECOMPUTED_MODEL_BODY" not in caplog.text
+
+
+class _ModelResult:
+    """模型网关最小返回对象：status + data，沿 _model_data 的 getattr 契约。"""
+
+    def __init__(self, status: str, data: object) -> None:
+        self.status = status
+        self.data = data
+
+
+class _DriftModelGateway:
+    """模拟 resume 时模型重算：generate_scenes 两轮故意产出不同 scenes，digest 因此漂移。
+
+    首轮返回 3 个 scene（FIRST_ROUND_MODEL_BODY），resume 返回 4 个（RESUME_MODEL_BODY）。
+    其它节点不可用，确保只有 generate_scenes 注入模型差异。
+    """
+
+    def __init__(self) -> None:
+        self._seq = 0
+
+    def call(self, run_id: str, node_id: str, request: object) -> _ModelResult:
+        if node_id == "generate_scenes":
+            self._seq += 1
+            body = "FIRST_ROUND_MODEL_BODY" if self._seq == 1 else "RESUME_MODEL_BODY"
+            count = 3 if self._seq == 1 else 4
+            return _ModelResult("succeeded", {"scenes": [
+                {"scene_id": f"s{i}", "scene_type": "summary", "source_refs": [], "body": body}
+                for i in range(1, count + 1)
+            ]})
+        return _ModelResult("unavailable", None)
+
+    def repair(self, *args: object) -> _ModelResult:
+        return _ModelResult("unavailable", None)
+
+
+def _document_digest(document: dict[str, object]) -> str:
+    return hashlib.sha256(json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def test_publish_resume_after_model_recompute_reuses_first_commit_without_double_publish(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """真实模型重算 → digest 漂移 → publish 不双发的端到端回归。
+
+    非 model_gateway=None 模板：真实 MemoirNodeRunner + 真实 ToolCallAuditService +
+    非 None model_gateway，走 generate_scenes→generate_actions→safety_review→publish_document
+    尾节点链两轮。首轮模型产出 3 scenes、resume 重算产出 4 scenes，playback_document digest
+    漂移。首轮 publish 物理写入 1 次；resume 必须走 get_publish_result 对账、复用首轮 revision，
+    绝不第二次物理写入，两次模型正文不进任何级别日志。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    audit = ToolCallAuditService(session)
+
+    class Gateway:
+        def __init__(self) -> None:
+            self.publish_calls: list[str] = []
+            self.reconcile_calls: list[str] = []
+
+        def publish_playback_document(self, *args: object) -> dict[str, object]:
+            self.publish_calls.append(args[6])  # idempotency_key=logical_key
+            return {"revision": 1, "content_digest": "business-published-digest"}
+
+        def get_publish_result(self, *args: object) -> dict[str, object]:
+            self.reconcile_calls.append(args[3])  # idempotency_key
+            return {"revision": 1, "content_digest": "business-published-digest"}
+
+    gateway = Gateway()
+    runner = MemoirNodeRunner(gateway, audit, model_gateway=_DriftModelGateway())
+    # chapter_plan 预置（模拟 R2 resume 从 checkpoint 恢复到 generate_scenes），
+    # source_refs=[] 让模型 scenes 的空引用集天然通过 grounding。
+    chapter_plan = {"chapters": [{"chapter_id": "chapter-1", "source_refs": [], "kind": "memory_overview"}]}
+    tail_nodes = [
+        {"node_id": "generate_scenes"},
+        {"node_id": "generate_actions"},
+        {"node_id": "safety_review"},
+        {"node_id": "publish_document"},
+    ]
+    run = _run()
+    key = "run-1:publish_document:memory.publish_playback_document:0"
+
+    # 首轮：模型产出 3 scenes（FIRST_ROUND_MODEL_BODY），publish 首次物理写入。
+    state1 = AgentState(chapter_plan=chapter_plan)
+    with caplog.at_level(logging.DEBUG):
+        for node in tail_nodes:
+            runner.run_node(node, run, state1)
+    first_digest = _document_digest(state1.playback_document)
+    assert state1.publish_result == {"revision": 1, "content_digest": "business-published-digest"}
+    assert gateway.publish_calls == [key]
+
+    # resume：R2 checkpoint 不存正文，state 重建；模型重算产出 4 scenes（RESUME_MODEL_BODY）。
+    state2 = AgentState(chapter_plan=chapter_plan)
+    with caplog.at_level(logging.DEBUG):
+        for node in tail_nodes:
+            runner.run_node(node, run, state2)
+    resumed_digest = _document_digest(state2.playback_document)
+
+    assert resumed_digest != first_digest  # 模型重算确实让 digest 漂移
+    assert len(gateway.publish_calls) == 1  # resume 未第二次物理写入
+    assert gateway.reconcile_calls == [key]  # resume 走 get_publish_result 对账
+    assert state2.publish_result == {"revision": 1, "content_digest": "business-published-digest"}  # 复用首轮
+    records = session.scalars(select(AgentToolCall)).all()
+    assert len(records) == 1  # AgentToolCall 无第二次写入 attempt
+    assert records[0].status == "succeeded"
+    # 两次模型输出正文均不得进入任何级别日志。
+    assert "FIRST_ROUND_MODEL_BODY" not in caplog.text
+    assert "RESUME_MODEL_BODY" not in caplog.text
