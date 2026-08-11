@@ -103,6 +103,21 @@ class StaticPlanner:
         except (TypeError, ValueError):
             logging.warning("拒绝非静态 workflow_nodes run_id=%s", run_id)
             raise StaticPlanValidationError("workflow_nodes 必须是静态节点定义") from None
+        # P1 legacy 缺键 guard：WorkflowNodeDefinition.safe_to_rerun 有默认 False，
+        # 上方 model_validate 会把"缺键"悄悄补成"显式 False"并经 model_dump 落库——
+        # 于是 Executor 的 PLAN_LEGACY_DEFINITION guard（safe_to_rerun not in node）永不
+        # 触发，legacy 缺键被静默吞掉，resume 可能跳过本该重算的 memoir 节点。故此处
+        # 必须回看原始 dict：节点未显式声明 safe_to_rerun 即视为 legacy 定义，无法安全
+        # 判定 resume 跳过 vs 重算，一律 fail closed 交业务侧 undo/purge 重建。Planner
+        # 不硬编码 memoir 节点名：任何缺键节点都拒绝，与 business_type 解耦。
+        for item in raw_nodes:
+            if not isinstance(item, dict) or "safe_to_rerun" not in item:
+                logging.warning(
+                    "拒绝 legacy workflow_nodes（节点缺 safe_to_rerun）run_id=%s", run_id
+                )
+                raise StaticPlanValidationError(
+                    "workflow_nodes 节点必须显式声明 safe_to_rerun"
+                )
         return [node.model_dump(mode="json") for node in nodes]
 
     def persist(self, session: Session, plan: AgentPlanDTO) -> AgentPlan:

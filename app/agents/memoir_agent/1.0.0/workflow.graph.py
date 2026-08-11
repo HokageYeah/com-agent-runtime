@@ -75,5 +75,9 @@ WORKFLOW_NODES = [
         "node_type": "deterministic",
         "next_nodes": [],
         "optional": True,
+        # 显式 False：optional 后处理节点，已完成则 resume 跳过（不重复提交媒体任务），
+        # 未完成（partial 失败）才执行，符合 partial 只重做未完成 optional 的语义。
+        # 必须显式声明——Planner 的 legacy 缺键 guard 会拒绝任何缺 safe_to_rerun 的节点。
+        "safe_to_rerun": False,
     },
 ]

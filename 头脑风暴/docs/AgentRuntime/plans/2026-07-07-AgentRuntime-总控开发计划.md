@@ -437,7 +437,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] `human_review` 先持久化恢复 checkpoint，再原子设置等待状态、释放 lease/Admission 并创建 callback；超时按冻结策略条件恢复或终止，审批与对账竞争均以 status/version 条件写拒绝迟到覆盖。
 - [✅] 每个节点前校验 fencing、cancel、package、privacy 和 authorization version。
 - [✅] 每个节点返回后在写 Artifact/checkpoint 前，复用同一 LeaseContext heartbeat 与 `LeaseService.can_write` 再次校验；fencing/privacy/authorization/cancel 失效时不写入、不启动下一节点。
-- [ ] checkpoint 改为明确的安全恢复投影，禁止 `state.model_dump()` 整体落库；Snapshot/tool payload、脱敏素材、模型中间文本和播放文档即使加密也不持久化。
+- [✅] checkpoint 改为明确的安全恢复投影，禁止 `state.model_dump()` 整体落库；Snapshot/tool payload、脱敏素材、模型中间文本和播放文档即使加密也不持久化。**（2026-08-11 第四次最小收口 ✅：`executor.py` `_SAFE_CHECKPOINT_KEYS` 白名单只落路由/fallback/进度元数据，旧全量 `model_dump` 由 purge 路径清除；`runtime_test_workflow_executor.py` `test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_and_playback` + legacy 拒绝 purge 测试为证）**
 - [✅] resume 按当前 privacy/authorization 重取 Snapshot 并重算内容节点；已提交副作用只按稳定逻辑键 query-after-commit，旧完整状态 checkpoint 撤销/purge 后不得恢复。**（2026-08-11 第三次最终收口 ✅：`runtime_test_workflow_executor.py` 28 passed 覆盖 query-after-commit + safe_to_rerun 分类恢复 + legacy purge 跨 Session 持久化 + authorization/privacy 防复活；二次收口裁定第(2)条「维持历史状态不重审」因本次具备真实验证证据而解除）**
 
 **Checkpoint:** mock workflow 可以完整执行，并能在失败后恢复。

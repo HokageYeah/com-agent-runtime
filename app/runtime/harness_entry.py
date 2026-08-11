@@ -302,19 +302,21 @@ def _seed_test_agent_package(factory: sessionmaker) -> None:
                 runtime_type="workflow",
                 definition_json={
                     "allowed_business_types": ["couple_memory"],
+                    # 必须与 app/agents/memoir_agent/1.0.0/workflow.graph.py 的节点声明保持
+                    # 一致：每个节点显式 safe_to_rerun，否则 Planner 的 legacy 缺键 guard
+                    # 会拒绝创建 Plan。harness 用假 digest，与真实文件 digest 解耦。
                     "workflow_nodes": [
-                        {"node_id": node_id, "node_type": node_type}
-                        for node_id, node_type in (
-                            ("load_snapshot", "tool"),
-                            ("sanitize_materials", "deterministic"),
-                            ("compute_stats", "deterministic"),
-                            ("extract_highlights", "model"),
-                            ("plan_chapters", "model"),
-                            ("generate_scenes", "model"),
-                            ("generate_actions", "deterministic"),
-                            ("safety_review", "guardrail"),
-                            ("publish_document", "tool"),
-                        )
+                        {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+                        {"node_id": "sanitize_materials", "node_type": "deterministic", "safe_to_rerun": True},
+                        {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
+                        {"node_id": "extract_highlights", "node_type": "model", "safe_to_rerun": True},
+                        {"node_id": "plan_chapters", "node_type": "model", "safe_to_rerun": True},
+                        {"node_id": "generate_scenes", "node_type": "model", "safe_to_rerun": True},
+                        {"node_id": "generate_actions", "node_type": "deterministic", "safe_to_rerun": True},
+                        {"node_id": "safety_review", "node_type": "guardrail", "safe_to_rerun": True},
+                        {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": True},
+                        {"node_id": "enqueue_media_tasks", "node_type": "deterministic",
+                         "next_nodes": [], "optional": True, "safe_to_rerun": False},
                     ],
                 },
                 package_digest="sha256:harness-memoir",

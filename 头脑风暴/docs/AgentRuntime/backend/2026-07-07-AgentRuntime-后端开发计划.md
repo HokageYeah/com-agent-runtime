@@ -1025,7 +1025,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 工具 side effect 节点恢复前检查幂等键。
 - [✅] 实现 `template_highlights`、`template_chapters`、`template_scenes`、`default_actions` fallback。
 - [✅] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
-- [ ] 修正 `WorkflowExecutor` checkpoint 输入：仅投影路由进度、fallback 标记、副作用稳定逻辑键/安全结果引用与 digest，禁止 Snapshot/tool payload、`sanitized_material`、prompt/模型中间文本、Scene 和 PlaybackDocument 进入密文。
+- [✅] 修正 `WorkflowExecutor` checkpoint 输入：仅投影路由进度、fallback 标记、副作用稳定逻辑键/安全结果引用与 digest，禁止 Snapshot/tool payload、`sanitized_material`、prompt/模型中间文本、Scene 和 PlaybackDocument 进入密文。**（2026-08-11 第四次最小收口 ✅：`executor.py` `_SAFE_CHECKPOINT_KEYS` 白名单（`fallback_flags/completed_node_ids/completed_steps/resume_from_node_id`）+ 非白名单键 `CHECKPOINT_STATE_INVALID` 拒绝；`test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_and_playback` 五类正文哨兵 + legacy 拒绝 purge 测试为证）**
 - [✅] 修正 resume：按当前 privacy/authorization 重取 Snapshot 并重算无副作用内容节点，已发布等副作用只按稳定键 query-after-commit；为旧完整状态 checkpoint 增加版本拒绝、撤销/purge 与防复活回归。**（2026-08-11 第三次最终收口 ✅：= P1 query-after-commit digest 修复 + P2 safe_to_rerun legacy 识别 + P3 authorization/privacy 防复活 + legacy purge 跨 Session finish() commit 持久化 + 日志隐私 + fail-closed；`runtime_test_workflow_executor.py` 28 passed 为证）**
 
 ### Task 11: Callback Dispatcher 与 Public Trace

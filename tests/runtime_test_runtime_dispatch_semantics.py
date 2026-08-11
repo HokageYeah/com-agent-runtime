@@ -36,8 +36,8 @@ def _session():
             definition_json={
                 "allowed_business_types": ["couple_memory"],
                 "workflow_nodes": [
-                    {"node_id": "load_snapshot", "node_type": "tool"},
-                    {"node_id": "publish_document", "node_type": "tool"},
+                    {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+                    {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": True},
                 ],
             },
             package_digest="sha256:test",

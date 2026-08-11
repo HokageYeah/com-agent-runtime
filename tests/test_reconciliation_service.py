@@ -163,7 +163,7 @@ def test_static_planner_freezes_waiting_human_timeout_action() -> None:
     plan = StaticPlanner().create_plan_from_definition(
         "frozen-policy-run",
         {
-            "workflow_nodes": [{"node_id": "fallback", "node_type": "deterministic"}],
+            "workflow_nodes": [{"node_id": "fallback", "node_type": "deterministic", "safe_to_rerun": False}],
             "policy": {
                 "waiting_human_timeout_action": "fallback",
                 "waiting_human_fallback_node": "fallback",

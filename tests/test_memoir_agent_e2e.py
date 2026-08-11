@@ -123,6 +123,10 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
                 {
                     "node_id": node_id,
                     "node_type": node_type,
+                    # memoir 读取/内容/发布节点 safe_to_rerun=True；optional 后处理
+                    # enqueue_media_tasks=False。必须显式声明，否则 Planner legacy 缺键
+                    # guard 拒绝（与 app/agents/memoir_agent/1.0.0/workflow.graph.py 一致）。
+                    "safe_to_rerun": node_id != "enqueue_media_tasks",
                     **(
                         {"optional": True}
                         if node_id == "enqueue_media_tasks"

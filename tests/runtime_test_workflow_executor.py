@@ -1052,7 +1052,7 @@ def test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_
 
 
 def test_executor_resume_rejects_legacy_full_state_checkpoint_and_purges() -> None:
-    """R3：旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）拒绝并 purge。
+    """R2 checkpoint/resume：旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）拒绝并 purge。
 
     规格要求：旧完整状态 checkpoint 必须物理删除，不可作为新版恢复输入，也不可遗留在
     密文中等待后续误读。resume 见到任何非白名单键即返回 CHECKPOINT_STATE_INVALID，
@@ -1071,7 +1071,7 @@ def test_executor_resume_rejects_legacy_full_state_checkpoint_and_purges() -> No
     store = CheckpointStore(session, cipher)
     # 手工塞入旧版完整 checkpoint：snapshot/sanitized_material/scenes/playback_document
     # 同时存在。resume 必须拒绝恢复并 purge，把私密字段挡在内存 AgentState 之外，
-    # 并物理删除该 run 的 checkpoint 行（R3 purge 闭环）。
+    # 并物理删除该 run 的 checkpoint 行（R2 checkpoint/resume purge 闭环）。
     store.save(
         "legacy-resume-run", "attempt:1:step:1",
         {
@@ -1090,7 +1090,7 @@ def test_executor_resume_rejects_legacy_full_state_checkpoint_and_purges() -> No
 
     result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume("legacy-resume-run", context)
 
-    # R3：旧版完整 checkpoint（含正文键）一律拒绝并 purge，不可作为恢复输入，也不可遗留。
+    # R2 checkpoint/resume：旧版完整 checkpoint（含正文键）一律拒绝并 purge，不可作为恢复输入，也不可遗留。
     assert result.status == "failed"
     assert result.error_code == "CHECKPOINT_STATE_INVALID"
     assert runner.node_ids == []
