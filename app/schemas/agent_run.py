@@ -7,9 +7,7 @@ from app.contracts.api import (
     AgentRunResponse,
     CreateAgentRunRequest,
     HumanApprovalRequest,
-    StepSummary,
 )
-
 
 # HTTP 与服务层共享冻结 contract，禁止再维护第二套字段集合。
 CreateRunCommand = CreateAgentRunRequest

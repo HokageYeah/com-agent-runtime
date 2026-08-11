@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
+from app.contracts.api import StepSummary
 from app.models import (
     AgentArtifact,
     AgentCheckpoint,
@@ -22,7 +23,7 @@ from app.models import (
 )
 from app.runtime.planner import StaticPlanner
 from app.schemas.agent_package import PackagePolicy
-from app.schemas.agent_run import CreateRunCommand, RunDetail, RunSummary, StepSummary
+from app.schemas.agent_run import CreateRunCommand, RunDetail, RunSummary
 from app.schemas.audit import RuntimeAuditEvent
 from app.services.admission_service import AdmissionLimits, AdmissionService
 from app.services.audit_service import AuditService

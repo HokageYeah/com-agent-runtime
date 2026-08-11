@@ -96,7 +96,18 @@ class WorkflowExecutor:
         )
 
     def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
-        """从最近兼容 checkpoint 恢复；只跳过已安全完成的静态节点。"""
+        """从最近兼容 checkpoint 恢复；按当前授权/隐私重读 Snapshot 并重算全部节点。
+
+        R2 安全模型（绝不从 checkpoint 恢复正文/中间内容）：
+        - 旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）一律
+          拒绝（CHECKPOINT_STATE_INVALID），必须走 purge 路径清理，不可作为恢复输入。
+        - 合法 checkpoint 只含路由元数据；恢复时 **忽略 completed_node_ids 的跳过
+          语义**，强制全部节点重跑：
+          * load_snapshot 按当前 generation_epoch/privacy_version/authorization
+            重新调 Business Tool 取 Snapshot（授权撤销/隐私版本变更 → gateway 拒绝）。
+          * 内容节点（sanitize/compute/.../safety）从 state 重算，不读 checkpoint 正文。
+          * publish_document 走 query-after-commit（logical_key）幂等：已提交则不重发。
+        """
         try:
             state = self._checkpoint_store.load_latest(run_id, lease_context)
         except CheckpointError as exc:
@@ -106,6 +117,21 @@ class WorkflowExecutor:
                 status="failed",
                 execution_attempt=lease_context.execution_attempt,
                 error_code="CHECKPOINT_NOT_RESUMABLE",
+            )
+        # 旧版完整 checkpoint（含正文/中间内容键）一律拒绝：接受它等于从密文复活
+        # 作品正文。这类 checkpoint 必须通过 purge 路径清理，不可作为新版恢复输入。
+        extra_keys = set(state) - _SAFE_CHECKPOINT_KEYS
+        if extra_keys:
+            logging.warning(
+                "Workflow checkpoint 含非白名单键拒绝恢复 run_id=%s extra=%s",
+                run_id,
+                sorted(extra_keys),
+            )
+            return AgentRunResult(
+                run_id=run_id,
+                status="failed",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="CHECKPOINT_STATE_INVALID",
             )
         raw_node_ids = state.get("completed_node_ids", [])
         if not isinstance(raw_node_ids, list) or not all(
@@ -119,14 +145,18 @@ class WorkflowExecutor:
             )
         resume_from_node_id = state.get("resume_from_node_id")
         logging.info(
-            "Workflow 从 checkpoint 恢复 run_id=%s completed_nodes=%s",
+            "Workflow 从 checkpoint 恢复 run_id=%s 重跑全部节点 checkpoint_completed=%s",
             run_id,
             len(raw_node_ids),
         )
+        # R2：completed_node_ids 仅作进度记录；恢复时强制重跑全部节点（load_snapshot
+        # 重新取 Snapshot、内容节点重算、publish 走 query-after-commit）。传空集让
+        # _execute 的 completed_node_ids 跳过分支永不命中；fallback 线性恢复
+        # （resume_from_node_id）路径不受影响。
         return self._execute(
             run_id,
             lease_context,
-            completed_node_ids=set(raw_node_ids),
+            completed_node_ids=set(),
             state_data=state,
             resume_from_node_id=resume_from_node_id,
         )
@@ -218,9 +248,11 @@ class WorkflowExecutor:
         if state_data is None:
             state = AgentState(run_input=run.input_json, completed_node_ids=sorted(completed_node_ids))
         else:
-            # R2 白名单过滤：即便解密出旧版完整 checkpoint，也只接受恢复路由所需
-            # 字段。snapshot/sanitized_material/scenes/playback_document 等正文
-            # 一律丢弃，旧 checkpoint 必须通过 purge 路径清理，不能作为新版恢复输入。
+            # R2 白名单过滤（纵深防御）：resume() 已在调用前拒绝含正文键的旧版
+            # checkpoint，此处再次按 _SAFE_CHECKPOINT_KEYS 收敛，确保即便上游漏判
+            # 也不会把 snapshot/scenes/playback_document 等正文注入 AgentState。
+            # completed_node_ids 用入参（resume 传空集 → 全部节点重跑）覆盖，
+            # 不从 checkpoint 恢复跳过语义。
             safe_payload = {
                 key: value
                 for key, value in state_data.items()

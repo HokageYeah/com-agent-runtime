@@ -329,8 +329,13 @@ def test_executor_refuses_revoked_package_before_starting_any_node() -> None:
     assert runner.node_ids == []
 
 
-def test_executor_partial_resume_retries_only_failed_optional_node() -> None:
-    """partial 只能发生在主发布后；恢复不得再次执行发布副作用。"""
+def test_executor_partial_resume_reruns_all_nodes_succeeds() -> None:
+    """R2：partial 恢复时全部节点重跑；发布副作用由 runner 的 query-after-commit 保证幂等。
+
+    snapshot/内容必须重算 → load_snapshot/publish_document/enqueue_media 全部重新
+    执行。发布副作用不靠 executor 跳过保护，而由 runner 层 query-after-commit
+    （logical_key）幂等；已提交则不重发，executor 无需区分节点类型。
+    """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
@@ -381,7 +386,107 @@ def test_executor_partial_resume_retries_only_failed_optional_node() -> None:
     second = executor.resume(run.run_id, second_context)
 
     assert second.status == "succeeded"
-    assert runner.node_ids == ["load_snapshot", "publish_document", "enqueue_media", "enqueue_media"]
+    # R2：resume 重跑全部节点；enqueue_media 第二次成功。publish_document 虽被重访，
+    # 但发布幂等由真实 runner 的 query-after-commit 保证，此通用 runner 只记录访问。
+    assert runner.node_ids == [
+        "load_snapshot", "publish_document", "enqueue_media",
+        "load_snapshot", "publish_document", "enqueue_media",
+    ]
+
+
+class QueryAfterCommitPublishRunner(DeterministicNodeRunner):
+    """模拟真实 memoir runner 的 publish_document：query-after-commit + logical_key 幂等。
+
+    每次访问 publish 都先查 logical_key 是否已提交（等价于业务库查询 published_revision）；
+    未提交才真正发布并记账，已提交则 no-op。证明 R2：executor 在 resume 时重访 publish
+    节点不会触发第二次发布副作用——幂等由 runner 负责，不由 executor 跳过保护。
+    """
+
+    PUBLISH_LOGICAL_KEY = "memoir:publish:archive-pub-1"
+
+    def __init__(self) -> None:
+        self.node_ids: list[str] = []
+        self.publish_visits = 0
+        self.actual_publishes = 0
+        self._committed: set[str] = set()
+
+    def run_node(
+        self, node: dict[str, object], run: AgentRun, state: AgentState
+    ) -> dict[str, object]:
+        self.node_ids.append(str(node["node_id"]))
+        if node["node_id"] == "publish_document":
+            self.publish_visits += 1
+            # query-after-commit：先查 logical_key 是否已落到业务侧。
+            if self.PUBLISH_LOGICAL_KEY not in self._committed:
+                self._committed.add(self.PUBLISH_LOGICAL_KEY)
+                self.actual_publishes += 1
+        return {"node_id": node["node_id"], "result": "ok"}
+
+
+def test_executor_resume_publish_idempotent_via_query_after_commit() -> None:
+    """R2：resume 重访 publish_document 不双发；幂等由 runner 的 query-after-commit 保证。
+
+    executor 不靠跳过 publish 节点防双发（R2 要求全部节点重跑以重算 snapshot/内容），
+    而是由 runner 用 logical_key 查询业务侧是否已提交：首轮发布 1 次，resume 后节点
+    被重访（visit==2）但 actual_publishes 仍为 1。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="pub-idempotent-run", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
+    ))
+    session.add(AgentPlan(
+        plan_id="pub-idempotent-plan", run_id="pub-idempotent-run", strategy="static_workflow",
+        steps_json=[
+            {"node_id": "load_snapshot", "node_type": "tool"},
+            {"node_id": "publish_document", "node_type": "tool"},
+            {"node_id": "compute_stats", "node_type": "deterministic"},
+        ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
+    ))
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker-a", fencing_token=1,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    runner = QueryAfterCommitPublishRunner()
+    store = CheckpointStore(session, FernetCheckpointCipher.generate())
+    executor = WorkflowExecutor(session, runner, store, ArtifactStore(session))
+
+    first = executor.run("pub-idempotent-run", context)
+    assert first.status == "succeeded"
+    assert runner.publish_visits == 1
+    assert runner.actual_publishes == 1
+
+    # 模拟 retry 已重新认领的新 execution attempt；checkpoint 是恢复边界。
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "pub-idempotent-run"))
+    run.status, run.dispatch_state = "pending", "claimed"
+    run.execution_attempt, run.fencing_token = 2, 2
+    run.lease_owner = "worker-b"
+    run.lease_expires_at = now + timedelta(seconds=60)
+    session.commit()
+    second_context = LeaseContext(
+        execution_attempt=2, lease_owner="worker-b", fencing_token=2,
+        lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
+    )
+    second = executor.resume("pub-idempotent-run", second_context)
+
+    assert second.status == "succeeded"
+    # R2：publish_document 被重访（visit==2），但 query-after-commit 保证 actual_publishes==1。
+    assert runner.publish_visits == 2
+    assert runner.actual_publishes == 1
+    # 全部节点重跑，证明 snapshot/内容由重算得到，不是 checkpoint 复活。
+    assert runner.node_ids == [
+        "load_snapshot", "publish_document", "compute_stats",
+        "load_snapshot", "publish_document", "compute_stats",
+    ]
 
 
 def test_executor_heartbeats_same_context_before_and_after_every_node(
@@ -503,7 +608,12 @@ def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
     assert session.scalars(select(AgentStep)).all() == []
 
 
-def test_executor_resume_skips_nodes_already_recorded_by_checkpoint() -> None:
+def test_executor_resume_reruns_all_nodes_to_recompute_content() -> None:
+    """R2：resume 强制重跑全部节点，不再按 checkpoint 的 completed_node_ids 跳过。
+
+    snapshot/内容中间状态绝不从 checkpoint 恢复：load_snapshot 必须按当前
+    授权/隐私重读，内容节点必须重算。completed_node_ids 仅作进度记录。
+    """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
@@ -553,10 +663,17 @@ def test_executor_resume_skips_nodes_already_recorded_by_checkpoint() -> None:
     )
 
     assert result.status == "succeeded"
-    assert runner.node_ids == ["compute_stats"]
+    # R2：resume 强制重跑全部节点（snapshot/内容必须重算），不再跳过 completed_node_ids。
+    assert runner.node_ids == ["load_snapshot", "compute_stats"]
 
 
 def test_executor_resume_from_fallback_checkpoint_starts_at_fallback_node() -> None:
+    """R2：fallback 路径由 error_code=WAITING_HUMAN_FALLBACK 驱动，线性跳到 fallback 节点。
+
+    旧实现靠 checkpoint 的 completed_node_ids 跳过前置节点（误触）；R2 移除该跳过后，
+    必须显式置 WAITING_HUMAN_FALLBACK，resume_from_node_id 才会被消费，执行才真正
+    走 fallback 跳转分支而非全节点重跑。
+    """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
@@ -565,9 +682,10 @@ def test_executor_resume_from_fallback_checkpoint_starts_at_fallback_node() -> N
         AgentRun(
             run_id="fallback-run", agent_id="memoir_agent", agent_version="1.0.0",
             package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory",
-            business_id="archive", status="pending", dispatch_state="claimed", input_json={},
+            business_id="archive", status="waiting_human", dispatch_state="claimed", input_json={},
             authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
             callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+            error_code="WAITING_HUMAN_FALLBACK",
             execution_attempt=2, lease_owner="worker-b", fencing_token=2,
             lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
         )
@@ -918,12 +1036,12 @@ def test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_
             assert sentinel not in summary_text
 
 
-def test_executor_resume_strips_legacy_full_state_checkpoint_to_safe_metadata() -> None:
-    """旧完整 checkpoint 解密出全量字段时，resume 只接受白名单；其余字段直接丢弃。
+def test_executor_resume_rejects_legacy_full_state_checkpoint() -> None:
+    """R2：旧版完整 checkpoint（含 snapshot/scenes/playback_document 等正文键）一律拒绝。
 
-    规格要求：旧完整状态 checkpoint 在迁移时撤销并 purge，不作为新版恢复输入。
-    本测试模拟迁移未完成时仍在 DB 中的旧 checkpoint；resume 不能因解密成功就把
-    私密字段塞回内存 AgentState，必须按白名单过滤后再继续执行。
+    规格要求：旧完整状态 checkpoint 必须通过 purge 路径清理，不可作为新版恢复输入。
+    接受它等于从密文复活作品正文/中间内容。resume 见到任何非白名单键即返回
+    CHECKPOINT_STATE_INVALID，不进入执行循环，不读任何字段。
     """
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -956,6 +1074,7 @@ def test_executor_resume_strips_legacy_full_state_checkpoint_to_safe_metadata() 
 
     result = WorkflowExecutor(session, runner, store, ArtifactStore(session)).resume("legacy-resume-run", context)
 
-    assert result.status == "succeeded"
-    # 只重跑未完成节点（resume 路由未被旧字段污染）。
-    assert runner.node_ids == ["compute_stats"]
+    # R2：旧版完整 checkpoint（含正文键）一律拒绝，必须走 purge 路径，不可作为恢复输入。
+    assert result.status == "failed"
+    assert result.error_code == "CHECKPOINT_STATE_INVALID"
+    assert runner.node_ids == []
