@@ -261,6 +261,11 @@ class AgentPackageService:
         for path in sorted(path for path in package_dir.rglob("*") if path.is_file()):
             if path.name in self._EXCLUDED_DIGEST_FILES:
                 continue
+            # 排除 Python 编译缓存：__pycache__/*.pyc 不属于 package 内容，
+            # 纳入会让同一份源文件在 CI（无 pyc）与本地（有 pyc）算出不同
+            # digest，伪装成“同版本 digest 漂移”。只哈希源内容。
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
             relative_path = path.relative_to(package_dir).as_posix()
             hasher.update(relative_path.encode())
             hasher.update(b"\0")

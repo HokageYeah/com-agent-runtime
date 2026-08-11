@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from shutil import copytree
+from shutil import copytree, rmtree
 
 import pytest
 
@@ -51,6 +51,33 @@ def test_rejects_digest_change_for_same_registered_version(tmp_path: Path) -> No
     with pytest.raises(AgentPackageValidationError, match="digest 不可变"):
         service.load("memoir_agent", "1.0.0")
     assert first.package_digest.startswith("sha256:")
+
+
+def test_digest_ignores_python_compilation_artifacts(tmp_path: Path) -> None:
+    """Python 编译缓存（__pycache__/*.pyc）不得计入 package digest。
+
+    根因回归覆盖：_digest 曾用 rglob("*") 拾取 __pycache__ 编译产物，导致
+    同一份源文件在 CI（无 pyc）与本地（有 pyc）算出不同 digest，被误判为
+    "同版本 digest 漂移"。编译缓存不是 package 内容，必须稳定排除。
+    """
+    source_root = Path(__file__).parents[1] / "app" / "agents"
+    package_root = tmp_path / "agents"
+    copytree(source_root, package_root)
+    # 清理 copytree 带过来的编译缓存，建立"无 pyc"干净基线
+    for cache in package_root.rglob("__pycache__"):
+        rmtree(cache)
+
+    service = AgentPackageService(package_root)
+    baseline = service.load("memoir_agent", "1.0.0").package_digest
+
+    # 模拟测试运行后在 package 目录里生成的 .pyc（内容随意，关键是被忽略）
+    cache_dir = package_root / "memoir_agent" / "1.0.0" / "__pycache__"
+    cache_dir.mkdir()
+    (cache_dir / "workflow.graph.cpython-313.pyc").write_bytes(b"\x00\x01compiled")
+
+    # 新实例：避开 _remember_digest 的进程内缓存，纯测 _digest 是否稳定排除 pyc
+    after = AgentPackageService(package_root).load("memoir_agent", "1.0.0").package_digest
+    assert after == baseline, "编译缓存污染了 package digest"
 
 
 def test_rejects_missing_required_package_file(tmp_path: Path) -> None:
