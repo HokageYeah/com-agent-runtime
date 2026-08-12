@@ -238,7 +238,8 @@ def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> Non
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
-        captured["runtime_id"] = request.headers["X-Agent-Client-Id"]
+        captured["runtime_id"] = request.headers["X-Agent-Runtime-Id"]
+        assert "X-Agent-Client-Id" not in request.headers
         captured["input"] = json.loads(request.content)["input"]
         captured["signature"] = request.headers["X-Agent-Signature"]
         captured["timestamp"] = request.headers["X-Agent-Timestamp"]
@@ -821,6 +822,51 @@ def test_head_four_field_tool_error_defaults_visibility_to_false() -> None:
     assert gateway.get_publish_result(
         "c", "a", "r", "write-1", tool_context=legacy_context
     ) is None
+
+
+def test_legacy_tool_error_allows_explicit_false_visibility_only() -> None:
+    """v1.0 兼容冻结的四字段形状及可选的显式 ``false`` visibility。"""
+
+    legacy_context = {**_tool_context("a", "r"), "agent_version": "1.0.0"}
+    valid = {
+        "error_code": "PUBLISH_NOT_YET_OBSERVED",
+        "error_type": "publish_not_observed",
+        "retryable": False,
+        "safe_message": "尚未观察到发布结果",
+        "details_visible_to_model": False,
+    }
+    gateway = _make_default_gateway(lambda _: httpx.Response(404, json=valid))
+    assert gateway.get_publish_result(
+        "c", "a", "r", "write-1", tool_context=legacy_context
+    ) is None
+
+    invalid_bodies = [
+        {**valid, "details_visible_to_model": True},
+        {**valid, "details_visible_to_model": "false"},
+        {**valid, "details_visible_to_model": 0},
+        {**valid, "unexpected": "field"},
+        {key: value for key, value in valid.items() if key != "safe_message"},
+    ]
+    for invalid in invalid_bodies:
+        rejected = _make_default_gateway(lambda _, body=invalid: httpx.Response(404, json=body))
+        with pytest.raises(ValueError, match="TOOL_ERROR_SHAPE_INVALID"):
+            rejected.get_publish_result(
+                "c", "a", "r", "write-1", tool_context=legacy_context
+            )
+
+
+def test_v1_1_requires_explicit_false_visibility() -> None:
+    """v1.1 不能借用 v1.0 的四字段兼容形式。"""
+
+    body = {
+        "error_code": "PUBLISH_NOT_YET_OBSERVED",
+        "error_type": "publish_not_observed",
+        "retryable": False,
+        "safe_message": "尚未观察到发布结果",
+    }
+    gateway = _make_default_gateway(lambda _: httpx.Response(404, json=body))
+    with pytest.raises(ValueError, match="TOOL_ERROR_SHAPE_INVALID"):
+        gateway.get_publish_result("c", "a", "s", "r", 1, "write-1")
 
 
 def test_tool_wire_version_is_selected_from_trusted_agent_run_identity() -> None:

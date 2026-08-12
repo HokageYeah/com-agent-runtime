@@ -7,6 +7,11 @@
     "default_version": "1.0.0",
     "unsupported_version_behavior": "fail_closed"
   },
+  "identity_headers": {
+    "business_to_runtime": "X-Agent-Client-Id",
+    "runtime_to_business_tool_and_callback": "X-Agent-Runtime-Id",
+    "mixed_or_missing_identity_headers": "fail_closed"
+  },
   "tool_contract": {
     "tool_error_required": [
       "error_code",

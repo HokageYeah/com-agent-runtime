@@ -407,7 +407,10 @@ class ToolGateway:
         content = httpx.Request("POST", "http://tool.local", json=tool_request.model_dump()).content
         timestamp = str(int(time.time()))
         wire_version = self._tool_wire_version(context)
-        headers = {"X-Agent-Client-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret), "X-Agent-Tool-Contract-Version": wire_version}
+        # 身份头方向是跨项目冻结边界：业务后端调用 Runtime 才使用
+        # X-Agent-Client-Id；Runtime 调用业务 Tool（以及 callback）必须使用
+        # X-Agent-Runtime-Id。不能因两端当前实现恰好一致而混用。
+        headers = {"X-Agent-Runtime-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret), "X-Agent-Tool-Contract-Version": wire_version}
         if tool_call is not None:
             attempt = tool_call.tool_attempt
             if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
@@ -680,14 +683,16 @@ class ToolGateway:
         if not isinstance(parsed, dict):
             raise ValueError("TOOL_ERROR_SHAPE_INVALID")
         required_keys = {"error_code", "error_type", "retryable", "safe_message"}
-        expected_keys = (
-            required_keys
+        keys = set(parsed)
+        # v1.0.0 的历史 wire 允许省略 visibility，也允许显式声明 false；这两个
+        # 形状等价。显式 true 以及任何其它额外字段均不能被旧 consumer 接受。
+        # v1.1.0 则固定要求完整五字段，不能由 response 自行协商。
+        allowed_key_sets = (
+            (required_keys, required_keys | {"details_visible_to_model"})
             if wire_version == "1.0.0"
-            else required_keys | {"details_visible_to_model"}
+            else (required_keys | {"details_visible_to_model"},)
         )
-        # Wire version 绑定形状：v1.0.0 仅四字段并将 visibility 默认为 false；
-        # v1.1.0 必须显式 false。两种形式之外均拒绝，不能被响应自行协商。
-        if set(parsed) != expected_keys:
+        if keys not in allowed_key_sets:
             raise ValueError("TOOL_ERROR_SHAPE_INVALID")
         try:
             candidate = ToolError.model_validate(parsed)

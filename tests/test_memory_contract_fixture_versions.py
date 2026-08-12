@@ -51,3 +51,8 @@ def test_v1_1_freezes_tool_contract_negotiation_metadata() -> None:
         "default_version": "1.0.0",
         "unsupported_version_behavior": "fail_closed",
     }
+    assert fixture["identity_headers"] == {
+        "business_to_runtime": "X-Agent-Client-Id",
+        "runtime_to_business_tool_and_callback": "X-Agent-Runtime-Id",
+        "mixed_or_missing_identity_headers": "fail_closed",
+    }
