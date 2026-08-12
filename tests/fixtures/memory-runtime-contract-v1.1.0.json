@@ -1,0 +1,31 @@
+{
+  "contract_version": "1.1.0",
+  "extends": "memory-runtime-contract-v1.0.0.json",
+  "negotiation": {
+    "request_header": "X-Agent-Tool-Contract-Version",
+    "supported_versions": ["1.0.0", "1.1.0"],
+    "default_version": "1.0.0",
+    "unsupported_version_behavior": "fail_closed"
+  },
+  "tool_contract": {
+    "tool_error_required": [
+      "error_code",
+      "error_type",
+      "retryable",
+      "safe_message",
+      "details_visible_to_model"
+    ],
+    "tool_error_details_visible_to_model": false,
+    "tool_error_matrix": {
+      "IDEMPOTENCY_CONFLICT": {"http_status": 409, "error_type": "idempotency_conflict", "retryable": false, "safe_message": "请求与既有幂等操作冲突", "details_visible_to_model": false},
+      "GENERATION_SUPERSEDED": {"http_status": 409, "error_type": "generation_superseded", "retryable": false, "safe_message": "当前生成已被更新版本取代", "details_visible_to_model": false},
+      "AUTHORIZATION_REVOKED": {"http_status": 403, "error_type": "authorization_revoked", "retryable": false, "safe_message": "该运行授权已失效", "details_visible_to_model": false},
+      "BUSINESS_DATA_INVALID": {"http_status": 422, "error_type": "business_data_invalid", "retryable": false, "safe_message": "业务数据不满足工具要求", "details_visible_to_model": false},
+      "MEMORY_SNAPSHOT_UNAVAILABLE": {"http_status": 403, "error_type": "snapshot_unavailable", "retryable": false, "safe_message": "回忆快照当前不可读取", "details_visible_to_model": false},
+      "MEMORY_RUN_NOT_ACTIVE": {"http_status": 409, "error_type": "run_not_active", "retryable": false, "safe_message": "该回忆录运行当前不可执行", "details_visible_to_model": false},
+      "MEMORY_DOCUMENT_INVALID": {"http_status": 422, "error_type": "document_invalid", "retryable": false, "safe_message": "播放文档不满足发布要求", "details_visible_to_model": false},
+      "PUBLISH_NOT_YET_OBSERVED": {"http_status": 404, "error_type": "publish_not_observed", "retryable": false, "safe_message": "尚未观察到发布结果", "details_visible_to_model": false},
+      "RUNTIME_SERVICE_UNAVAILABLE": {"http_status": 503, "error_type": "service_unavailable", "retryable": true, "safe_message": "业务工具服务暂时不可用", "details_visible_to_model": false}
+    }
+  }
+}

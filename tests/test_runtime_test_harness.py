@@ -1,3 +1,6 @@
+import tomllib
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -39,3 +42,12 @@ def test_reconciler_harness_uses_explicit_session_factory() -> None:
     config = RuntimeHarnessConfig(factory, {"test": {"keys": {"test": "random"}}}, "runtime-test", "http://127.0.0.1:8765")
     dependencies = RuntimeDependencies(None, factory, None, None, None, LoopbackTestTransport(config))
     assert ReconcilerRunner.from_dependencies(dependencies, "test-owner")._session_factory is factory
+
+
+def test_runtime_test_files_are_declared_in_pytest_collection_patterns() -> None:
+    """守护 Runtime 专项测试不会因 pytest 配置回退默认规则而静默漏收。"""
+    project_root = Path(__file__).parents[1]
+    with (project_root / "pyproject.toml").open("rb") as config_file:
+        pytest_config = tomllib.load(config_file)["tool"]["pytest"]["ini_options"]
+
+    assert pytest_config["python_files"] == ["test_*.py", "runtime_test_*.py"]

@@ -24,7 +24,7 @@ from app.runtime.material_schema import (
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
-from app.runtime.tool_gateway import ToolGateway
+from app.runtime.tool_gateway import ToolErrorRejected, ToolGateway
 from app.services.evaluation_service import EvaluationService
 from app.services.tool_call_audit_service import ToolCallAuditService
 
@@ -366,7 +366,7 @@ class MemoirNodeRunner:
             )
             if committed is not None:
                 reconciled = self._gateway.get_publish_result(
-                    run.business_connector_id, archive_id, run.run_id,
+                    run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
                     committed.idempotency_key, tool_context,
                 )
                 if reconciled is not None:
@@ -393,12 +393,59 @@ class MemoirNodeRunner:
                     self._audit.unknown(audit, "HTTP_TIMEOUT", lease_context=self._lease_context)
                 logging.warning("MemoirAgent 发布结果未知 run_id=%s", run.run_id)
                 raise
+            except ToolErrorRejected as exc:
+                # Provider 的合法 ToolError 已由 Gateway 完整校验；这里仅消费冻结
+                # code/retryable，绝不读取响应 body 或 safe_message。
+                if exc.error_code == "GENERATION_SUPERSEDED":
+                    if audit is not None:
+                        self._audit.fail(audit, exc.error_code, retryable=False,
+                                         lease_context=self._lease_context)
+                    raise RuntimeError("GENERATION_SUPERSEDED") from None
+                if exc.error_code == "IDEMPOTENCY_CONFLICT":
+                    try:
+                        reconciled = self._gateway.get_publish_result(
+                            run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
+                            logical_key, tool_context,
+                        )
+                    except ToolErrorRejected as reconciliation_error:
+                        if audit is not None:
+                            self._audit.fail(
+                                audit, reconciliation_error.error_code,
+                                retryable=reconciliation_error.retryable,
+                                error_type="business_tool_error",
+                                lease_context=self._lease_context,
+                            )
+                        if reconciliation_error.error_code == "GENERATION_SUPERSEDED":
+                            raise RuntimeError("GENERATION_SUPERSEDED") from None
+                        if reconciliation_error.retryable:
+                            raise RuntimeError("TOOL_RETRYABLE_FAILURE") from None
+                        raise RuntimeError(reconciliation_error.error_code) from None
+                    if (
+                        isinstance(reconciled, dict)
+                        and isinstance(reconciled.get("revision"), int)
+                        and reconciled.get("content_digest") == digest
+                    ):
+                        state.publish_result = reconciled
+                        if audit is not None and not self._audit.succeed(
+                            audit, reconciled["revision"], digest,
+                            lease_context=self._lease_context,
+                        ):
+                            state.publish_result = None
+                            raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN") from None
+                        return {"node_id": "publish_document", "published": True}
+                if audit is not None:
+                    self._audit.fail(audit, exc.error_code, retryable=exc.retryable,
+                                     error_type="business_tool_error",
+                                     lease_context=self._lease_context)
+                if exc.retryable:
+                    raise RuntimeError("TOOL_RETRYABLE_FAILURE") from None
+                raise RuntimeError(exc.error_code) from None
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 409:
                     # Idempotency 冲突不可信任响应正文；仅再次查询业务端已提交的
                     # revision/content_digest，并要求 digest 与本次规范化文档一致。
                     reconciled = self._gateway.get_publish_result(
-                        run.business_connector_id, archive_id, run.run_id,
+                        run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
                         logical_key, tool_context,
                     )
                     if (
@@ -460,11 +507,24 @@ class MemoirNodeRunner:
         ):
             raise ValueError("MEMORY_SNAPSHOT_REFERENCE_INVALID")
         # 读取请求必须绑定当前 Run 与 generation，防止旧 Run 读取或发布新一代归档素材。
-        state.snapshot = self._gateway.get_snapshot(
-            run.business_connector_id, archive_id, snapshot_id,
-            run.run_id, generation_epoch,
-            ToolGateway.build_tool_context(run, "load_snapshot"),
-        )
+        try:
+            state.snapshot = self._gateway.get_snapshot(
+                run.business_connector_id, archive_id, snapshot_id,
+                run.run_id, generation_epoch,
+                ToolGateway.build_tool_context(run, "load_snapshot"),
+            )
+        except ToolErrorRejected as exc:
+            # read Tool 没有 side-effect physical attempt，不能伪造 AgentToolCall；但
+            # 必须消费 Gateway 已验证的冻结分类，禁止将 HTTP/body/异常原文漏入日志。
+            logging.warning(
+                "MemoirAgent 快照工具被业务端拒绝 run_id=%s code=%s",
+                run.run_id, exc.error_code,
+            )
+            if exc.error_code == "GENERATION_SUPERSEDED":
+                raise RuntimeError("GENERATION_SUPERSEDED") from None
+            if exc.retryable:
+                raise RuntimeError("TOOL_RETRYABLE_FAILURE") from None
+            raise RuntimeError(exc.error_code) from None
         logging.info("MemoirAgent 已加载快照 run_id=%s archive_id=%s", run.run_id, archive_id)
         return {"node_id": "load_snapshot", "snapshot_loaded": True}
 

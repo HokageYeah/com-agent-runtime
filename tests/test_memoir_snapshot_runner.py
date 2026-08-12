@@ -4,8 +4,10 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.agents.memoir_agent.runner import MemoirNodeRunner
+from app.contracts.tools import ToolError
 from app.db.sqlalchemy_db import Base
 from app.runtime.state import AgentState
+from app.runtime.tool_gateway import ToolErrorRejected
 from app.services.tool_call_audit_service import ToolCallAuditService
 
 
@@ -13,17 +15,41 @@ def test_load_snapshot_writes_only_runtime_memory_state():
     class Gateway:
         def get_snapshot(self, connector_id, archive_id, snapshot_id, run_id, generation_epoch, tool_context=None):
             return {"diaries": ["私密正文"]}
-    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 0}, "business_connector_id": "c", "run_id": "r"})()
+    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 0}, "business_connector_id": "c", "run_id": "r", "agent_id": "memoir_agent", "agent_version": "1.0.1", "business_type": "couple_memory", "business_id": "a", "trace_id": "trace-1"})()
     state = AgentState()
     assert MemoirNodeRunner(Gateway()).run_node({"node_id": "load_snapshot"}, run, state) == {"node_id": "load_snapshot", "snapshot_loaded": True}
     assert state.snapshot == {"diaries": ["私密正文"]}
+
+
+@pytest.mark.parametrize(
+    ("code", "retryable", "expected"),
+    [
+        ("GENERATION_SUPERSEDED", False, "GENERATION_SUPERSEDED"),
+        ("MEMORY_SNAPSHOT_UNAVAILABLE", False, "MEMORY_SNAPSHOT_UNAVAILABLE"),
+        ("RUNTIME_SERVICE_UNAVAILABLE", True, "TOOL_RETRYABLE_FAILURE"),
+    ],
+)
+def test_load_snapshot_consumes_validated_tool_error_without_body_leak(
+    code: str, retryable: bool, expected: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Gateway:
+        def get_snapshot(self, *args, **kwargs):
+            raise ToolErrorRejected(ToolError(
+                error_code=code, error_type="fixture", retryable=retryable,
+                safe_message="private response must not escape", details_visible_to_model=False,
+            ))
+
+    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 1}, "business_connector_id": "c", "run_id": "r", "agent_id": "memoir_agent", "agent_version": "1.0.1", "business_type": "couple_memory", "business_id": "a", "trace_id": "trace-1"})()
+    with pytest.raises(RuntimeError, match=expected):
+        MemoirNodeRunner(Gateway()).run_node({"node_id": "load_snapshot"}, run, AgentState())
+    assert "private response must not escape" not in caplog.text
 
 
 def test_publish_document_writes_only_publish_result():
     class Gateway:
         def publish_playback_document(self, *args):
             return {"revision": 1, "content_digest": "digest"}
-    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 1}, "business_connector_id": "c", "run_id": "r", "execution_attempt": 1})()
+    run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 1}, "business_connector_id": "c", "run_id": "r", "execution_attempt": 1, "agent_id": "memoir_agent", "agent_version": "1.0.1", "business_type": "couple_memory", "business_id": "a", "trace_id": "trace-1"})()
     state = AgentState(playback_document={"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []})
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

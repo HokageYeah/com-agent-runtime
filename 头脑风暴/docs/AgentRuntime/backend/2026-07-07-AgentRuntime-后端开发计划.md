@@ -2,6 +2,10 @@
 
 > **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
 
+> **2026-08-12 回忆录 M3 冻结兼容复核：M3 [部分] PARTIAL；M4 [ ] NO-GO。** v1.0 字节保持 HEAD（四字段/六码/两字段 query，SHA `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`）；v1.1 经 `X-Agent-Tool-Contract-Version` 承载九码/五字段强化语义（SHA `704a10f29d096694e28dd54bff8f73419b5427b7f373ed0d880775083e65c04e`），未知版本安全拒绝。Runtime `730 collected; 708 passed, 22 skipped`、mypy 124 files、Ruff/Alembic/diff-check；业务端分片 `1362 passed, 8 skipped`、双版本注入各 `8 passed`、Ruff/Alembic/diff-check。历史 RunRef 仅回填可证明 1.0.0，异常行 fail-closed、新 1.0.1 不回写。旧 v1.0 non-2xx 形状与原始“统一完整 ToolError”门槛冲突，阻断 COMPLETE/GO。
+
+> **本复核对历史记录的优先级说明：** 下文所有“M3 COMPLETE/M4 GO”“v1.0 已包含九码五字段强化”或“v1.0/所有版本均要求显式 `details_visible_to_model`”的陈述均保留为历史审计，现已被本段取代。v1.0 保持四字段 HEAD wire，省略的 `details_visible_to_model` 默认 `false`；显式五字段/九码只属于经 `X-Agent-Tool-Contract-Version` 协商的 v1.1。内部 `memory.*` Tool 的非 2xx 直接返回协商 ToolError JSON，不得借用普通业务 `ret/data` 或 FastAPI `detail`；普通业务 API 合同不变。context `business_id` 必须与实际 Archive 业务 ID 相同，旧“仅校验存在”的历史决定失效。
+
 > **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** Task 6.5（归档/快照/播放文档收尾）与 Task 10.75（密码/列表/用户侧 API）对应的本仓代码均判定为“仓内历史实现已完成、目标架构待迁移”：模型、迁移、路由、service 不删除、不重写，作为迁移证据保留；本仓已在 R1 实现 `app/api/api.py` 的环境门禁——`production` 仅注册 `/api/v1/runtime/*` provider，业务路由仅在 `development` / `test` 注册以保留审计能力。下方 checkbox 维持历史勾选状态，不再作为目标 baseline 重审；目标实现以 `couple-diary-b` 计划为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -893,14 +897,14 @@ unique(client_id, idempotency_key, scope)
 - [✅] 使用 httpx 调业务工具接口，支持 timeout 和 retry。
 - [✅] 每个物理调用使用独立 `tool_call_id/execution_attempt/tool_attempt`。side effect 请求先条件写 `AgentToolCall.running`、稳定 logical operation key、业务幂等键和规范签名 body 的 `request_digest`，提交成功后才允许发送 HTTP 请求；重试与接管复用相同 logical key、幂等键和 digest。
 - [✅] 工具返回后只在 fencing、privacy 和 authorization 条件仍有效时把 ToolCall/AgentState 推进为 succeeded/failed；条件失效或结果不确定时保留 running 供对账用原幂等键查询，禁止用迟到结果推进 run。
-- [ ] 结构化处理业务工具错误：非 2xx 解析冻结 `ToolError(error_code/error_type/retryable/safe_message/details_visible_to_model)`，v1 只接受 allowlist code 且强制 `details_visible_to_model=false`；校验 HTTP/code/retryable 一致性后驱动 ToolCall 审计、受控重试或不可重试终止，不把 FastAPI detail、堆栈、内部地址、响应原文或私密字段放入模型上下文。当前 `ToolGateway` 只按 HTTP 状态抛错，尚未完成本项。
+- [✅] 结构化处理业务工具错误：非 2xx 严格解析冻结 ToolError、校验类型/矩阵并驱动安全审计、受控重试或终止；不记录正文、detail、堆栈、地址或私密字段。
 - [✅] side effect 工具业务幂等结果默认保留 30 天；HTTP retry、resume 和 worker 接管复用原逻辑键。
 - [✅] 业务端返回 `409 IDEMPOTENCY_CONFLICT` 时校验本次 digest 与已记录 digest，按不可重试契约/实现错误终止并写安全审计，不能生成新 key 绕过冲突。
 - [✅] 按 `cancellation_behavior=cancellable/non_cancellable/query_after_commit` 传播取消；不可中止或已提交工具只用原逻辑幂等键查询结果，不允许旧 fencing/privacy version 推进状态。
 - [✅] 每次调用前复核 authorization version；业务服务按当前 archive/owner/generation epoch 二次鉴权。
 - [✅] authorization version 变化、撤销拒绝和 connector/target 授权失败写 RuntimeAuditEvent，不记录凭据、endpoint secret 或业务 payload。
 - [✅] 测试 `memory.get_snapshot` 和 `memory.publish_playback_document` 参数映射、key 轮换、稳定幂等、超时/接管、SSRF、权限撤销和 `GENERATION_SUPERSEDED`。
-- [ ] 补齐冻结 `ToolRequest/ToolResult` 与发送实现的差距：从可信 Run/Step 生成 `input+context`，发送 `X-Agent-Run-Id/X-Agent-Tool-Name`，仅在存在权威物理 ToolCall 时发送 `X-Agent-Tool-Attempt`；先校验响应顶层 `schema_version=1.0.0` 再读取 `output`，并对 Snapshot payload 内层 `schema_version` 独立做 major 兼容校验。新增双向 contract test，当前仅 `{"input":...}`/只读取 `output` 的测试不得继续作为目标合同。
+- [✅] 对齐冻结 `ToolRequest/ToolResult`：可信 Run/Step 生成 context、发送关联 headers、双层 schema 校验和双向 contract test 已完成。
 
 ### Task 8: ModelGateway、PromptRegistry、ContextManager、结构化输出
 

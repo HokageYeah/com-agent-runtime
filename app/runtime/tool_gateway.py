@@ -17,7 +17,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.contracts.tools import (
-    TOOL_ERROR_HTTP_STATUS,
+    TOOL_ERROR_SPECS_BY_WIRE_VERSION,
     ToolError,
     ToolRequest,
     ToolResult,
@@ -67,6 +67,22 @@ _FIXED_NATIVE_TOOLS: dict[str, tuple[tuple[str, ...], Callable[..., object]]] = 
     "runtime.contains_sensitive_identifier": (("value",), contains_sensitive_identifier),
 }
 _TOOL_OUTPUT_SENSITIVE = re.compile(r"(?<!\d)(?:1[3-9]\d{9}|\d{17}[\dXx])(?!\d)")
+_TOOL_WIRE_VERSION_BY_AGENT_VERSION = {"1.0.0": "1.0.0", "1.0.1": "1.1.0"}
+_DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
+
+
+class ToolErrorRejected(ValueError):
+    """已验证的业务 ToolError 的安全控制流信号。
+
+    仅携带冻结 code/retryable，不携带 Provider response、detail 或异常文本；调用者
+    因此可决定终止、受控重试或 generation superseded 停止，而不会把私密响应带出
+    HTTP 边界。
+    """
+
+    def __init__(self, error: ToolError) -> None:
+        self.error_code = error.error_code
+        self.retryable = error.retryable
+        super().__init__(f"TOOL_ERROR_{error.error_code}")
 
 
 @dataclass(frozen=True)
@@ -157,6 +173,9 @@ class ToolGateway:
             raise ValueError("TOOL_IDEMPOTENCY_KEY_REQUIRED")
 
         references = self._trusted_references(runtime_context)
+        tool_context = runtime_context.get("tool_context")
+        if not isinstance(tool_context, Mapping):
+            raise ValueError("TOOL_CONTEXT_INVALID")
         if manifest.name == "memory.get_snapshot":
             input_data = references
         else:
@@ -171,6 +190,7 @@ class ToolGateway:
             manifest.name,
             idempotency_key,
             retry_transport=not side_effect,
+            tool_context=tool_context,
         )
 
     def call_native(
@@ -235,49 +255,30 @@ class ToolGateway:
         logging.info("工具结果安全写入 run_id=%s tool=%s target=%s", run_id, manifest.name, manifest.output_to)
 
     @staticmethod
-    def to_tool_error(exc: Exception) -> ToolError:
-        """把 Gateway 抛出的异常映射为冻结 ToolError；统一未来失败语义转换入口。
-
-        决策（R3 路径 b）：worker/runner 当前 catch Exception 后写受控 audit code，
-        不直接消费 ToolError；因此 Gateway 仍抛 ValueError 以保持现有异常处理契约，
-        仅提供该助手作为未来统一的 ToolError 转换入口。
-
-        铁律：``details_visible_to_model`` 永远 False，业务错误详情不进入模型上下文。
-        ValueError 的字符串内容（如 'TOOL_OUTPUT_INVALID'）原样映射到 error_code；
-        非 ValueError 给出 'TOOL_UNKNOWN' 兜底。``retryable`` 默认 False，调用方
-        按受控码自行决定是否覆盖，避免在助手内臆造重试策略。
-        """
-        if isinstance(exc, ValueError) and str(exc):
-            error_code = str(exc)
-        else:
-            error_code = "TOOL_UNKNOWN"
-        return ToolError(
-            error_code=error_code,
-            error_type=type(exc).__name__,
-            retryable=False,
-            safe_message="工具调用失败，详情见审计日志",
-            details_visible_to_model=False,
-        )
-
-    @staticmethod
     def build_tool_context(run: AgentRun, step_id: str) -> dict[str, str]:
         """从可信 Run/Step 构造冻结 envelope context 7 字段。
 
         形状由 fixture tool_contract.context_required 冻结：agent_id、
         agent_version、run_id、step_id、business_type、business_id、trace_id。
-        生产 AgentRun 6 字段均 nullable=False，直接取值；getattr 默认空串
-        仅兼容单元测试的最小鸭子 Run（codebase 既定隔离模式），生产 context
-        完整性由跨仓合约测试兜底，不依赖此处的防御默认。
+        所有字段都必须来自真实 AgentRun/当前 Step，缺失不允许以空串兜底；否则
+        在 HTTP 请求构造前 fail closed，避免调用方自报任意身份或业务归属。
         """
-        return {
-            "agent_id": getattr(run, "agent_id", ""),
-            "agent_version": getattr(run, "agent_version", ""),
-            "run_id": getattr(run, "run_id", ""),
+        context = {
+            "agent_id": run.agent_id,
+            "agent_version": run.agent_version,
+            "run_id": run.run_id,
             "step_id": step_id,
-            "business_type": getattr(run, "business_type", ""),
-            "business_id": getattr(run, "business_id", ""),
-            "trace_id": getattr(run, "trace_id", ""),
+            "business_type": run.business_type,
+            "business_id": run.business_id,
+            "trace_id": run.trace_id,
         }
+        if any(not isinstance(value, str) or not value for value in context.values()):
+            raise ValueError("TOOL_CONTEXT_INVALID")
+        if context["agent_id"] != "memoir_agent" or context["business_type"] != "couple_memory":
+            raise ValueError("TOOL_CONTEXT_TRUST_INVALID")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", context["agent_version"]):
+            raise ValueError("TOOL_CONTEXT_TRUST_INVALID")
+        return context
 
     def get_snapshot(
         self,
@@ -324,22 +325,53 @@ class ToolGateway:
         )
 
     def get_publish_result(
-        self, connector_id: str, archive_id: str, run_id: str, idempotency_key: str,
+        self,
+        connector_id: str,
+        archive_id: str,
+        *scope_and_key: object,
         tool_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
-        """对账未知写入；404 表示业务端尚未观察到该逻辑操作。"""
+        """对账未知写入，并兼容 v1.0.0 的两字段 query wire。
+
+        新调用传 ``snapshot_id, run_id, generation_epoch, idempotency_key``；历史
+        调用传 ``run_id, idempotency_key``，由 Provider 以 Archive/RunRef 的可信
+        关联复核缺失 scope。其它 arity/type 一律在发包前拒绝。
+        """
+        if len(scope_and_key) == 2:
+            run_id, idempotency_key = scope_and_key
+            if not isinstance(run_id, str) or not isinstance(idempotency_key, str):
+                raise ValueError("TOOL_PUBLISH_RESULT_INPUT_INVALID")
+            input_data: dict[str, Any] = {"archive_id": archive_id, "run_id": run_id}
+        elif len(scope_and_key) == 4:
+            snapshot_id, run_id, generation_epoch, idempotency_key = scope_and_key
+            if (
+                not isinstance(snapshot_id, str)
+                or not isinstance(run_id, str)
+                or isinstance(generation_epoch, bool)
+                or not isinstance(generation_epoch, int)
+                or not isinstance(idempotency_key, str)
+            ):
+                raise ValueError("TOOL_PUBLISH_RESULT_INPUT_INVALID")
+            input_data = {
+                "archive_id": archive_id,
+                "snapshot_id": snapshot_id,
+                "run_id": run_id,
+                "generation_epoch": generation_epoch,
+            }
+        else:
+            raise ValueError("TOOL_PUBLISH_RESULT_INPUT_INVALID")
         try:
             return self._call(
                 connector_id,
                 "/api/v1/internal/agent-tools/memory.get_publish_result",
-                {"archive_id": archive_id, "run_id": run_id},
+                input_data,
                 "memory.get_publish_result",
                 idempotency_key,
                 allow_during_draining=True,
                 tool_context=tool_context,
             )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
+        except ToolErrorRejected as exc:
+            if exc.error_code == "PUBLISH_NOT_YET_OBSERVED":
                 return None
             raise
 
@@ -364,18 +396,18 @@ class ToolGateway:
                 self._audit_rejection(run_id, CONNECTOR_DISABLED)
             raise ValueError("BUSINESS_CONNECTOR_UNAVAILABLE")
         connector_origin = self._connector_origins[connector_id]
-        # R3：构造冻结 ToolRequest 形状，input 来自业务入参，context 含冻结 7 字段
-        # （fixture tool_contract.context_required：agent_id/agent_version/run_id/
-        # step_id/business_type/business_id/trace_id）。生产路径由 Runner 经
-        # build_tool_context 从可信 Run 构造透传；路径1（langchain 适配器，仅测试/
-        # 预留，无 Run 上下文）传 None 时 context 置空，待其启用时由调用方装配。
+        # 工具 context 是可信 Run/Step envelope，不是可选业务输入。MockTransport 的
+        # 旧单元测试可继续覆盖网络细节；任何真实 HTTP transport 都必须在发包前具有
+        # 完整 context，不能以 ``None``、``{}`` 或空字符串降级。
+        context = self._validated_tool_context(tool_context, input_data, tool_name)
         tool_request = ToolRequest(
             input=input_data,
-            context=dict(tool_context) if tool_context else {},
+            context=context,
         )
         content = httpx.Request("POST", "http://tool.local", json=tool_request.model_dump()).content
         timestamp = str(int(time.time()))
-        headers = {"X-Agent-Runtime-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret)}
+        wire_version = self._tool_wire_version(context)
+        headers = {"X-Agent-Client-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret), "X-Agent-Tool-Contract-Version": wire_version}
         if tool_call is not None:
             attempt = tool_call.tool_attempt
             if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
@@ -474,12 +506,10 @@ class ToolGateway:
                 connector_id,
                 response.status_code,
             )
-        # R3 补充：非 2xx 响应 body 自称 ToolError 形状时按冻结铁律 fail closed。
-        # 仅当 body 能解析为 ToolError 且显式声明 details_visible_to_model=true 时
-        # 提前抛受控错误码，阻止业务错误详情通过模型可见通道进入 AgentState/日志。
-        # 其他非 2xx 响应（FastAPI 默认 detail / 空 body 等）继续交给 raise_for_status，
-        # 保持 runner 对 409/404 的 HTTPStatusError 捕获契约不变。
-        ToolGateway._fail_closed_if_response_claims_unsafe_tool_error(response, tool_name)
+        # 所有非 2xx 都必须是完整、精确的 ToolError。合法错误也不能退回到裸 HTTP
+        # 分支：它们通过 ToolErrorRejected 驱动上层审计/重试/旧 generation 终止。
+        if response.is_error:
+            raise ToolErrorRejected(self._parse_tool_error(response, tool_name, wire_version))
         response.raise_for_status()
         # R3：响应解析升级为冻结 ToolResult，强制 schema_version 与当前协议版本对齐。
         # ToolResult.schema_version 默认 '1.0.0'，缺失字段走默认值视为匹配；显式声明
@@ -639,80 +669,89 @@ class ToolGateway:
             "generation_epoch": generation_epoch,
         }
 
-    @staticmethod
-    def _fail_closed_if_response_claims_unsafe_tool_error(
-        response: httpx.Response, tool_name: str
-    ) -> None:
-        """非 2xx 响应若 body 自称 ToolError 且违反冻结铁律，一律 fail closed。
-
-        R3 补充（运行手册 L558）：仅当 body 能完整解析为 ToolError 形状时介入；
-        介入条件目前只覆盖契约明确禁止的 ``details_visible_to_model=True``——这是
-        冻结合约里唯一的硬性不安全声明，必须无条件拒绝，防止业务错误详情灌入
-        模型上下文。
-
-        P3 冻结：error_code 必须落在 allowlist (TOOL_ERROR_HTTP_STATUS)，且
-        (http_status, retryable) 必须与矩阵一致；retryable 由 status>=500 派生，
-        与 runner.py 重试判定对齐。未知码按 TOOL_ERROR_CODE_UNKNOWN 拒绝，
-        (code,http_status,retryable) 矛盾按 TOOL_ERROR_CONTRADICTION 拒绝。
-
-        body 不构成 ToolError（如 FastAPI 默认 ``{"detail": ...}``、空 body）时
-        不介入，让 ``raise_for_status`` 按 409/404 现有契约传播 HTTPStatusError。
-        """
-        if not response.is_error:
-            return
+    def _parse_tool_error(
+        self, response: httpx.Response, tool_name: str, wire_version: str
+    ) -> ToolError:
+        """严格解析 non-2xx ToolError，且绝不记录 response body。"""
         try:
             parsed = response.json()
         except ValueError:
-            return
+            raise ValueError("TOOL_ERROR_SHAPE_INVALID") from None
         if not isinstance(parsed, dict):
-            return
-        # 仅在 body 自称 ToolError（含全部 4 个必填字段）时介入；非 ToolError 形状
-        # 由 raise_for_status 按状态码处理，保留 runner 既有捕获契约。
+            raise ValueError("TOOL_ERROR_SHAPE_INVALID")
         required_keys = {"error_code", "error_type", "retryable", "safe_message"}
-        if not required_keys.issubset(parsed):
-            return
+        expected_keys = (
+            required_keys
+            if wire_version == "1.0.0"
+            else required_keys | {"details_visible_to_model"}
+        )
+        # Wire version 绑定形状：v1.0.0 仅四字段并将 visibility 默认为 false；
+        # v1.1.0 必须显式 false。两种形式之外均拒绝，不能被响应自行协商。
+        if set(parsed) != expected_keys:
+            raise ValueError("TOOL_ERROR_SHAPE_INVALID")
         try:
             candidate = ToolError.model_validate(parsed)
         except ValidationError:
-            # 自称 ToolError 但 shape 不合法，按受控码拒绝，不透传 body 内容。
-            logging.info(
-                "HTTP Business Tool 非 2xx 响应自称 ToolError 但 shape 非法 tool=%s code=%s",
-                tool_name,
-                "TOOL_ERROR_SHAPE_INVALID",
-            )
             raise ValueError("TOOL_ERROR_SHAPE_INVALID") from None
         if candidate.details_visible_to_model:
-            logging.info(
-                "HTTP Business Tool 非 2xx 响应非法声明 details_visible_to_model=True tool=%s code=%s",
-                tool_name,
-                "TOOL_ERROR_SHAPE_INVALID",
-            )
             raise ValueError("TOOL_ERROR_SHAPE_INVALID")
-        # P3：error_code 必须在冻结 allowlist 内；未知码 = 契约单方漂移或注入攻击面。
-        expected_status = TOOL_ERROR_HTTP_STATUS.get(candidate.error_code)
-        if expected_status is None:
-            logging.info(
-                "HTTP Business Tool 非 2xx 响应 ToolError error_code 不在冻结 allowlist "
-                "tool=%s rejected=%s",
-                tool_name,
-                "TOOL_ERROR_CODE_UNKNOWN",
-            )
+        specs = TOOL_ERROR_SPECS_BY_WIRE_VERSION.get(wire_version)
+        if specs is None:
+            raise ValueError("TOOL_WIRE_VERSION_INVALID")
+        spec = specs.get(candidate.error_code)
+        if spec is None:
             raise ValueError("TOOL_ERROR_CODE_UNKNOWN")
-        # P3：(http_status, retryable) 必须与冻结矩阵一致；不一致 = 分类矛盾。
-        # retryable 由 status>=500 派生（与 runner.py HTTPStatusError 重试判定对齐）。
-        expected_retryable = expected_status >= 500
-        if response.status_code != expected_status or candidate.retryable != expected_retryable:
-            logging.info(
-                "HTTP Business Tool 非 2xx 响应 ToolError (code,http_status,retryable) 与冻结矩阵矛盾 "
-                "tool=%s code=%s http=%s retryable=%s expected_http=%s expected_retryable=%s",
-                tool_name,
-                candidate.error_code,
-                response.status_code,
-                candidate.retryable,
-                expected_status,
-                expected_retryable,
-            )
+        if (
+            response.status_code != spec["http_status"]
+            or candidate.retryable is not spec["retryable"]
+            or candidate.error_type != spec["error_type"]
+            or candidate.safe_message != spec["safe_message"]
+        ):
             raise ValueError("TOOL_ERROR_CONTRADICTION")
+        logging.info("HTTP Business Tool 返回受控错误 tool=%s code=%s", tool_name, candidate.error_code)
+        return candidate
+
+    @staticmethod
+    def _tool_wire_version(context: Mapping[str, str]) -> str:
+        """从可信 AgentRun identity 选择 Tool wire；Mock 单测默认最新 wire。
+
+        该选择不能来自 Tool input 或 Provider response。历史 1.0.0 Run 明确请求
+        四字段/六码 v1，1.0.1 新 Run 才请求 v1.1 的完整错误合同。
+        """
+        if not context:
+            return _DEFAULT_TOOL_WIRE_VERSION
+        version = _TOOL_WIRE_VERSION_BY_AGENT_VERSION.get(context.get("agent_version", ""))
+        if version is None:
+            raise ValueError("TOOL_WIRE_VERSION_INVALID")
+        return version
+
+    def _validated_tool_context(
+        self,
+        tool_context: Mapping[str, str] | None,
+        input_data: Mapping[str, Any],
+        tool_name: str,
+    ) -> dict[str, str]:
+        """在真实发送前验证冻结 7 字段，阻断 context 伪造和 run 漂移。"""
+        # 网络隔离单元测试使用 MockTransport；生产 HTTP transport 不存在此分支。
+        if tool_context is None and self._is_mock_transport:
+            return {}
+        required = {"agent_id", "agent_version", "run_id", "step_id", "business_type", "business_id", "trace_id"}
+        if not isinstance(tool_context, Mapping) or set(tool_context) != required:
+            raise ValueError("TOOL_CONTEXT_INVALID")
+        context = dict(tool_context)
+        if any(not isinstance(value, str) or not value for value in context.values()):
+            raise ValueError("TOOL_CONTEXT_INVALID")
+        if context["run_id"] != input_data.get("run_id"):
+            raise ValueError("TOOL_CONTEXT_RUN_ID_MISMATCH")
+        if context["business_id"] != input_data.get("archive_id"):
+            raise ValueError("TOOL_CONTEXT_BUSINESS_ID_MISMATCH")
+        if context["agent_id"] != "memoir_agent" or context["business_type"] != "couple_memory":
+            raise ValueError("TOOL_CONTEXT_TRUST_INVALID")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", context["agent_version"]):
+            raise ValueError("TOOL_CONTEXT_TRUST_INVALID")
+        if not tool_name.startswith("memory."):
+            raise ValueError("TOOL_CONTEXT_TRUST_INVALID")
+        return context
 
     @staticmethod
     def _validate_output(output: dict[str, Any]) -> None:

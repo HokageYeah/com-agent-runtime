@@ -10,13 +10,18 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentCheckpoint, AgentRun, RuntimeAuditRecord
+from app.models import AgentCheckpoint, AgentDefinition, AgentRun, RuntimeAuditRecord
 from app.runtime.checkpoint import (
     CheckpointError,
     CheckpointStore,
     FernetCheckpointCipher,
 )
 from app.runtime.interfaces import LeaseContext
+
+
+def _add_active_test_package(session, now: datetime) -> None:
+    """checkpoint 写入同样必须满足 Run 冻结的有效 Package 前提。"""
+    session.add(AgentDefinition(agent_id="memoir_agent", version="1.0.0", runtime_type="workflow", definition_json={}, package_digest="sha256:test", contract_version="1.0.0", status="active", status_changed_at=now, status_changed_by="test", status_change_reason="fixture"))
 
 
 def test_checkpoint_store_encrypts_state_and_loads_latest_for_valid_lease() -> None:
@@ -35,6 +40,7 @@ def test_checkpoint_store_encrypts_state_and_loads_latest_for_valid_lease() -> N
             lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     context = LeaseContext(
         execution_attempt=1, lease_owner="worker-a", fencing_token=1,
@@ -89,6 +95,7 @@ def _seed_run_for_purge(session, run_id: str) -> datetime:
             lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     return now
 

@@ -48,6 +48,7 @@ types-cachetools = ">=5.5.0"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+python_files = ["test_*.py", "runtime_test_*.py"]
 addopts = "-ra"
 
 [tool.ruff]
@@ -67,9 +68,18 @@ indent-style = "space"
 # 先让 Runtime 新边界在项目虚拟环境中稳定执行类型检查；旧版业务 ORM 仍使用
 # 未注解的 ``Column`` 声明，需单独迁移到 Mapped[] 后再纳入本轮门禁。
 python_version = "3.13"
+# CI/受限工作区不允许写仓库内 .mypy_cache；关闭增量缓存仍执行完整类型检查，
+# 避免 `mypy app` 因缓存数据库不可写而跳过门禁。
+incremental = false
+# Desktop sandbox 将运行时仓库挂为只读，缓存转入系统临时目录；不影响检查范围。
+cache_dir = "/private/tmp/com-agent-runtime-mypy-cache"
 follow_imports = "skip"
 exclude = '''(?x)(
     ^app/(?:
+        # workflow.graph.py 是 Package Loader 以 AST 静态读取的非 importable
+        # 资产；两个 version 目录同名会被 mypy 映射为重复 workflow.graph。
+        # 仅排除这两个动态包资产，不排除 memoir_agent 的运行时代码。
+        agents/memoir_agent/[^/]+/workflow\.graph\.py|
         agents/memoir_agent/runner\.py|
         api/endpoints/memory_api\.py|
         core/logging_uru\.py|

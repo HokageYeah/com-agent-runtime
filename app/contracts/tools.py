@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ToolContractModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
 
 class ToolManifest(ToolContractModel):
@@ -56,17 +56,40 @@ class ToolError(ToolContractModel):
     details_visible_to_model: bool = False
 
 
-# P3 冻结：业务 HTTP Tool 非 2xx 响应若自称 ToolError，error_code 必须落在以下 allowlist，
-# 且其 HTTP 状态码必须等于此处冻结的期望值。码值与状态码精确取自业务后端实际抛出点
-# (memory_publish_service.py 的 _CODE_* 与对应 HTTPException status_code)，不臆造。
-# retryable 不单独冻结，统一由 `http_status >= 500` 派生，与 runner.py 捕获 HTTPStatusError
-# 时的重试判定完全一致；当前 6 个码均为 4xx，故 retryable 全为 False。
-# 业务端未来若要新增码，必须先在此 allowlist 与双方 fixture 同步冻结，否则 Runtime fail closed。
+# Internal Business Tool 的非 2xx 合同按 wire version 封闭。v1.0.0 保留历史六
+# 码/四字段形状；v1.1.0 才引入完整九码和显式 visibility 字段。Provider 和 consumer
+# 必须同时更新对应 fixture；Runtime 绝不按裸 HTTP 状态或 FastAPI ``detail`` 推断语义。
+TOOL_ERROR_SPECS_V1_0: dict[str, dict[str, object]] = {
+    "MEMORY_SNAPSHOT_UNAVAILABLE": {"http_status": 403, "error_type": "snapshot_unavailable", "retryable": False, "safe_message": "回忆快照当前不可读取"},
+    "GENERATION_SUPERSEDED": {"http_status": 403, "error_type": "generation_superseded", "retryable": False, "safe_message": "当前生成已被更新版本取代"},
+    "MEMORY_RUN_NOT_ACTIVE": {"http_status": 403, "error_type": "run_not_active", "retryable": False, "safe_message": "该回忆录运行当前不可执行"},
+    "MEMORY_DOCUMENT_INVALID": {"http_status": 403, "error_type": "document_invalid", "retryable": False, "safe_message": "播放文档不满足发布要求"},
+    "IDEMPOTENCY_CONFLICT": {"http_status": 409, "error_type": "idempotency_conflict", "retryable": False, "safe_message": "请求与既有幂等操作冲突"},
+    "PUBLISH_NOT_YET_OBSERVED": {"http_status": 404, "error_type": "publish_not_observed", "retryable": False, "safe_message": "尚未观察到发布结果"},
+}
+
+
+TOOL_ERROR_SPECS_V1_1: dict[str, dict[str, object]] = {
+    "IDEMPOTENCY_CONFLICT": {"http_status": 409, "error_type": "idempotency_conflict", "retryable": False, "safe_message": "请求与既有幂等操作冲突"},
+    "GENERATION_SUPERSEDED": {"http_status": 409, "error_type": "generation_superseded", "retryable": False, "safe_message": "当前生成已被更新版本取代"},
+    "AUTHORIZATION_REVOKED": {"http_status": 403, "error_type": "authorization_revoked", "retryable": False, "safe_message": "该运行授权已失效"},
+    "BUSINESS_DATA_INVALID": {"http_status": 422, "error_type": "business_data_invalid", "retryable": False, "safe_message": "业务数据不满足工具要求"},
+    "MEMORY_SNAPSHOT_UNAVAILABLE": {"http_status": 403, "error_type": "snapshot_unavailable", "retryable": False, "safe_message": "回忆快照当前不可读取"},
+    "MEMORY_RUN_NOT_ACTIVE": {"http_status": 409, "error_type": "run_not_active", "retryable": False, "safe_message": "该回忆录运行当前不可执行"},
+    "MEMORY_DOCUMENT_INVALID": {"http_status": 422, "error_type": "document_invalid", "retryable": False, "safe_message": "播放文档不满足发布要求"},
+    "PUBLISH_NOT_YET_OBSERVED": {"http_status": 404, "error_type": "publish_not_observed", "retryable": False, "safe_message": "尚未观察到发布结果"},
+    "RUNTIME_SERVICE_UNAVAILABLE": {"http_status": 503, "error_type": "service_unavailable", "retryable": True, "safe_message": "业务工具服务暂时不可用"},
+}
+
+# 当前 Runtime 的新 Run 默认使用 v1.1.0；保留别名避免既有内部导入发生漂移。
+TOOL_ERROR_SPECS = TOOL_ERROR_SPECS_V1_1
+
+TOOL_ERROR_SPECS_BY_WIRE_VERSION: dict[str, dict[str, dict[str, object]]] = {
+    "1.0.0": TOOL_ERROR_SPECS_V1_0,
+    "1.1.0": TOOL_ERROR_SPECS_V1_1,
+}
+
+# 保留该投影供既有调用方使用；语义校验一律取 ``TOOL_ERROR_SPECS`` 的完整合同。
 TOOL_ERROR_HTTP_STATUS: dict[str, int] = {
-    "MEMORY_SNAPSHOT_UNAVAILABLE": 403,  # 快照不可读（权限/缺失）
-    "GENERATION_SUPERSEDED": 403,  # 生成被更高 epoch 取代
-    "MEMORY_RUN_NOT_ACTIVE": 403,  # Run 已终结，拒绝写入
-    "MEMORY_DOCUMENT_INVALID": 403,  # 文档校验失败
-    "IDEMPOTENCY_CONFLICT": 409,  # 幂等键冲突
-    "PUBLISH_NOT_YET_OBSERVED": 404,  # 尚无可观测的发布结果（轮询信号）
+    code: cast(int, spec["http_status"]) for code, spec in TOOL_ERROR_SPECS.items()
 }

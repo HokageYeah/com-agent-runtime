@@ -2,6 +2,10 @@
 
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
+> **2026-08-12 回忆录 M3 冻结兼容复核：M3 [部分] PARTIAL；M4 [ ] NO-GO。** 收集守护为 730 项（11 runtime_test/95 项）。双栈保留 v1.0 HEAD 字节 wire（SHA `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`），强化九码/五字段为显式协商 v1.1（SHA `704a10f29d096694e28dd54bff8f73419b5427b7f373ed0d880775083e65c04e`）；Runtime 从冻结身份选择版本并按各自 wire fail-closed。Runtime `708 passed, 22 skipped`、业务端分片 `1362 passed, 8 skipped`、两版本注入各 `8 passed`、Ruff/Alembic/diff-check/mypy 124 files 通过。阻断仍是 v1.0 旧 non-2xx 形状不满足原始统一完整合同门槛。
+
+> **本复核对历史记录的优先级说明：** 下文保留的“M3 COMPLETE/M4 GO”“v1.0 字节级不变且同时承载九码五字段扩展”及“所有 v1 都要求显式 `details_visible_to_model`”均是历史记录，现已被本段取代，不得作为完成证据。v1.0 固定四字段 wire，`details_visible_to_model` 可省略且默认 `false`；只有经 `X-Agent-Tool-Contract-Version` 协商的 v1.1 固定五字段并要求该值为 `false`。内部 `memory.*` Tool 错误直接使用协商 ToolError JSON，不能回退为普通业务 `ret/data` 或 FastAPI `detail`；普通业务 API 响应合同不受影响。可信 context 的 `business_id` 现须匹配真实 Archive 业务 ID，旧的“只验证非空”记录已经失效。
+
 > **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** Task 6.5（情侣日记归档/快照/播放文档底座）、Task 10.75（回忆录密码/列表/用户侧业务 API）以及本仓内旧前端联调相关条目对应的实现代码均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留在仓库内作为迁移证据与审计回放来源，不删除、不重写。本仓 Runtime 已在 R1 落地生产配置路由门禁：`production` 环境下 FastAPI 仅注册 `/api/v1/runtime/*` provider（health / capabilities / agent-runs），不再挂载 `/api/v1/memory/*` 用户业务、`/api/v1/internal/agent-tools/memory.*` 本地工具 handler、`/api/v1/internal/agent-callbacks/memory` 业务回调 consumer，也不启用 `app.memory_runtime_launcher` legacy 启动器；`development` / `test` 仍按现状注册以便审计与跨仓联调。下方原 checkbox 状态保持不变，仅作为历史勾选证据；目标 baseline 以情侣日记仓库计划为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -218,7 +222,7 @@ side effect 幂等键固定为 `{run_id}:{logical_step_key}:{tool_name}:{operati
 
 成功响应遵循冻结 `ToolResult`：顶层固定 `{"output":{...},"schema_version":"1.0.0"}`。对 `memory.get_snapshot`，`output.schema_version` 是 Snapshot 业务 payload 的独立版本；不得用外层 Tool 合同版本替代 Snapshot schema 检查。
 
-非 2xx 响应直接遵循冻结 `ToolError`：`error_code/error_type/retryable/safe_message` 必填；`details_visible_to_model` 可省略并默认 `false`，v1 若显式提供也只能为 `false`。Runtime 按 allowlist 校验 HTTP 状态/code/retryable 一致性；未知或非法错误 fail closed，不把 FastAPI `detail` 或响应原文写入状态、审计、日志或模型上下文。
+非 2xx 响应直接遵循协商版本的冻结 `ToolError`：v1.0 固定四字段 wire（`details_visible_to_model` 可省略并默认 `false`）；v1.1 固定五字段并要求其显式为 `false`。Runtime 按该版本 allowlist 校验 HTTP 状态/code/retryable 一致性；未知或非法错误 fail closed，不把 FastAPI `detail` 或响应原文写入状态、审计、日志或模型上下文。
 
 ### 3.5 Callback 契约
 
@@ -534,8 +538,8 @@ Runtime 侧：
 - [✅] `AgentState.apply_tool_output()` 仅接受冻结 `output_to` 白名单并递归拒绝 identity/authorization/connector/generation/version/fencing/run/credential 等控制字段；Package manifest 与语义校验器同步拒绝危险 target，日志不写输出正文。
 - [✅] 已注册固定工具的取消语义由 Runtime registry 强制校验：`memory.get_snapshot=cancellable`、`memory.publish_playback_document=query_after_commit`；draining 时每次物理发送前拒绝新调用，后者仅允许按原幂等键查询已提交结果。
 - [✅] ToolCall/AgentState 结果写入继续校验 fencing、privacy 和 authorization；迟到或不确定结果留给对账按原 key 查询。相同 key 不同 digest 的 409 按不可重试冲突终止，禁止更换 key 重放。
-- [ ] 对齐已冻结但当前发送实现尚未满足的 `ToolRequest/ToolResult`：`ToolGateway` 从可信 Run/Step 构造 `input+context`，必发 `X-Agent-Run-Id/X-Agent-Tool-Name`，只在存在权威物理 ToolCall 时发送 `X-Agent-Tool-Attempt`；响应先校验顶层 `schema_version=1.0.0` 再读取 `output`，并独立校验 Snapshot payload 内层版本。同步 provider/consumer fixture，禁止把当前缩水 envelope 当作目标合同。
-- [ ] 补齐当前仅按 HTTP 状态抛错的实现差距：非 2xx 必须解析冻结 `ToolError`，以 allowlist code 驱动不可重试终止、受控重试或 `GENERATION_SUPERSEDED` 停止副作用；非法 shape、未知 code、分类矛盾和 `details_visible_to_model=true` 均 fail closed。补 provider/consumer 与无正文日志测试。
+- [✅] 对齐冻结 `ToolRequest/ToolResult`：可信 Run/Step 构造 `input+context`，必发关联 headers，响应双层版本校验；provider/consumer fixture 与跨仓测试已同步。
+- [✅] 结构化处理非 2xx `ToolError`：严格类型/形状/矩阵 fail-closed，合法码驱动安全审计、受控重试、不可重试终止、旧 generation 停止或 publish-result 对账；无正文日志测试通过。
 
 情侣日记后端侧：
 

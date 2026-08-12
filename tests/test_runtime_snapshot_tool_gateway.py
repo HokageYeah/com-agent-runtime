@@ -16,9 +16,17 @@ from app.core.tool_security import tool_signature
 from app.db.sqlalchemy_db import Base
 from app.models import AgentToolCall
 from app.runtime.test_harness import LoopbackTestTransport, RuntimeHarnessConfig
-from app.runtime.tool_gateway import BusinessConnector, ToolGateway
+from app.runtime.tool_gateway import BusinessConnector, ToolErrorRejected, ToolGateway
 from app.schemas.agent_package import ToolManifest
 from app.services.tool_call_audit_service import ToolCallAuditService
+
+
+def _tool_context(archive_id: str, run_id: str) -> dict[str, str]:
+    return {
+        "agent_id": "memoir_agent", "agent_version": "1.0.1", "run_id": run_id,
+        "step_id": "tool_step", "business_type": "couple_memory",
+        "business_id": archive_id, "trace_id": "trace-1",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -182,7 +190,7 @@ def test_gateway_fails_closed_when_real_transport_has_no_peer_verifier() -> None
     )
 
     with pytest.raises(ValueError, match="BUSINESS_CONNECTOR_PEER_UNVERIFIABLE"):
-        gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
+        gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0, _tool_context("archive-1", "run-1"))
 
 
 def test_gateway_rechecks_authorization_before_each_physical_send() -> None:
@@ -230,7 +238,7 @@ def test_gateway_signs_fixed_connector_request_without_logging_snapshot() -> Non
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
-        captured["runtime_id"] = request.headers["X-Agent-Runtime-Id"]
+        captured["runtime_id"] = request.headers["X-Agent-Client-Id"]
         captured["input"] = json.loads(request.content)["input"]
         captured["signature"] = request.headers["X-Agent-Signature"]
         captured["timestamp"] = request.headers["X-Agent-Timestamp"]
@@ -446,7 +454,7 @@ def test_gateway_allows_query_after_commit_while_draining() -> None:
         is_draining=lambda: True,
     )
 
-    assert gateway.get_publish_result("c", "a", "r", "write-1") == {"revision": 1}
+    assert gateway.get_publish_result("c", "a", "s", "r", 1, "write-1") == {"revision": 1}
     assert calls == 1
 
 
@@ -516,14 +524,13 @@ def test_generic_call_only_accepts_fixed_manifest_and_trusted_context() -> None:
     """通用入口只能从可信运行上下文取引用，不能由 Package 改写 connector 或路径。"""
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path.endswith("memory.get_snapshot")
-        # R3：请求体升级为冻结 ToolRequest 形状，新增空 context 字段。
-        assert json.loads(request.content) == {"input": {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2}, "context": {}}
+        assert json.loads(request.content) == {"input": {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2}, "context": _tool_context("a", "r")}
         return httpx.Response(200, json={"output": {"snapshot_digest": "safe-digest"}})
 
     gateway = ToolGateway({"couple_diary_backend": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")}, httpx.Client(transport=httpx.MockTransport(handler)))
     manifest = ToolManifest(name="memory.get_snapshot", version="1.0.0", connector_id="couple_diary_backend", method="POST", relative_path="/api/v1/internal/agent-tools/memory.get_snapshot", input_from="input", output_to="snapshot")
 
-    assert gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2, "input": {"archive_id": "forged"}}) == {"snapshot_digest": "safe-digest"}
+    assert gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2, "tool_context": _tool_context("a", "r"), "input": {"archive_id": "forged"}}) == {"snapshot_digest": "safe-digest"}
 
     forged = manifest.model_copy(update={"relative_path": "/internal/ssrf"})
     with pytest.raises(ValueError, match="TOOL_MANIFEST_NOT_ALLOWED"):
@@ -539,7 +546,7 @@ def test_generic_call_rejects_sensitive_tool_output_without_logging_payload(capl
     manifest = ToolManifest(name="memory.get_snapshot", version="1.0.0", connector_id="couple_diary_backend", method="POST", relative_path="/api/v1/internal/agent-tools/memory.get_snapshot", input_from="input", output_to="snapshot")
 
     with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
-        gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2})
+        gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2, "tool_context": _tool_context("a", "r")})
     assert "13800138000" not in caplog.text
 
 
@@ -664,32 +671,6 @@ def test_response_with_missing_schema_version_falls_back_to_default_and_is_accep
     assert gateway.get_snapshot("c", "a", "s", "r", 0) == {"snapshot_digest": "safe"}
 
 
-def test_to_tool_error_always_hides_details_from_model_and_maps_value_error_code() -> None:
-    """R3：ToolGateway.to_tool_error 静态助手把 ValueError 映射为冻结 ToolError。
-
-    铁律：details_visible_to_model 永远 False，避免业务错误详情污染模型上下文。
-    worker/runner 当前 catch Exception 后写受控 audit code，不直接消费 ToolError；
-    该助手是统一未来转换入口，不破坏现有异常处理契约。
-    """
-    from app.contracts.tools import ToolError
-
-    # 已知 TOOL_* 错误码必须原样映射到 ToolError.error_code。
-    exc = ValueError("TOOL_OUTPUT_INVALID")
-    tool_error = ToolGateway.to_tool_error(exc)
-    assert isinstance(tool_error, ToolError)
-    assert tool_error.error_code == "TOOL_OUTPUT_INVALID"
-    assert tool_error.error_type == "ValueError"
-    assert tool_error.retryable is False
-    assert tool_error.safe_message  # 必须有可读安全消息
-    # 铁律：业务错误详情默认绝不进入模型上下文。
-    assert tool_error.details_visible_to_model is False
-
-    # 非 ValueError 异常也必须给出受控 ToolError，不能透传类型/正文。
-    other = ToolGateway.to_tool_error(RuntimeError("unexpected boom"))
-    assert other.error_code  # 不能为空
-    assert other.details_visible_to_model is False
-
-
 def test_local_handler_shape_with_schema_version_is_backward_compatible() -> None:
     """R3：本地 memory_tools_api 响应形状 {output, schema_version='1.0.0'} 必须仍可解析。
 
@@ -705,7 +686,7 @@ def test_local_handler_shape_with_schema_version_is_backward_compatible() -> Non
         )
 
     gateway = _make_default_gateway(handler)
-    assert gateway.get_publish_result("c", "a", "r", "write-1") == {
+    assert gateway.get_publish_result("c", "a", "s", "r", 1, "write-1") == {
         "revision": 9,
         "content_digest": "abc",
     }
@@ -808,7 +789,67 @@ def test_response_output_without_inner_schema_version_still_accepted() -> None:
         )
 
     gateway = _make_default_gateway(handler)
-    assert gateway.get_publish_result("c", "a", "r", "write-1") == {"revision": 4, "content_digest": "abc"}
+    assert gateway.get_publish_result("c", "a", "s", "r", 1, "write-1") == {"revision": 4, "content_digest": "abc"}
+
+
+def test_legacy_publish_result_call_preserves_head_two_field_wire_shape() -> None:
+    """HEAD v1.0.0 caller form continues to send only archive_id + run_id."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["input"] == {"archive_id": "a", "run_id": "r"}
+        return httpx.Response(200, json={"output": {"revision": 4}})
+
+    gateway = _make_default_gateway(handler)
+    assert gateway.get_publish_result("c", "a", "r", "write-1") == {"revision": 4}
+
+
+def test_head_four_field_tool_error_defaults_visibility_to_false() -> None:
+    """Consumer accepts the valid ToolError form emitted by HEAD v1.0.0."""
+
+    gateway = _make_default_gateway(
+        lambda _: httpx.Response(
+            404,
+            json={
+                "error_code": "PUBLISH_NOT_YET_OBSERVED",
+                "error_type": "publish_not_observed",
+                "retryable": False,
+                "safe_message": "尚未观察到发布结果",
+            },
+        )
+    )
+    legacy_context = {**_tool_context("a", "r"), "agent_version": "1.0.0"}
+    assert gateway.get_publish_result(
+        "c", "a", "r", "write-1", tool_context=legacy_context
+    ) is None
+
+
+def test_tool_wire_version_is_selected_from_trusted_agent_run_identity() -> None:
+    """历史 1.0.0 Run 继续请求 v1，1.0.1 新 Run 显式请求 v1.1。"""
+
+    versions: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        version = request.headers["X-Agent-Tool-Contract-Version"]
+        versions.append(version)
+        error: dict[str, object] = {
+            "error_code": "PUBLISH_NOT_YET_OBSERVED",
+            "error_type": "publish_not_observed",
+            "retryable": False,
+            "safe_message": "尚未观察到发布结果",
+        }
+        if version == "1.1.0":
+            error["details_visible_to_model"] = False
+        return httpx.Response(404, json=error)
+
+    gateway = _make_default_gateway(handler)
+    legacy_context = {**_tool_context("a", "r"), "agent_version": "1.0.0"}
+    assert gateway.get_publish_result(
+        "c", "a", "r", "write-1", tool_context=legacy_context
+    ) is None
+    assert gateway.get_publish_result(
+        "c", "a", "r", "write-2", tool_context=_tool_context("a", "r")
+    ) is None
+    assert versions == ["1.0.0", "1.1.0"]
 
 
 def test_non_2xx_response_with_tool_error_claiming_model_visibility_fails_closed() -> None:
@@ -836,20 +877,15 @@ def test_non_2xx_response_with_tool_error_claiming_model_visibility_fails_closed
         gateway.get_snapshot("c", "a", "s", "r", 0)
 
 
-def test_non_2xx_with_local_handler_default_shape_still_propagates_http_status_error() -> None:
-    """R3 补充：本地 handler 非 ToolError 形状（FastAPI 默认 detail）保持原 HTTPStatusError 流。
-
-    保护现有契约：runner 依赖 HTTPStatusError 捕获 409/404，gateway 不能把所有非 2xx
-    统统转成 ValueError；只有 body 明确违反 ToolError 铁律时才 fail closed。
-    """
+def test_non_2xx_with_fastapi_detail_shape_fails_closed() -> None:
+    """任何 FastAPI detail 形状都不是 Internal Tool 的合法错误合同。"""
     # 形如 FastAPI HTTPException 默认响应：{"detail": "..."}，不是 ToolError 形状。
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(409, json={"detail": "IDEMPOTENCY_CONFLICT"})
 
     gateway = _make_default_gateway(handler)
-    with pytest.raises(httpx.HTTPStatusError) as exc_info:
-        gateway.get_publish_result("c", "a", "r", "write-1")
-    assert exc_info.value.response.status_code == 409
+    with pytest.raises(ValueError, match="TOOL_ERROR_SHAPE_INVALID"):
+        gateway.get_publish_result("c", "a", "s", "r", 1, "write-1")
 
 
 def test_non_2xx_response_with_tool_error_unknown_code_fails_closed() -> None:
@@ -868,6 +904,7 @@ def test_non_2xx_response_with_tool_error_unknown_code_fails_closed() -> None:
                 "error_type": "Forbidden",
                 "retryable": False,
                 "safe_message": "ok",
+                "details_visible_to_model": False,
             },
         )
 
@@ -891,6 +928,7 @@ def test_non_2xx_response_with_tool_error_http_status_contradiction_fails_closed
                 "error_type": "Conflict",
                 "retryable": False,
                 "safe_message": "ok",
+                "details_visible_to_model": False,
             },
         )
 
@@ -915,6 +953,7 @@ def test_non_2xx_response_with_tool_error_retryable_contradiction_fails_closed()
                 "error_type": "Forbidden",
                 "retryable": True,  # 403<500 应为 False，True → 矛盾。
                 "safe_message": "ok",
+                "details_visible_to_model": False,
             },
         )
 
@@ -923,25 +962,107 @@ def test_non_2xx_response_with_tool_error_retryable_contradiction_fails_closed()
         gateway.get_snapshot("c", "a", "s", "r", 0)
 
 
-def test_non_2xx_response_with_known_consistent_tool_error_propagates_http_status_error() -> None:
-    """P3：error_code 已知且 (http_status, retryable) 与冻结矩阵一致时不触发 fail closed。
-
-    正向控制组：合法 ToolError body 交给 raise_for_status 按既有契约抛 HTTPStatusError，
-    保留 runner 对 4xx/5xx 的捕获与审计语义；fail closed 只拦截契约违反，不替代正常错误传播。
-    """
+def test_non_2xx_response_with_known_consistent_tool_error_drives_typed_control_flow() -> None:
+    """合法 ToolError 也必须进入受控 consumer 行为，不能退回裸 HTTP 分支。"""
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             403,  # 矩阵冻结 MEMORY_SNAPSHOT_UNAVAILABLE=403。
             json={
                 "error_code": "MEMORY_SNAPSHOT_UNAVAILABLE",
-                "error_type": "Forbidden",
+                "error_type": "snapshot_unavailable",
                 "retryable": False,  # 403<500 → 一致。
-                "safe_message": "snapshot unavailable",
+                "safe_message": "回忆快照当前不可读取",
+                "details_visible_to_model": False,
             },
         )
 
     gateway = _make_default_gateway(handler)
-    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+    with pytest.raises(ToolErrorRejected) as exc_info:
         gateway.get_snapshot("c", "a", "s", "r", 0)
-    assert exc_info.value.response.status_code == 403
+    assert (exc_info.value.error_code, exc_info.value.retryable) == ("MEMORY_SNAPSHOT_UNAVAILABLE", False)
+
+
+@pytest.mark.parametrize("body", [
+    b"not-json",
+    {"error_code": "MEMORY_SNAPSHOT_UNAVAILABLE"},
+    {"error_code": "MEMORY_SNAPSHOT_UNAVAILABLE", "error_type": "snapshot_unavailable", "retryable": False, "safe_message": "回忆快照当前不可读取", "details_visible_to_model": False, "extra": "no"},
+    {"error_code": "MEMORY_SNAPSHOT_UNAVAILABLE", "error_type": "snapshot_unavailable", "retryable": "false", "safe_message": "回忆快照当前不可读取", "details_visible_to_model": False},
+    {"error_code": "MEMORY_SNAPSHOT_UNAVAILABLE", "error_type": "snapshot_unavailable", "retryable": 0, "safe_message": "回忆快照当前不可读取", "details_visible_to_model": False},
+])
+def test_non_2xx_tool_error_rejects_non_json_missing_extra_and_non_boolean_primitives(body: object) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        if isinstance(body, bytes):
+            return httpx.Response(403, content=body)
+        return httpx.Response(403, json=body)
+
+    with pytest.raises(ValueError, match="TOOL_ERROR_SHAPE_INVALID"):
+        _make_default_gateway(handler).get_snapshot("c", "a", "s", "r", 1)
+
+
+@pytest.mark.parametrize(
+    ("code", "status", "error_type", "retryable", "safe_message"),
+    [
+        ("IDEMPOTENCY_CONFLICT", 409, "idempotency_conflict", False, "请求与既有幂等操作冲突"),
+        ("GENERATION_SUPERSEDED", 409, "generation_superseded", False, "当前生成已被更新版本取代"),
+        ("AUTHORIZATION_REVOKED", 403, "authorization_revoked", False, "该运行授权已失效"),
+        ("BUSINESS_DATA_INVALID", 422, "business_data_invalid", False, "业务数据不满足工具要求"),
+        ("MEMORY_SNAPSHOT_UNAVAILABLE", 403, "snapshot_unavailable", False, "回忆快照当前不可读取"),
+        ("MEMORY_RUN_NOT_ACTIVE", 409, "run_not_active", False, "该回忆录运行当前不可执行"),
+        ("MEMORY_DOCUMENT_INVALID", 422, "document_invalid", False, "播放文档不满足发布要求"),
+        ("PUBLISH_NOT_YET_OBSERVED", 404, "publish_not_observed", False, "尚未观察到发布结果"),
+        ("RUNTIME_SERVICE_UNAVAILABLE", 503, "service_unavailable", True, "业务工具服务暂时不可用"),
+    ],
+)
+def test_tool_error_matrix_is_strict_and_preserves_only_safe_control_data(
+    code: str, status: int, error_type: str, retryable: bool, safe_message: str,
+) -> None:
+    gateway = _make_default_gateway(lambda _: httpx.Response(status, json={
+        "error_code": code, "error_type": error_type, "retryable": retryable,
+        "safe_message": safe_message, "details_visible_to_model": False,
+    }))
+    if code == "PUBLISH_NOT_YET_OBSERVED":
+        assert gateway.get_publish_result("c", "a", "s", "r", 1, "write-1") is None
+    else:
+        with pytest.raises(ToolErrorRejected) as exc_info:
+            gateway.get_snapshot("c", "a", "s", "r", 0)
+        assert (exc_info.value.error_code, exc_info.value.retryable) == (code, retryable)
+
+
+def test_real_http_tool_rejects_missing_context_before_any_send() -> None:
+    calls = 0
+
+    class CountingTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(200, json={"output": {}})
+
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "runtime", "key", "secret")},
+        httpx.Client(transport=CountingTransport()),
+    )
+    with pytest.raises(ValueError, match="TOOL_CONTEXT_INVALID"):
+        gateway.get_snapshot("c", "a", "s", "r", 1)
+    assert calls == 0
+
+
+@pytest.mark.parametrize("context", [
+    {},
+    {"agent_id": "memoir_agent"},
+    {**_tool_context("a", "r"), "extra": "no"},
+    {**_tool_context("a", "r"), "step_id": ""},
+    {**_tool_context("a", "r"), "trace_id": 1},  # type: ignore[dict-item]
+    {**_tool_context("a", "r"), "run_id": "other"},
+    {**_tool_context("a", "r"), "business_id": "other"},
+    {**_tool_context("a", "r"), "agent_id": "other_agent"},
+    {**_tool_context("a", "r"), "agent_version": "untrusted"},
+    {**_tool_context("a", "r"), "business_type": "other"},
+])
+def test_real_http_tool_rejects_untrusted_context_before_any_send(context: object) -> None:
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "runtime", "key", "secret")},
+        httpx.Client(),
+    )
+    with pytest.raises(ValueError, match="TOOL_CONTEXT"):
+        gateway.get_snapshot("c", "a", "s", "r", 1, context)  # type: ignore[arg-type]
