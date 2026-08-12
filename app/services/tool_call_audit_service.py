@@ -40,6 +40,7 @@ class ToolCallAuditService:
         idempotency_key: str,
         request_digest: str,
         input_summary: Mapping[str, object],
+        lease_context: LeaseContext | None = None,
     ) -> AgentToolCall:
         """在副作用请求发送前写入 ``running`` 审计记录。
 
@@ -52,6 +53,7 @@ class ToolCallAuditService:
             tool_name=tool_name, tool_version=tool_version, transport=transport,
             logical_key=logical_key, idempotency_key=idempotency_key,
             request_digest=request_digest, input_summary=input_summary, side_effect=True,
+            lease_context=lease_context,
         )
 
     def begin_native(
@@ -80,8 +82,18 @@ class ToolCallAuditService:
         request_digest: str,
         input_summary: Mapping[str, object],
         side_effect: bool,
+        lease_context: LeaseContext | None = None,
     ) -> AgentToolCall:
         """写入物理 attempt；Native 与 HTTP 共用预算，但副作用语义不可混淆。"""
+        if lease_context is not None and not LeaseService(self._session).can_write(
+            run_id, lease_context
+        ):
+            # Package 已不可执行或 lease 失效时，副作用工具在 begin 阶段就拒绝：
+            # 不留 running 审计记录、不发 HTTP，与 _persist_result 收敛到同一写闸。
+            logging.warning(
+                "工具审计 begin 被不可执行 Package/失效 lease 拒绝 run_id=%s", run_id
+            )
+            raise ValueError("TOOL_RESULT_LEASE_INVALID")
         try:
             self._policy.assert_tool_call_allowed(run_id, step_id)
         except ExecutionBudgetExceeded as exc:
@@ -138,6 +150,7 @@ class ToolCallAuditService:
         logical_key: str,
         idempotency_key: str,
         request_digest: str,
+        lease_context: LeaseContext | None = None,
     ) -> AgentToolCall:
         """兼容发布节点：委托通用副作用审计，保持既有调用契约。"""
         return self.begin_side_effect(
@@ -151,6 +164,7 @@ class ToolCallAuditService:
             idempotency_key=idempotency_key,
             request_digest=request_digest,
             input_summary={"operation": "publish_playback_document"},
+            lease_context=lease_context,
         )
 
     def succeed(

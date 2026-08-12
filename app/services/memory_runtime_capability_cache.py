@@ -68,7 +68,9 @@ class MemoryRuntimeCapabilityCache:
         """拒绝 major 漂移、缺失 MemoirAgent、策略或 workflow 能力。"""
         if (
             snapshot.contract_version.split(".", 1)[0] != "1"
-            or ("memoir_agent", "1.0.0") not in snapshot.agent_versions
+            # 期望新建 Run 的版本 1.0.1 出现在能力快照中；1.0.0 仅旧 Run 绑定、
+            # 不再用于新建，故不作为 capability 兼容校验的期望版本。
+            or ("memoir_agent", "1.0.1") not in snapshot.agent_versions
             or not self._required_policies.issubset(snapshot.model_policies)
             or not snapshot.workflow_agent
         ):

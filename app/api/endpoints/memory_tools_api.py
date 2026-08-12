@@ -95,7 +95,9 @@ async def get_publish_result(request: Request) -> dict[str, object]:
         finally:
             session.close()
         if output is None:
-            raise HTTPException(status_code=404, detail="publish result unavailable")
+            # 稳定 code 与 couple-diary-b 业务端对称（Runtime 便捷方法只看 404 status，
+            # 不解析 detail；code 纯为双侧对称 + 可观测性）。
+            raise HTTPException(status_code=404, detail="PUBLISH_NOT_YET_OBSERVED")
         return {"output": output, "schema_version": "1.0.0"}
     except KeyError as exc:
         raise HTTPException(status_code=403, detail="publish result rejected") from exc

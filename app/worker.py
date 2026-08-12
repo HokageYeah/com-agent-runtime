@@ -312,10 +312,9 @@ def configured_executor(
             agent_run = session.scalar(
                 select(AgentRun).where(AgentRun.run_id == run_id)
             )
-            if agent_run is None or (agent_run.agent_id, agent_run.agent_version) != (
-                "memoir_agent",
-                "1.0.0",
-            ):
+            # Run 的版本由创建时冻结；Worker 只按 Agent 身份选择执行器，绝不把
+            # 新版本或历史版本重写为默认版本。Package 可用性由 Executor 和发包守卫复核。
+            if agent_run is None or agent_run.agent_id != "memoir_agent":
                 return None
             config = runtime_settings.business_connectors.get(
                 agent_run.business_connector_id, {}
@@ -457,7 +456,11 @@ def _package_permitted(session: Session, run_id: str) -> bool:
             AgentDefinition.version == run.agent_version,
         )
     )
-    return definition is None or definition.status != "revoked"
+    return (
+        definition is not None
+        and definition.status == "active"
+        and definition.package_digest == run.package_digest
+    )
 
 
 def _authorization_is_current(

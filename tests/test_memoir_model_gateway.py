@@ -7,7 +7,9 @@ from app.runtime.state import AgentState
 
 
 def _run() -> object:
-    return type("Run", (), {"run_id": "run-1"})()
+    # run.agent_version 由执行链路读取（_safe_model_request 据此加载 Prompt 身份）；
+    # 这里给一个 PromptRegistry 可解析的 memoir_agent 版本，避免属性缺失。
+    return type("Run", (), {"run_id": "run-1", "agent_version": "1.0.0"})()
 
 
 def test_model_capability_unavailable_uses_template_without_snapshot_body(caplog: object) -> None:

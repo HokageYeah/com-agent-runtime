@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.schemas.agent_package import PackagePolicy
 from app.schemas.agent_run import CreateRunCommand
-from app.services.agent_run_service import AgentRunService
+from app.services.agent_run_service import AgentRunService, AgentRunServiceError
 
 
 def test_create_freezes_definition_model_policy_and_ignores_forged_input() -> None:
@@ -139,6 +139,217 @@ def test_held_create_then_start_writes_one_dispatch_event() -> None:
     assert created.dispatch_state == "held"
     assert started.dispatch_state == "queued"
     assert service.count_dispatch_events(created.run_id) == 1
+
+
+def test_start_rejects_definition_digest_drift_without_queuing_run() -> None:
+    """held Run 只能按创建时冻结的 Package digest 启动。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="start-digest-drift", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="held", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest="sha256:drifted", contract_version="1.0.0",
+            status="active", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="Package digest 不匹配"):
+        AgentRunService(session).start(run.run_id, "caller", "start-drift")
+
+    assert (run.status, run.dispatch_state) == ("pending", "held")
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
+
+
+def test_start_rejects_deprecated_definition_without_queuing_run() -> None:
+    """held Run 不能由已停止服务新流量的 Package 启动。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="start-deprecated-package", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="pending", dispatch_state="held", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest=run.package_digest, contract_version="1.0.0",
+            status="deprecated", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="Package"):
+        AgentRunService(session).start(run.run_id, "caller", "start-deprecated")
+
+    assert (run.status, run.dispatch_state) == ("pending", "held")
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
+
+
+def test_retry_rejects_definition_digest_drift_without_requeueing_run() -> None:
+    """历史 Run retry 只能使用其冻结版本和冻结 digest。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="retry-digest-drift", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="failed", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest="sha256:drifted", contract_version="1.0.0",
+            status="active", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+        AgentCheckpoint(
+            checkpoint_id="retry-digest-checkpoint", run_id=run.run_id,
+            checkpoint_key="attempt:1", state_schema_version="1", data_classification="restricted",
+            privacy_version=1, encrypted_state_blob=b"safe", state_summary={},
+            content_digest="sha256:checkpoint", expires_at=now, created_at=now,
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="Package digest 不匹配"):
+        AgentRunService(session).retry(run.run_id, "caller")
+
+    assert (run.status, run.dispatch_state, run.manual_retry_count) == ("failed", "finished", 0)
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
+
+
+def test_retry_rejects_deprecated_definition_without_requeueing_run() -> None:
+    """finished 历史 Run 不能因 retry 重新进入已停止的 Package。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="retry-deprecated-package", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="failed", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest=run.package_digest, contract_version="1.0.0",
+            status="deprecated", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+        AgentCheckpoint(
+            checkpoint_id="retry-deprecated-checkpoint", run_id=run.run_id,
+            checkpoint_key="attempt:1", state_schema_version="1", data_classification="restricted",
+            privacy_version=1, encrypted_state_blob=b"safe", state_summary={},
+            content_digest="sha256:checkpoint", expires_at=now, created_at=now,
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="Package"):
+        AgentRunService(session).retry(run.run_id, "caller")
+
+    assert (run.status, run.dispatch_state, run.manual_retry_count) == ("failed", "finished", 0)
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
+
+
+def test_approve_rejects_deprecated_package_without_redispatching() -> None:
+    """waiting_human 的 Run 被 approve 时，若其 Package 已 deprecated，必须拒绝且不再分发。
+
+    生产改动：在状态版本守卫之后调用 ``_assert_frozen_package_definition``，
+    与 start/retry 收敛到同一不可执行 Package 谓词，避免人工 approve 把已停止的
+    Package 重新放回 queued 分发。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="approve-deprecated-package", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="waiting_human", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest=run.package_digest, contract_version="1.0.0",
+            status="deprecated", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="Package"):
+        AgentRunService(session).approve(run.run_id, "caller", "approve", run.status_version)
+
+    session.refresh(run)
+    assert (run.status, run.dispatch_state) == ("waiting_human", "finished")
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
+
+
+def test_approve_rejects_definition_digest_drift_without_redispatching() -> None:
+    """approve 不得用与 Run 冻结 digest 漂移的活跃 Package 恢复执行。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="approve-digest-drift", agent_id="memoir_agent", agent_version="1.0.0",
+        package_digest="sha256:frozen", contract_version="1.0.0", business_type="couple_memory",
+        business_id="archive", status="waiting_human", dispatch_state="finished", input_json={},
+        authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key",
+        callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        run_deadline_at=now,
+    )
+    session.add_all([
+        run,
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest="sha256:drifted", contract_version="1.0.0",
+            status="active", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        ),
+    ])
+    session.commit()
+
+    with pytest.raises(AgentRunServiceError, match="digest 不匹配"):
+        AgentRunService(session).approve(run.run_id, "caller", "approve", run.status_version)
+
+    session.refresh(run)
+    assert (run.status, run.dispatch_state) == ("waiting_human", "finished")
+    assert AgentRunService(session).count_dispatch_events(run.run_id) == 0
 
 
 def test_auto_retry_counter_is_independent_from_manual_retry_counter() -> None:
@@ -385,6 +596,14 @@ def test_reject_fallback_marks_only_the_fallback_resume_path() -> None:
         run_deadline_at=datetime.now(UTC),
     )
     session.add(run)
+    session.add(
+        AgentDefinition(
+            agent_id=run.agent_id, version=run.agent_version, runtime_type="workflow",
+            definition_json={}, package_digest=run.package_digest, contract_version="1.0.0",
+            status="active", status_changed_at=datetime.now(UTC), status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
     session.add(
         AgentPlan(
             plan_id="reject-fallback-plan", run_id=run.run_id, strategy="static_workflow",

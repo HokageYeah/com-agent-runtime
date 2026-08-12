@@ -34,13 +34,13 @@ def test_adapter_checks_capabilities_then_creates_and_starts_held_run() -> None:
         if request.url.path.endswith("/capabilities"):
             return httpx.Response(200, json={
                 "contract_version": "1.0.0", "package_digest": "sha256:memoir",
-                "agents": [{"agent_id": "memoir_agent", "version": "1.0.0"}],
+                "agents": [{"agent_id": "memoir_agent", "version": "1.0.1"}],
                 "model_policies": ["emotional_writing", "strict"],
                 "capabilities": {"workflow_agent": True},
             }, request=request)
         if request.url.path.endswith("/agent-runs"):
             assert request.headers["Idempotency-Key"] == "create:a:2"
-            assert json.loads(body) == {"agent_id": "memoir_agent", "agent_version": "1.0.0", "business_type": "couple_memory", "business_id": "a", "start_mode": "held", "input": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 2}, "callback_target_id": "memory_callback", "business_connector_id": "couple_diary_backend", "data_domain": "couple_memory"}
+            assert json.loads(body) == {"agent_id": "memoir_agent", "agent_version": "1.0.1", "business_type": "couple_memory", "business_id": "a", "start_mode": "held", "input": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 2}, "callback_target_id": "memory_callback", "business_connector_id": "couple_diary_backend", "data_domain": "couple_memory"}
             return httpx.Response(201, json={"run_id": "run-1", "contract_version": "1.0.0", "package_digest": "sha256:memoir", "authorization_version": 1}, request=request)
         assert request.headers["Idempotency-Key"] == "start:a:2"
         return httpx.Response(200, json={"run_id": "run-1"}, request=request)
@@ -68,7 +68,7 @@ def test_adapter_refreshes_handshake_when_capability_digest_changes_before_ttl()
         if request.url.path.endswith("/capabilities"):
             return httpx.Response(200, json={
                 "contract_version": "1.0.0", "package_digest": next(digests),
-                "agents": [{"agent_id": "memoir_agent", "version": "1.0.0"}],
+                "agents": [{"agent_id": "memoir_agent", "version": "1.0.1"}],
                 "model_policies": ["emotional_writing", "strict"],
                 "capabilities": {"workflow_agent": True},
             }, request=request)
@@ -98,7 +98,7 @@ def test_adapter_rejects_capabilities_without_package_digest() -> None:
             return httpx.Response(200, json={"status": "ready"}, request=request)
         return httpx.Response(200, json={
             "contract_version": "1.0.0",
-            "agents": [{"agent_id": "memoir_agent", "version": "1.0.0"}],
+            "agents": [{"agent_id": "memoir_agent", "version": "1.0.1"}],
             "model_policies": ["emotional_writing", "strict"],
             "capabilities": {"workflow_agent": True},
         }, request=request)

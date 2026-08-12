@@ -62,8 +62,10 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
     # 不记录请求头中可能出现的签名、Key ID 或其它凭据，只保留客户端标识。
     try:
         # capabilities 必须暴露实际不可变 package digest，供业务侧立刻发现版本漂移。
+        # 暴露当前活跃 Agent 版本 1.0.1：1.0.0 已恢复为冻结原貌、不再用于新建 Run，
+        # 新 Run 固定使用 1.0.1；旧 Run 不走 capabilities，仍按其已绑定版本 resume/retry。
         package = AgentPackageService(Path(__file__).parents[2] / "agents").load(
-            "memoir_agent", "1.0.0"
+            "memoir_agent", "1.0.1"
         )
     except AgentPackageValidationError as exc:
         logging.error("Runtime capabilities 无法加载 MemoirAgent 摘要")

@@ -13,6 +13,7 @@ import app.reconciler as reconciler_module
 from app.db.sqlalchemy_db import Base
 from app.models import (
     AdmissionBucket,
+    AgentDefinition,
     AgentModelUsage,
     AgentRun,
     AgentToolCall,
@@ -350,6 +351,20 @@ def _run(run_id: str, *, dispatch_state: str) -> AgentRun:
     )
 
 
+def _add_active_test_package(session) -> None:
+    """装配与 Run 冻结身份匹配的活跃 Package，聚焦非包生命周期的对账行为。
+
+    对账器在第六次收口后会对不可执行 Package 的 queued/claimed Run 直接终结或取消；
+    本文件聚焦准入账本与租约等对账语义，故统一注入可执行定义，避免被包守卫误伤。
+    """
+    session.add(AgentDefinition(
+        agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+        definition_json={}, package_digest="sha256:test", contract_version="1.0.0",
+        status="active", status_changed_at=datetime.now(UTC),
+        status_changed_by="test", status_change_reason="fixture",
+    ))
+
+
 def test_reconciler_marks_expired_inflight_usage_unknown_and_reports_safe_action() -> None:
     sessions = _sessions()
     session = sessions()
@@ -483,6 +498,9 @@ def test_reconciler_repairs_admission_bucket_from_dispatch_aggregation_with_vers
             retention_until=datetime.now(UTC) + timedelta(days=1),
         ),
     ])
+    # 聚焦准入账本修复：注入可执行 Package，避免对账器以“不可执行 Package”提前
+    # 终结/取消 queued、claimed Run，使断言偏离账本重建语义本身。
+    _add_active_test_package(session)
     session.commit()
 
     report = ReconciliationService(session).run_once()
@@ -491,6 +509,7 @@ def test_reconciler_repairs_admission_bucket_from_dispatch_aggregation_with_vers
     assert bucket is not None
     assert (bucket.held_count, bucket.queued_count, bucket.running_count, bucket.version) == (0, 1, 1, 8)
     assert report.action_counts == {"admission_bucket_repaired": 1}
+
 
 
 def test_reconciler_repairs_every_admission_scope_from_dispatch_state() -> None:
@@ -510,6 +529,8 @@ def test_reconciler_repairs_every_admission_scope_from_dispatch_state() -> None:
             retention_until=datetime.now(UTC) + timedelta(days=1),
         ),
     ])
+    # 同上：注入可执行 Package，让 scope-queued Run 存活并被四级账本权威重建统计。
+    _add_active_test_package(session)
     session.commit()
 
     report = ReconciliationService(session).run_once()

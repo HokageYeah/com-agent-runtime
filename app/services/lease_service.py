@@ -103,16 +103,6 @@ class LeaseService:
         """
         run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
         now = datetime.now(UTC)
-        definition = (
-            self._session.scalar(
-                select(AgentDefinition).where(
-                    AgentDefinition.agent_id == run.agent_id,
-                    AgentDefinition.version == run.agent_version,
-                )
-            )
-            if run is not None
-            else None
-        )
         allowed = bool(
             run
             and run.dispatch_state == "claimed"
@@ -126,13 +116,31 @@ class LeaseService:
             and _as_utc(run.lease_expires_at) > now
             and _as_utc(context.lease_expires_at) > now
             and _as_utc(run.run_deadline_at) > now
-            # 测试可只构造 Run/Plan；真实创建路径保证定义存在。若定义已撤销，
-            # 所有复用 can_write 的 checkpoint/artifact/tool/model 写入一律停止。
-            and (definition is None or definition.status != "revoked")
+            # Package 缺失、撤销或与 Run 冻结 digest 漂移时，所有复用
+            # can_write 的 checkpoint/artifact/tool/model 写入一律停止。
+            and self._package_executable(run)
         )
         if not allowed:
             logging.warning("Worker 写入被 fencing/状态边界拒绝 run_id=%s", run_id)
         return allowed
+
+    def _package_executable(self, run: AgentRun) -> bool:
+        """与 Run 冻结身份匹配且仍 active 的 Package 才可执行。
+
+        can_write 与 reaper 共享本谓词，确保“不可执行 Package”在写闸门和失联接管
+        两条路径上判定一致：缺失/废弃/digest 漂移均视为不可执行。
+        """
+        definition = self._session.scalar(
+            select(AgentDefinition).where(
+                AgentDefinition.agent_id == run.agent_id,
+                AgentDefinition.version == run.agent_version,
+            )
+        )
+        return (
+            definition is not None
+            and definition.status == "active"
+            and definition.package_digest == run.package_digest
+        )
 
     def finish(self, result: AgentRunResult, context: LeaseContext) -> bool:
         """仅有效 lease 能终结 Run，并在同一事务释放 Admission 与写 callback。"""
@@ -221,7 +229,13 @@ class LeaseService:
         return True
 
     def reap_expired(self, *, commit: bool = True) -> list[str]:
-        """回收失效 lease 并回到 queued；旧 fencing token 之后不可再写入。"""
+        """回收失效 lease 并回到 queued；旧 fencing token 之后不可再写入。
+
+        Package 已不可执行（缺失/废弃/digest 漂移）的失联 Run 不再重新分发，直接按
+        PACKAGE_REVOKED 终结，与 can_write 共享的 Package 谓词收敛，避免 worker 直连
+        reap 时给已停止的 Package 产生 ``lease_reaped`` 假分发与无谓 execution_attempt
+        抖动。
+        """
         now = datetime.now(UTC)
         recovered: list[str] = []
         for run in self._session.scalars(
@@ -229,6 +243,37 @@ class LeaseService:
                 AgentRun.dispatch_state == "claimed", AgentRun.lease_expires_at < now
             )
         ).all():
+            if not self._package_executable(run):
+                # 不可执行 Package 的失联 Run 不回 queued，直接以 PACKAGE_REVOKED 终结，
+                # 释放 lease 并写 cancelled 回调；fencing 条件与 requeue 路径一致。
+                terminated = self._session.execute(
+                    update(AgentRun)
+                    .where(
+                        AgentRun.run_id == run.run_id,
+                        AgentRun.status == run.status,
+                        AgentRun.dispatch_state == "claimed",
+                        AgentRun.lease_expires_at < now,
+                    )
+                    .execution_options(synchronize_session=False)
+                    .values(
+                        status="cancelled",
+                        dispatch_state="finished",
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        finished_at=now,
+                        status_version=AgentRun.status_version + 1,
+                        error_code="PACKAGE_REVOKED",
+                    )
+                )
+                if terminated.rowcount != 1:  # type: ignore[attr-defined]
+                    continue
+                self._session.refresh(run)
+                AdmissionService(self._session).transition_run(run, "claimed", "finished")
+                OutboxService(self._session).append_callback(run, "cancelled")
+                logging.warning(
+                    "reaper 终结不可执行 Package 的失联 Run run_id=%s", run.run_id
+                )
+                continue
             # `running/planning/evaluating` 不是 queued Run 的可认领状态；失联
             # 接管必须回到 pending，由下一 execution attempt 从安全恢复点重新执行。
             next_status = (

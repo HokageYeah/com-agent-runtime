@@ -95,3 +95,30 @@ def test_package_lifecycle_blocks_revoked_and_new_deprecated_runs() -> None:
         AgentPackageService.validate_lifecycle("revoked", operation="start")
     with pytest.raises(AgentPackageValidationError, match="deprecated"):
         AgentPackageService.validate_lifecycle("deprecated", operation="create")
+
+
+def test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages() -> None:
+    """1.0.0 与 1.0.1 必须是两个独立不可变 package（P1 不可变恢复的核心证据）。
+
+    1.0.0 的 workflow.graph.py 在 620f44a 被改动（给 enqueue_media_tasks 补
+    safe_to_rerun=False）破坏了不可变性，按不可变 Package 规则不可同 version 改内容，
+    故恢复 1.0.0 到缺 safe_to_rerun 的冻结原貌、另发 1.0.1 承载显式分类。两者必须：
+    - digest 不同（证明是两个独立 package，非同版本改内容）；
+    - 各自能独立 load（证明都是合法 package）；
+    - contract_version 都仍是 1.0.0（Tool/Snapshot/Playback 契约不随 Agent 版本升级）。
+    """
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    package_100 = service.load("memoir_agent", "1.0.0")
+    package_101 = service.load("memoir_agent", "1.0.1")
+
+    assert package_100.version == "1.0.0"
+    assert package_101.version == "1.0.1"
+    # digest 独立是“另发新版本而非同版本改内容”的硬证据。
+    assert package_100.package_digest != package_101.package_digest
+    assert package_100.package_digest.startswith("sha256:")
+    assert package_101.package_digest.startswith("sha256:")
+    # contract_version 不随 Agent 版本升级（P1 第7条铁律）。
+    assert package_100.contract_version == "1.0.0"
+    assert package_101.contract_version == "1.0.0"

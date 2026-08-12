@@ -850,3 +850,98 @@ def test_non_2xx_with_local_handler_default_shape_still_propagates_http_status_e
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         gateway.get_publish_result("c", "a", "r", "write-1")
     assert exc_info.value.response.status_code == 409
+
+
+def test_non_2xx_response_with_tool_error_unknown_code_fails_closed() -> None:
+    """P3：非 2xx 响应自称 ToolError 但 error_code 不在冻结 allowlist 中必须 fail closed。
+
+    冻结铁律：业务端只能返回 Runtime 冻结的 error_code；未知码意味着契约单方漂移或
+    注入攻击面，一律按 TOOL_ERROR_CODE_UNKNOWN 拒绝，绝不透传 body 内容给模型上下文。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                # 不在冻结 error_code 矩阵中的未知码。
+                "error_code": "BUSINESS_TOTALLY_UNKNOWN",
+                "error_type": "Forbidden",
+                "retryable": False,
+                "safe_message": "ok",
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_ERROR_CODE_UNKNOWN"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_non_2xx_response_with_tool_error_http_status_contradiction_fails_closed() -> None:
+    """P3：error_code 已知但 HTTP 状态码与冻结矩阵不符必须 fail closed。
+
+    IDEMPOTENCY_CONFLICT 冻结为 409；若以 403 返回，状态码与码语义矛盾，意味着业务端
+    误用或中间件篡改，一律按 TOOL_ERROR_CONTRADICTION 拒绝。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,  # 矩阵冻结 IDEMPOTENCY_CONFLICT=409，409≠403 → 矛盾。
+            json={
+                "error_code": "IDEMPOTENCY_CONFLICT",
+                "error_type": "Conflict",
+                "retryable": False,
+                "safe_message": "ok",
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_ERROR_CONTRADICTION"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_non_2xx_response_with_tool_error_retryable_contradiction_fails_closed() -> None:
+    """P3：error_code 已知、HTTP 状态码一致但 retryable 与状态码语义矛盾必须 fail closed。
+
+    冻结规则：retryable = (http_status >= 500)，与 runner.py HTTPStatusError 处理一致。
+    MEMORY_SNAPSHOT_UNAVAILABLE 冻结为 403（<500 → retryable=False）；若 body 声明
+    retryable=True 则语义矛盾，按 TOOL_ERROR_CONTRADICTION 拒绝，防止业务端单方放宽重试。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,  # 矩阵冻结 MEMORY_SNAPSHOT_UNAVAILABLE=403，<500。
+            json={
+                "error_code": "MEMORY_SNAPSHOT_UNAVAILABLE",
+                "error_type": "Forbidden",
+                "retryable": True,  # 403<500 应为 False，True → 矛盾。
+                "safe_message": "ok",
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(ValueError, match="TOOL_ERROR_CONTRADICTION"):
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+
+
+def test_non_2xx_response_with_known_consistent_tool_error_propagates_http_status_error() -> None:
+    """P3：error_code 已知且 (http_status, retryable) 与冻结矩阵一致时不触发 fail closed。
+
+    正向控制组：合法 ToolError body 交给 raise_for_status 按既有契约抛 HTTPStatusError，
+    保留 runner 对 4xx/5xx 的捕获与审计语义；fail closed 只拦截契约违反，不替代正常错误传播。
+    """
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,  # 矩阵冻结 MEMORY_SNAPSHOT_UNAVAILABLE=403。
+            json={
+                "error_code": "MEMORY_SNAPSHOT_UNAVAILABLE",
+                "error_type": "Forbidden",
+                "retryable": False,  # 403<500 → 一致。
+                "safe_message": "snapshot unavailable",
+            },
+        )
+
+    gateway = _make_default_gateway(handler)
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        gateway.get_snapshot("c", "a", "s", "r", 0)
+    assert exc_info.value.response.status_code == 403

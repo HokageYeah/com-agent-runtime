@@ -25,12 +25,29 @@ def _run() -> object:
         "Run",
         (),
         {
+            "agent_id": "memoir_agent",
+            "agent_version": "1.0.0",
             "run_id": "run-1",
             "execution_attempt": 1,
             "business_connector_id": "connector",
+            "business_type": "couple_memory",
+            "business_id": "archive",
+            "trace_id": "trace-1",
             "input_json": {"archive_id": "archive", "snapshot_id": "snapshot", "generation_epoch": 0},
         },
     )()
+
+
+def _publish_tool_context() -> dict[str, str]:
+    return {
+        "agent_id": "memoir_agent",
+        "agent_version": "1.0.0",
+        "run_id": "run-1",
+        "step_id": "publish_document",
+        "business_type": "couple_memory",
+        "business_id": "archive",
+        "trace_id": "trace-1",
+    }
 
 
 def test_publish_persists_running_audit_before_http_call(tmp_path: Path) -> None:
@@ -316,7 +333,9 @@ def test_publish_takeover_only_reconciles_unknown_and_never_replays_write() -> N
     assert len(records) == 1
     assert all(record.logical_operation_key == key and record.idempotency_key == key for record in records)
     assert records[0].request_digest == digest
-    assert reconciliation_calls == [("connector", "archive", "run-1", key)]
+    assert reconciliation_calls == [
+        ("connector", "archive", "run-1", key, _publish_tool_context())
+    ]
     assert publish_calls == []
 
 
@@ -367,7 +386,9 @@ def test_publish_takeover_reconciles_committed_success_without_replaying_write()
     records = session.scalars(select(AgentToolCall)).all()
     assert len(records) == 1
     assert records[0].status == "succeeded"
-    assert reconciliation_calls == [("connector", "archive", "run-1", key)]
+    assert reconciliation_calls == [
+        ("connector", "archive", "run-1", key, _publish_tool_context())
+    ]
     assert publish_calls == []
 
 
@@ -428,7 +449,9 @@ def test_publish_resume_reconciles_first_commit_when_recomputed_digest_drifts(
             {"node_id": "publish_document"}, _run(), state
         ) == {"node_id": "publish_document", "published": True}
 
-    assert gateway.reconcile_calls == [("connector", "archive", "run-1", key)]
+    assert gateway.reconcile_calls == [
+        ("connector", "archive", "run-1", key, _publish_tool_context())
+    ]
     assert state.publish_result == {"revision": 5, "content_digest": "business-published-digest"}
     records = session.scalars(select(AgentToolCall)).all()
     assert len(records) == 1  # 无第二次物理写入 attempt

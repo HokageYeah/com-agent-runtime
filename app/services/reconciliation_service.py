@@ -353,20 +353,24 @@ class ReconciliationService:
         return self._aborted_report()
 
     def _repair_revoked_definition(self, run: AgentRun, current: datetime) -> bool:
-        """Definition 已撤销是权威事实；claimed Run 只能请求 Worker 安全收敛。"""
+        """Definition 缺失、非 active 或 digest 漂移时，claimed Run 只能请求安全收敛。"""
         definition = self._session.scalar(
             select(AgentDefinition).where(
                 AgentDefinition.agent_id == run.agent_id,
                 AgentDefinition.version == run.agent_version,
             )
         )
-        if definition is None or definition.status != "revoked":
+        if (
+            definition is not None
+            and definition.status == "active"
+            and definition.package_digest == run.package_digest
+        ):
             return False
         if run.dispatch_state in {"held", "queued"} or (
             run.status == "waiting_human" and run.dispatch_state == "finished"
         ):
             if self._terminate(run, current, "cancelled", "PACKAGE_REVOKED"):
-                logging.warning("对账终结已撤销 Package 的 run_id=%s", run.run_id)
+                logging.warning("对账终结不可执行 Package 的 run_id=%s", run.run_id)
                 return True
             return False
         if run.dispatch_state == "claimed" and run.cancel_requested_at is None:
@@ -385,7 +389,7 @@ class ReconciliationService:
             if requested.rowcount == 1:  # type: ignore[attr-defined]
                 self._session.refresh(run)
                 logging.warning(
-                    "对账请求取消已撤销 Package 的 claimed run_id=%s", run.run_id
+                    "对账请求取消不可执行 Package 的 claimed run_id=%s", run.run_id
                 )
                 return True
         return False

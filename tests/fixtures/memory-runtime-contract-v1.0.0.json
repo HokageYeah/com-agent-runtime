@@ -12,7 +12,7 @@
   },
   "memoir_create": {
     "agent_id": "memoir_agent",
-    "agent_version": "1.0.0",
+    "agent_version": "1.0.1",
     "business_type": "couple_memory",
     "start_mode": "held",
     "data_domain": "couple_memory",
@@ -192,7 +192,15 @@
       "retryable",
       "safe_message"
     ],
-    "tool_error_details_visible_to_model": false
+    "tool_error_details_visible_to_model": false,
+    "tool_error_matrix": {
+      "MEMORY_SNAPSHOT_UNAVAILABLE": 403,
+      "GENERATION_SUPERSEDED": 403,
+      "MEMORY_RUN_NOT_ACTIVE": 403,
+      "MEMORY_DOCUMENT_INVALID": 403,
+      "IDEMPOTENCY_CONFLICT": 409,
+      "PUBLISH_NOT_YET_OBSERVED": 404
+    }
   },
   "callback": {
     "path": "/api/v1/internal/agent-callbacks/memory",

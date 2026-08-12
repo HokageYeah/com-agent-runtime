@@ -280,53 +280,66 @@ def build_dependencies(config: HarnessProcessConfig) -> RuntimeDependencies:
 
 
 def _seed_test_agent_package(factory: sessionmaker) -> None:
-    """子进程只 seed 固定测试 Package 元数据，不读取部署目录或用户包。"""
+    """子进程只 seed 固定测试 Package 元数据，不读取部署目录或用户包。
+
+    对称 seed 1.0.0（历史 Run 绑定）与 1.0.1（新 Run 绑定）两个版本：
+    1.0.0 package 文件已恢复为缺 safe_to_rerun 的冻结原貌、不再用于新建 plan，
+    但历史 Run 的 plan 早已冻结为显式分类形态，resume/retry 仍按此合法 plan 重跑，
+    故 harness 1.0.0 definition 保留显式 safe_to_rerun 节点代表“已落库合法 plan”。
+    两个版本共用同一份显式分类节点，区别仅在 version 与 package_digest。
+    """
+    from datetime import UTC, datetime
+
     session = factory()
     try:
-        if (
-            session.scalar(
-                select(AgentDefinition).where(
-                    AgentDefinition.agent_id == "memoir_agent",
-                    AgentDefinition.version == "1.0.0",
+        for version, digest in (
+            ("1.0.0", "sha256:harness-memoir"),
+            ("1.0.1", "sha256:harness-memoir-101"),
+        ):
+            if (
+                session.scalar(
+                    select(AgentDefinition).where(
+                        AgentDefinition.agent_id == "memoir_agent",
+                        AgentDefinition.version == version,
+                    )
+                )
+                is not None
+            ):
+                continue
+            session.add(
+                AgentDefinition(
+                    agent_id="memoir_agent",
+                    version=version,
+                    runtime_type="workflow",
+                    definition_json={
+                        "allowed_business_types": ["couple_memory"],
+                        # 必须与 app/agents/memoir_agent/<version>/workflow.graph.py 的节点
+                        # 声明保持一致：每个节点显式 safe_to_rerun，否则 Planner 的 legacy
+                        # 缺键 guard 会拒绝创建 Plan。harness 用假 digest，与真实文件 digest
+                        # 解耦——1.0.0 文件已缺键（不可变原貌），此处 definition 保留显式形态
+                        # 仅为让旧 Run 的 plan 合法可重跑，不代表 1.0.0 文件能新建 plan。
+                        "workflow_nodes": [
+                            {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
+                            {"node_id": "sanitize_materials", "node_type": "deterministic", "safe_to_rerun": True},
+                            {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
+                            {"node_id": "extract_highlights", "node_type": "model", "safe_to_rerun": True},
+                            {"node_id": "plan_chapters", "node_type": "model", "safe_to_rerun": True},
+                            {"node_id": "generate_scenes", "node_type": "model", "safe_to_rerun": True},
+                            {"node_id": "generate_actions", "node_type": "deterministic", "safe_to_rerun": True},
+                            {"node_id": "safety_review", "node_type": "guardrail", "safe_to_rerun": True},
+                            {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": True},
+                            {"node_id": "enqueue_media_tasks", "node_type": "deterministic",
+                             "next_nodes": [], "optional": True, "safe_to_rerun": False},
+                        ],
+                    },
+                    package_digest=digest,
+                    contract_version="1.0.0",
+                    status="active",
+                    status_changed_at=datetime.now(UTC),
+                    status_changed_by="harness",
+                    status_change_reason="test-only-seed",
                 )
             )
-            is not None
-        ):
-            return
-        from datetime import UTC, datetime
-
-        session.add(
-            AgentDefinition(
-                agent_id="memoir_agent",
-                version="1.0.0",
-                runtime_type="workflow",
-                definition_json={
-                    "allowed_business_types": ["couple_memory"],
-                    # 必须与 app/agents/memoir_agent/1.0.0/workflow.graph.py 的节点声明保持
-                    # 一致：每个节点显式 safe_to_rerun，否则 Planner 的 legacy 缺键 guard
-                    # 会拒绝创建 Plan。harness 用假 digest，与真实文件 digest 解耦。
-                    "workflow_nodes": [
-                        {"node_id": "load_snapshot", "node_type": "tool", "safe_to_rerun": True},
-                        {"node_id": "sanitize_materials", "node_type": "deterministic", "safe_to_rerun": True},
-                        {"node_id": "compute_stats", "node_type": "deterministic", "safe_to_rerun": True},
-                        {"node_id": "extract_highlights", "node_type": "model", "safe_to_rerun": True},
-                        {"node_id": "plan_chapters", "node_type": "model", "safe_to_rerun": True},
-                        {"node_id": "generate_scenes", "node_type": "model", "safe_to_rerun": True},
-                        {"node_id": "generate_actions", "node_type": "deterministic", "safe_to_rerun": True},
-                        {"node_id": "safety_review", "node_type": "guardrail", "safe_to_rerun": True},
-                        {"node_id": "publish_document", "node_type": "tool", "safe_to_rerun": True},
-                        {"node_id": "enqueue_media_tasks", "node_type": "deterministic",
-                         "next_nodes": [], "optional": True, "safe_to_rerun": False},
-                    ],
-                },
-                package_digest="sha256:harness-memoir",
-                contract_version="1.0.0",
-                status="active",
-                status_changed_at=datetime.now(UTC),
-                status_changed_by="harness",
-                status_change_reason="test-only-seed",
-            )
-        )
         session.commit()
     finally:
         session.close()

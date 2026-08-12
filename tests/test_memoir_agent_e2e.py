@@ -62,6 +62,7 @@ class _MemoryToolFixture:
         document: dict[str, object],
         _idempotency_key: str,
         _tool_call: object,
+        _tool_context: object = None,
     ) -> dict[str, object]:
         assert (archive_id, snapshot_id) == (self._archive_id, self._snapshot_id)
         snapshot = self._session.scalar(

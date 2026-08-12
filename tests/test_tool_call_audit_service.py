@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models import AgentRun, AgentToolCall, RuntimeAuditRecord
+from app.models import AgentDefinition, AgentRun, AgentToolCall, RuntimeAuditRecord
 from app.runtime.interfaces import LeaseContext
 from app.services.tool_call_audit_service import ToolCallAuditService
 
@@ -256,3 +256,47 @@ def test_late_tool_result_cannot_settle_after_privacy_or_authorization_boundary_
     assert not service.succeed(record, 1, "safe-digest", lease_context=context)
     saved = session.scalar(select(AgentToolCall).where(AgentToolCall.tool_call_id == record.tool_call_id))
     assert saved is not None and saved.status == "running"
+
+
+def test_tool_audit_begin_refuses_non_executable_package_via_lease_context() -> None:
+    """副作用工具 begin 阶段必须用与 can_write 一致的 Package 谓词拦截不可执行 Package。
+
+    生产改动：``_begin`` 在预算/冲突检查前，当调用方传入 ``lease_context`` 时，用
+    ``LeaseService.can_write`` 校验当前 Run 是否仍持有可执行 Package。memoir runner 的
+    publish 路径（``runner.py`` 调 ``begin_publish``）会传入 ``lease_context``，因此在
+    Package 已 deprecated/digest 漂移时，begin 就直接失败，不会留下 running 审计记录、
+    也不会发出 HTTP。与 ``_persist_result`` 的 ``lease_context`` 收敛到同一写入门。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    session.add(AgentRun(
+        run_id="begin-deprecated-run", agent_id="memoir_agent", agent_version="1", package_digest="sha256:test",
+        contract_version="1", business_type="memoir", business_id="business", status="running",
+        dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant",
+        create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace",
+        lease_owner="worker", fencing_token=1, execution_attempt=1, lease_expires_at=now.replace(year=now.year + 1),
+        run_deadline_at=now.replace(year=now.year + 1),
+    ))
+    session.add(AgentDefinition(
+        agent_id="memoir_agent", version="1", runtime_type="workflow", definition_json={},
+        package_digest="sha256:test", contract_version="1.0.0",
+        status="deprecated", status_changed_at=now, status_changed_by="test", status_change_reason="fixture",
+    ))
+    session.commit()
+    context = LeaseContext(
+        execution_attempt=1, lease_owner="worker", fencing_token=1,
+        lease_expires_at=now.replace(year=now.year + 1), privacy_version=1, authorization_version=1,
+    )
+
+    with pytest.raises(ValueError, match="TOOL_RESULT_LEASE_INVALID"):
+        ToolCallAuditService(session).begin_publish(
+            "begin-deprecated-run", 1, "begin-deprecated-run:publish", "begin-deprecated-run:publish", "digest",
+            lease_context=context,
+        )
+
+    assert (
+        session.scalar(select(func.count()).select_from(AgentToolCall).where(AgentToolCall.run_id == "begin-deprecated-run"))
+        == 0
+    )

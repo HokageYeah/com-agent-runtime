@@ -730,7 +730,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] `AgentPackageService.load()` 固定已注册 digest，校验 `contract_version` 和 `active/deprecated/revoked` 状态。
 - [✅] active/deprecated/revoked 变化记录 `status_changed_at/by/reason` 并写 RuntimeAuditEvent；revoked 额外保存 revoked_at/revocation_reason。
 - [✅] 只加载 CI 构建并由管理员注册的 package；普通业务调用方不能上传或指定 Python 文件。
-- [✅] 创建 `memoir_agent@1.0.0` AgentPackage 文件。
+- [✅] 创建 `memoir_agent@1.0.0` AgentPackage 文件。**（2026-08-11 第六次最小收口 P1：1.0.0 恢复 `enqueue_media_tasks` 缺 `safe_to_rerun` 的冻结原貌——620f44a 曾给该节点补 `safe_to_rerun=False` 违反同版本 digest 不可变铁律；另发 `memoir_agent@1.0.1` 承载显式 `safe_to_rerun=False`。`test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages` 证两版本 digest 独立 + 各自可 load + `contract_version` 都 1.0.0；新 Run 路由 1.0.1，旧 Run resume 读 `steps_json` 经 `StaticWorkflowGraph.build()` 不经 Planner，1.0.0 缺键对其透明）**
 - [✅] 测试缺文件、prompt 引用/版本不存在、版本不匹配、workflow 空节点、工具清单缺失、非法 `waiting_human_timeout_action`、人工等待未启用 callback、fallback 未声明恢复节点或最小 eval 用例少于 5 条时报结构化错误。
 - [✅] 测试同 digest 重复加载幂等、不同 digest 冲突、deprecated 拒绝新 create、revoked 阻止 create/start/retry/resume。
 - [✅] 测试签名/构建时间等排除元数据变化不改变 digest，任一受管 package 文件变化都会改变 digest。

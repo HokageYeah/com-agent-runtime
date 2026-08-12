@@ -71,7 +71,9 @@ class MemoryAgentAdapter:
         except RuntimeCapabilityError as exc:
             raise MemoryRuntimeAdapterError(str(exc)) from exc
         payload = {
-            "agent_id": "memoir_agent", "agent_version": "1.0.0",
+            # 新建 Run 固定 1.0.1：1.0.0 已恢复为缺 safe_to_rerun 的冻结原貌，
+            # 不再用于新建 plan；旧 Run 不走 create_held，仍按其绑定版本 resume。
+            "agent_id": "memoir_agent", "agent_version": "1.0.1",
             "business_type": "couple_memory", "business_id": archive_id,
             "start_mode": "held",
             "input": {"archive_id": archive_id, "snapshot_id": snapshot_id,

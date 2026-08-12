@@ -1,0 +1,18 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.1：1.0.0 的 workflow.graph.py 在 620f44a 被改动（给
+# enqueue_media_tasks 补 safe_to_rerun=False）破坏了不可变性，按不可变 Package 规则
+# 不可同 version 改内容，故发布 1.0.1 承载显式 safe_to_rerun 分类，新 Run 固定 1.0.1。
+# contract_version 仍为 1.0.0（Tool/Snapshot/Playback 契约未变，不随 Agent 版本升级）。
+version: 1.0.1
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+prompts:
+  - highlight-extract.v1.md
+  - chapter-plan.v1.md
+  - scene-generate.v1.md
+  - safety-review.v1.md
+  - action-generate.v1.md

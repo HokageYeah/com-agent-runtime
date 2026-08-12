@@ -16,9 +16,14 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import ValidationError
 
-from app.contracts.tools import ToolError, ToolRequest, ToolResult
+from app.contracts.tools import (
+    TOOL_ERROR_HTTP_STATUS,
+    ToolError,
+    ToolRequest,
+    ToolResult,
+)
 from app.core.tool_security import tool_signature
-from app.models import AgentToolCall
+from app.models import AgentRun, AgentToolCall
 from app.runtime.interfaces import LeaseContext
 from app.runtime.native_tools import (
     contains_sensitive_identifier,
@@ -254,6 +259,26 @@ class ToolGateway:
             details_visible_to_model=False,
         )
 
+    @staticmethod
+    def build_tool_context(run: AgentRun, step_id: str) -> dict[str, str]:
+        """从可信 Run/Step 构造冻结 envelope context 7 字段。
+
+        形状由 fixture tool_contract.context_required 冻结：agent_id、
+        agent_version、run_id、step_id、business_type、business_id、trace_id。
+        生产 AgentRun 6 字段均 nullable=False，直接取值；getattr 默认空串
+        仅兼容单元测试的最小鸭子 Run（codebase 既定隔离模式），生产 context
+        完整性由跨仓合约测试兜底，不依赖此处的防御默认。
+        """
+        return {
+            "agent_id": getattr(run, "agent_id", ""),
+            "agent_version": getattr(run, "agent_version", ""),
+            "run_id": getattr(run, "run_id", ""),
+            "step_id": step_id,
+            "business_type": getattr(run, "business_type", ""),
+            "business_id": getattr(run, "business_id", ""),
+            "trace_id": getattr(run, "trace_id", ""),
+        }
+
     def get_snapshot(
         self,
         connector_id: str,
@@ -261,6 +286,9 @@ class ToolGateway:
         snapshot_id: str,
         run_id: str,
         generation_epoch: int,
+        # tool_context 是 envelope 元数据而非业务入参；位置参数让 *args 测试替身
+        # 自动兼容（生产 Runner 总是显式透传，None 仅用于路径1/替身的退化场景）。
+        tool_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """读取冻结快照；读取无副作用，单次传输失败可安全重试。"""
         return self._call(
@@ -274,11 +302,13 @@ class ToolGateway:
             },
             "memory.get_snapshot",
             retry_transport=True,
+            tool_context=tool_context,
         )
 
     def publish_playback_document(
         self, connector_id: str, archive_id: str, run_id: str, snapshot_id: str, generation_epoch: int,
         document: dict[str, Any], idempotency_key: str, tool_call: AgentToolCall | None = None,
+        tool_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """发布完整作品；调用方只能传受信任 run 上下文与已校验作品结构。"""
         if tool_call is None:
@@ -290,9 +320,13 @@ class ToolGateway:
             "/api/v1/internal/agent-tools/memory.publish_playback_document",
             {"archive_id": archive_id, "run_id": run_id, "snapshot_id": snapshot_id, "generation_epoch": generation_epoch, "document": document},
             "memory.publish_playback_document", idempotency_key, tool_call=tool_call,
+            tool_context=tool_context,
         )
 
-    def get_publish_result(self, connector_id: str, archive_id: str, run_id: str, idempotency_key: str) -> dict[str, Any] | None:
+    def get_publish_result(
+        self, connector_id: str, archive_id: str, run_id: str, idempotency_key: str,
+        tool_context: Mapping[str, str] | None = None,
+    ) -> dict[str, Any] | None:
         """对账未知写入；404 表示业务端尚未观察到该逻辑操作。"""
         try:
             return self._call(
@@ -302,6 +336,7 @@ class ToolGateway:
                 "memory.get_publish_result",
                 idempotency_key,
                 allow_during_draining=True,
+                tool_context=tool_context,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -319,6 +354,7 @@ class ToolGateway:
         retry_transport: bool = False,
         allow_during_draining: bool = False,
         tool_call: AgentToolCall | None = None,
+        tool_context: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """签名后调用固定工具；写操作超时结果交给上层幂等对账。"""
         connector = self._connectors.get(connector_id)
@@ -328,11 +364,15 @@ class ToolGateway:
                 self._audit_rejection(run_id, CONNECTOR_DISABLED)
             raise ValueError("BUSINESS_CONNECTOR_UNAVAILABLE")
         connector_origin = self._connector_origins[connector_id]
-        # R3：构造冻结 ToolRequest 形状后序列化请求体，确保含 input 与 context 两个字段。
-        # context 字段当前无冻结语义（契约冻结记录与 tools.py 均未规定其内容），
-        # 置空是最保守不臆造做法；未来冻结后由调用方填充。本地 handler 只读 input，
-        # 加 context={} 向后兼容。序列化结果仍为 {"input":..., "context":{}}。
-        tool_request = ToolRequest(input=input_data, context={})
+        # R3：构造冻结 ToolRequest 形状，input 来自业务入参，context 含冻结 7 字段
+        # （fixture tool_contract.context_required：agent_id/agent_version/run_id/
+        # step_id/business_type/business_id/trace_id）。生产路径由 Runner 经
+        # build_tool_context 从可信 Run 构造透传；路径1（langchain 适配器，仅测试/
+        # 预留，无 Run 上下文）传 None 时 context 置空，待其启用时由调用方装配。
+        tool_request = ToolRequest(
+            input=input_data,
+            context=dict(tool_context) if tool_context else {},
+        )
         content = httpx.Request("POST", "http://tool.local", json=tool_request.model_dump()).content
         timestamp = str(int(time.time()))
         headers = {"X-Agent-Runtime-Id": connector.runtime_id, "X-Agent-Key-Id": connector.key_id, "X-Agent-Timestamp": timestamp, "X-Agent-Signature": tool_signature("POST", path, timestamp, content, connector.secret)}
@@ -610,10 +650,10 @@ class ToolGateway:
         冻结合约里唯一的硬性不安全声明，必须无条件拒绝，防止业务错误详情灌入
         模型上下文。
 
-        ponytail: 跳过 coordinator 提到的「未知 error_code」「HTTP 状态码 vs
-        (error_code+retryable) 语义矛盾」两类检查——目前仓库没有冻结的
-        error_code 枚举或状态码↔可重试映射表，引入即臆造策略。等 R4+ 冻结枚举
-        与映射表后再扩展本方法，已在 VERIFICATION.md 风险项登记。
+        P3 冻结：error_code 必须落在 allowlist (TOOL_ERROR_HTTP_STATUS)，且
+        (http_status, retryable) 必须与矩阵一致；retryable 由 status>=500 派生，
+        与 runner.py 重试判定对齐。未知码按 TOOL_ERROR_CODE_UNKNOWN 拒绝，
+        (code,http_status,retryable) 矛盾按 TOOL_ERROR_CONTRADICTION 拒绝。
 
         body 不构成 ToolError（如 FastAPI 默认 ``{"detail": ...}``、空 body）时
         不介入，让 ``raise_for_status`` 按 409/404 现有契约传播 HTTPStatusError。
@@ -648,6 +688,31 @@ class ToolGateway:
                 "TOOL_ERROR_SHAPE_INVALID",
             )
             raise ValueError("TOOL_ERROR_SHAPE_INVALID")
+        # P3：error_code 必须在冻结 allowlist 内；未知码 = 契约单方漂移或注入攻击面。
+        expected_status = TOOL_ERROR_HTTP_STATUS.get(candidate.error_code)
+        if expected_status is None:
+            logging.info(
+                "HTTP Business Tool 非 2xx 响应 ToolError error_code 不在冻结 allowlist "
+                "tool=%s rejected=%s",
+                tool_name,
+                "TOOL_ERROR_CODE_UNKNOWN",
+            )
+            raise ValueError("TOOL_ERROR_CODE_UNKNOWN")
+        # P3：(http_status, retryable) 必须与冻结矩阵一致；不一致 = 分类矛盾。
+        # retryable 由 status>=500 派生（与 runner.py HTTPStatusError 重试判定对齐）。
+        expected_retryable = expected_status >= 500
+        if response.status_code != expected_status or candidate.retryable != expected_retryable:
+            logging.info(
+                "HTTP Business Tool 非 2xx 响应 ToolError (code,http_status,retryable) 与冻结矩阵矛盾 "
+                "tool=%s code=%s http=%s retryable=%s expected_http=%s expected_retryable=%s",
+                tool_name,
+                candidate.error_code,
+                response.status_code,
+                candidate.retryable,
+                expected_status,
+                expected_retryable,
+            )
+            raise ValueError("TOOL_ERROR_CONTRADICTION")
 
     @staticmethod
     def _validate_output(output: dict[str, Any]) -> None:

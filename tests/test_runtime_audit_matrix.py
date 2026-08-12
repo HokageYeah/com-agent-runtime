@@ -72,10 +72,12 @@ def test_package_lifecycle_and_approval_write_safe_audits(tmp_path) -> None:
     session.add_all([definition, waiting])
     session.commit()
 
+    # 先在 Package 仍 active 时完成审批（产生审批审计），再单独废弃包；approve 现在
+    # 拒绝不可执行 Package，故二者顺序不可颠倒。本例聚焦审计无内容，而非废弃后审批。
+    AgentRunService(session).approve(waiting.run_id, "caller", "approve", waiting.status_version)
     AgentPackageService(tmp_path, AuditService(session=session)).change_definition_status(
         definition, "deprecated", "admin", "maintenance"
     )
-    AgentRunService(session).approve(waiting.run_id, "caller", "approve", waiting.status_version)
     session.commit()
 
     actions = {item.action for item in session.scalars(select(RuntimeAuditRecord)).all()}

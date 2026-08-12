@@ -149,7 +149,27 @@ def _executor(session, node_runner: DeterministicNodeRunner) -> WorkflowExecutor
     )
 
 
-def _add_claimed_two_node_run(session, run_id: str) -> datetime:
+def _add_active_test_package(session, changed_at: datetime) -> None:
+    """正常执行夹具显式装配与 Run 冻结身份一致的有效 Package。"""
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent",
+            version="1.0.0",
+            runtime_type="workflow",
+            definition_json={},
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            status="active",
+            status_changed_at=changed_at,
+            status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
+
+
+def _add_claimed_two_node_run(
+    session, run_id: str, *, include_active_package: bool = True
+) -> datetime:
     now = datetime.now(UTC)
     session.add(
         AgentRun(
@@ -177,6 +197,8 @@ def _add_claimed_two_node_run(session, run_id: str) -> datetime:
             run_deadline_at=now + timedelta(days=1),
         )
     )
+    if include_active_package:
+        _add_active_test_package(session, now)
     session.add(
         AgentPlan(
             plan_id=f"{run_id}-plan",
@@ -231,6 +253,7 @@ def test_executor_writes_step_and_checkpoint_for_every_static_plan_node() -> Non
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
 
     result = _executor(session, DeterministicNodeRunner()).run(
@@ -316,7 +339,9 @@ def test_executor_refuses_revoked_package_before_starting_any_node() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    now = _add_claimed_two_node_run(session, "revoked-package-run")
+    now = _add_claimed_two_node_run(
+        session, "revoked-package-run", include_active_package=False
+    )
     session.add(
         AgentDefinition(
             agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
@@ -329,6 +354,76 @@ def test_executor_refuses_revoked_package_before_starting_any_node() -> None:
     runner = RecordingNodeRunner()
 
     result = _executor(session, runner).run("revoked-package-run", _lease_context(now))
+
+    assert (result.status, result.error_code) == ("cancelled", "PACKAGE_REVOKED")
+    assert runner.node_ids == []
+
+
+def test_executor_refuses_deprecated_package_before_starting_any_node() -> None:
+    """deprecated Package 不是可执行 Package，旧 lease 只能安全取消。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(
+        session, "deprecated-package-run", include_active_package=False
+    )
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+            definition_json={}, package_digest="sha256:test", contract_version="1.0.0",
+            status="deprecated", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = _executor(session, runner).run("deprecated-package-run", _lease_context(now))
+
+    assert (result.status, result.error_code) == ("cancelled", "PACKAGE_REVOKED")
+    assert runner.node_ids == []
+
+
+def test_executor_refuses_missing_definition_before_starting_any_node() -> None:
+    """Run 的冻结 Package Definition 缺失时，旧 lease 不能启动任何节点。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(
+        session, "missing-package-definition-run", include_active_package=False
+    )
+    runner = RecordingNodeRunner()
+
+    result = _executor(session, runner).run(
+        "missing-package-definition-run", _lease_context(now)
+    )
+
+    assert (result.status, result.error_code) == ("cancelled", "PACKAGE_REVOKED")
+    assert runner.node_ids == []
+
+
+def test_executor_refuses_definition_digest_drift_before_starting_any_node() -> None:
+    """同版本 Definition 的源码 digest 漂移时，Run 只能 fail closed。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = _add_claimed_two_node_run(
+        session, "drifted-package-definition-run", include_active_package=False
+    )
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+            definition_json={}, package_digest="sha256:drifted", contract_version="1.0.0",
+            status="active", status_changed_at=now, status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
+    session.commit()
+    runner = RecordingNodeRunner()
+
+    result = _executor(session, runner).run(
+        "drifted-package-definition-run", _lease_context(now)
+    )
 
     assert (result.status, result.error_code) == ("cancelled", "PACKAGE_REVOKED")
     assert runner.node_ids == []
@@ -371,6 +466,7 @@ def test_executor_partial_resume_only_redoes_uncompleted_optional() -> None:
             ], stop_conditions_json={}, fallback_policy_json={}, status="planned",
         ),
     ])
+    _add_active_test_package(session, now)
     session.commit()
     context = _lease_context(now)
     runner = OptionalFailureThenSuccessRunner()
@@ -455,6 +551,7 @@ def test_executor_resume_publish_idempotent_via_query_after_commit() -> None:
         execution_attempt=1, lease_owner="worker-a", fencing_token=1,
         lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
     ))
+    _add_active_test_package(session, now)
     session.add(AgentPlan(
         plan_id="pub-idempotent-plan", run_id="pub-idempotent-run", strategy="static_workflow",
         steps_json=[
@@ -604,6 +701,7 @@ def test_executor_rejects_stale_fencing_context_before_creating_step() -> None:
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
 
     result = _executor(session, DeterministicNodeRunner()).run(
@@ -653,6 +751,7 @@ def test_executor_resume_reruns_all_nodes_to_recompute_content() -> None:
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     context = LeaseContext(
         execution_attempt=2, lease_owner="worker-b", fencing_token=2,
@@ -717,6 +816,7 @@ def test_executor_resume_from_fallback_checkpoint_starts_at_fallback_node() -> N
             status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     context = LeaseContext(
         execution_attempt=2, lease_owner="worker-b", fencing_token=2,
@@ -763,6 +863,7 @@ def test_executor_encrypts_node_state_without_leaking_snapshot_to_artifact() -> 
     session = sessionmaker(bind=engine)()
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="snapshot-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    _add_active_test_package(session, now)
     session.add(AgentPlan(plan_id="snapshot-plan", run_id="snapshot-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
     session.commit()
     context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
@@ -793,6 +894,7 @@ def test_executor_pauses_for_human_after_checkpoint_and_emits_callback() -> None
     session = sessionmaker(bind=engine)()
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="human-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    _add_active_test_package(session, now)
     session.add(AgentPlan(plan_id="human-plan", run_id="human-run", strategy="static_workflow", steps_json=[{"node_id": "review", "node_type": "guardrail"}, {"node_id": "fallback", "node_type": "deterministic"}], stop_conditions_json={"approval_ttl_seconds": 60}, fallback_policy_json={"waiting_human_fallback_node": "fallback"}, status="planned"))
     session.commit()
     context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
@@ -820,6 +922,7 @@ def test_executor_rejects_checkpoint_fallback_missing_from_frozen_plan() -> None
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="invalid-fallback-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="waiting_human", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", error_code="WAITING_HUMAN_FALLBACK", execution_attempt=2, lease_owner="worker", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
     session.add(AgentPlan(plan_id="invalid-fallback-plan", run_id="invalid-fallback-run", strategy="static_workflow", steps_json=[{"node_id": "review", "node_type": "guardrail"}], stop_conditions_json={}, fallback_policy_json={"waiting_human_fallback_node": "fallback"}, status="planned"))
+    _add_active_test_package(session, now)
     session.commit()
     context = LeaseContext(execution_attempt=2, lease_owner="worker", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
     store = CheckpointStore(session, FernetCheckpointCipher.generate())
@@ -847,6 +950,7 @@ def test_executor_stops_before_next_node_when_authorization_changes() -> None:
     session = sessionmaker(bind=engine)()
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="authorization-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    _add_active_test_package(session, now)
     session.add(AgentPlan(plan_id="authorization-plan", run_id="authorization-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
     session.commit()
     runner = RevokingRunner()
@@ -910,6 +1014,7 @@ def test_executor_draining_before_first_node_returns_safe_nonterminal_result() -
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     runner = RecordingNodeRunner()
 
@@ -962,6 +1067,7 @@ def test_executor_draining_after_checkpoint_does_not_start_next_node() -> None:
             stop_conditions_json={}, fallback_policy_json={}, status="planned",
         )
     )
+    _add_active_test_package(session, now)
     session.commit()
     draining = {"value": False}
 
@@ -1011,6 +1117,7 @@ def test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_
     session = sessionmaker(bind=engine)()
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="sentinel-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
+    _add_active_test_package(session, now)
     session.add(AgentPlan(plan_id="sentinel-plan", run_id="sentinel-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
     session.commit()
     context = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
@@ -1065,6 +1172,7 @@ def test_executor_resume_rejects_legacy_full_state_checkpoint_and_purges() -> No
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="legacy-resume-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=2, lease_owner="worker-b", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
     session.add(AgentPlan(plan_id="legacy-resume-plan", run_id="legacy-resume-run", strategy="static_workflow", steps_json=[{"node_id": "load_snapshot", "node_type": "tool"}, {"node_id": "compute_stats", "node_type": "deterministic"}], stop_conditions_json={}, fallback_policy_json={}, status="planned"))
+    _add_active_test_package(session, now)
     session.commit()
     context = LeaseContext(execution_attempt=2, lease_owner="worker-b", fencing_token=2, lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1)
     cipher = FernetCheckpointCipher.generate()
@@ -1126,6 +1234,7 @@ def test_executor_resume_rejects_legacy_plan_missing_safe_to_rerun() -> None:
         lease_owner="worker-b", fencing_token=2,
         lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
     ))
+    _add_active_test_package(session, now)
     # legacy plan：节点在 safe_to_rerun 引入前冻结，缺该键（区别于显式 False）。
     session.add(AgentPlan(
         plan_id="legacy-plan-def", run_id="legacy-plan-run", strategy="static_workflow",
@@ -1194,6 +1303,7 @@ def test_resume_legacy_checkpoint_purge_persists_across_session_via_finish_chain
         ],
         stop_conditions_json={}, fallback_policy_json={}, status="planned",
     ))
+    _add_active_test_package(session_a, now)
     session_a.commit()
     cipher = FernetCheckpointCipher.generate()
     store = CheckpointStore(session_a, cipher)
@@ -1270,6 +1380,7 @@ def test_resume_legacy_checkpoint_log_privacy_success_and_failure_fails_closed(c
         execution_attempt=2, lease_owner="worker-b", fencing_token=2,
         lease_expires_at=now + timedelta(seconds=60), privacy_version=1, authorization_version=1,
     )
+    _add_active_test_package(session, now)
 
     def _seed(run_id: str) -> None:
         session.add(AgentRun(
@@ -1370,6 +1481,7 @@ def test_resume_anti_revival_when_authorization_version_changed() -> None:
         ],
         stop_conditions_json={}, fallback_policy_json={}, status="planned",
     ))
+    _add_active_test_package(session, now)
     session.commit()
     cipher = FernetCheckpointCipher.generate()
     store = CheckpointStore(session, cipher)
@@ -1419,6 +1531,7 @@ def test_resume_anti_revival_when_privacy_version_changed() -> None:
         lease_owner="worker-b", fencing_token=2,
         lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
     ))
+    _add_active_test_package(session, now)
     session.commit()
     cipher = FernetCheckpointCipher.generate()
     store = CheckpointStore(session, cipher)
@@ -1510,6 +1623,7 @@ def test_executor_resume_real_memoir_runner_publishes_once_via_query_after_commi
         lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1),
     )
     session.add(run)
+    _add_active_test_package(session, now)
     session.add(AgentPlan(
         plan_id="memoir-resume-plan", run_id=run.run_id, strategy="static_workflow",
         steps_json=memoir_steps, stop_conditions_json={}, fallback_policy_json={},

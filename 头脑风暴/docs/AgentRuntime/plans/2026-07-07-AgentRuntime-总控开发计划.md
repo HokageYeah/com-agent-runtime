@@ -365,13 +365,13 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 **Plan:** 后端计划 Task 3、Task 12 的包定义部分。
 
 - [✅] 定义 AgentPackage schema。
-- [✅] 创建 `memoir_agent@1.0.0` 文件包。
+- [✅] 创建 `memoir_agent@1.0.0` 文件包。**（2026-08-11 第六次最小收口 P1：1.0.0 恢复 `enqueue_media_tasks` 缺 `safe_to_rerun` 的冻结原貌——620f44a 曾给该节点补 `safe_to_rerun=False` 违反同版本 digest 不可变铁律；另发 `memoir_agent@1.0.1` 承载显式 `safe_to_rerun=False`，新 Run 路由 1.0.1，旧 Run 绑 1.0.0。两版本 digest 独立、`contract_version` 都 1.0.0）**
 - [✅] 固定 `agent.yaml`、`input.schema.json`、`output.schema.json`、受信任 `workflow.graph.py`、`prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/`。
 - [✅] 加载器校验版本、schema、workflow、prompt 引用、工具清单、guardrails、callback、ui trace 和至少 5 条最小 eval 用例。
 - [✅] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许进入人工等待，fallback 必须指向确定性的恢复节点。
 - [✅] Tool manifest 预留 `mcp_server_id/mcp_tool_name/mcp_resource_uri`，并冻结 AI SDK 等价 tool schema fixture；第一版仅验证兼容，不连接 MCP。
 - [✅] Tool manifest 冻结 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明状态路径和覆盖 trusted 控制字段的映射在注册期拒绝。
-- [✅] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。
+- [✅] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。**（2026-08-11 第六次收口 P1 实证：1.0.0 在 620f44a 被改动加 `safe_to_rerun` 违反此铁律——同版本改内容属非法；故恢复 1.0.0 缺键原貌 + 另发 1.0.1。`test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages` 证明两版本 digest 不同且各自合法 load，`contract_version` 都 1.0.0；同版本改内容→必须升版本的规则被真实触发并按规则处置）**
 - [✅] Package active/deprecated/revoked 变化记录操作者、原因、时间并写 RuntimeAuditEvent。
 
 **Checkpoint:** Runtime 可以加载指定版本 AgentPackage，不能自动使用最新版。

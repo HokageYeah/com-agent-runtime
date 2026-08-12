@@ -186,14 +186,7 @@ class AgentRunService:
             and run.status_version != expected_status_version
         ):
             raise AgentRunServiceError("状态版本冲突")
-        definition = self._session.scalar(
-            select(AgentDefinition).where(
-                AgentDefinition.agent_id == run.agent_id,
-                AgentDefinition.version == run.agent_version,
-            )
-        )
-        if definition is None or definition.status == "revoked":
-            raise AgentRunServiceError("AgentPackage 已撤销，禁止 start")
+        self._assert_frozen_package_definition(run, "start")
         if run.privacy_state != "active" or run.cancel_requested_at is not None:
             raise AgentRunServiceError("Run 已取消或处于私密数据清理状态")
         if run.dispatch_state in {"queued", "claimed"}:
@@ -406,14 +399,7 @@ class AgentRunService:
             raise AgentRunServiceError("Run 缺少 checkpoint，禁止 retry")
         if run.status == "partial":
             self._assert_partial_retryable(run)
-        definition = self._session.scalar(
-            select(AgentDefinition).where(
-                AgentDefinition.agent_id == run.agent_id,
-                AgentDefinition.version == run.agent_version,
-            )
-        )
-        if definition is None or definition.status == "revoked":
-            raise AgentRunServiceError("AgentPackage 已撤销，禁止 retry")
+        self._assert_frozen_package_definition(run, "retry")
         run.manual_retry_count += 1
         run.status, run.dispatch_state = "pending", "queued"
         run.queued_at = datetime.now(UTC)
@@ -495,6 +481,10 @@ class AgentRunService:
             or run.status_version != expected_version
         ):
             raise AgentRunServiceError("人工审批状态版本冲突")
+        # approve/reject-fallback 都会把 Run 推回 queued 重新分发，必须与
+        # start/retry 收敛到同一不可执行 Package 谓词，避免人工审批把已停止的
+        # Package（缺失/废弃/digest 漂移）再次放回执行队列。
+        self._assert_frozen_package_definition(run, "approve")
         dispatch_reason: str | None = None
         terminal_reject = False
         if decision == "approve":
@@ -572,6 +562,19 @@ class AgentRunService:
         current = self._authorization_version_resolver(run)
         if current is None or current != run.authorization_version:
             raise AgentRunServiceError("授权版本已变化")
+
+    def _assert_frozen_package_definition(self, run: AgentRun, action: str) -> None:
+        """控制面操作只接受与 Run 冻结身份完全一致的可用 Package。"""
+        definition = self._session.scalar(
+            select(AgentDefinition).where(
+                AgentDefinition.agent_id == run.agent_id,
+                AgentDefinition.version == run.agent_version,
+            )
+        )
+        if definition is None or definition.status != "active":
+            raise AgentRunServiceError(f"AgentPackage 不可执行，禁止 {action}")
+        if definition.package_digest != run.package_digest:
+            raise AgentRunServiceError("AgentPackage digest 不匹配，禁止操作")
 
     def _append_audit(
         self,

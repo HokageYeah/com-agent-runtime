@@ -7,6 +7,7 @@ import socket
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -29,6 +30,7 @@ from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext
+from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.services.agent_run_service import AgentRunService
 from app.services.reconciliation_service import ReconciliationService
 from app.services.tool_call_audit_service import ToolCallAuditService
@@ -55,6 +57,24 @@ class FakeExecutor:
             status="succeeded",
             execution_attempt=lease_context.execution_attempt,
         )
+
+
+def _add_active_test_package(session, changed_at: datetime) -> None:
+    """成功 Worker 链路显式装配与 Run 冻结身份匹配的有效 Package。"""
+    session.add(
+        AgentDefinition(
+            agent_id="memoir_agent",
+            version="1.0.0",
+            runtime_type="workflow",
+            definition_json={},
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            status="active",
+            status_changed_at=changed_at,
+            status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
 
 
 def test_worker_classifies_callback_target_rejections_with_fixed_safe_codes() -> None:
@@ -134,6 +154,325 @@ def test_worker_persists_contentless_connector_disabled_audit(
         value not in str(audit.metadata_summary)
         for value in ("base_url", "secret", "payload")
     )
+
+def test_configured_executor_runs_frozen_memoir_1_0_1_workflow(monkeypatch) -> None:
+    """新 Run 的冻结 Package 版本必须路由到真实 Memoir Workflow。"""
+    import app.worker as worker
+
+    monkeypatch.setattr(
+        worker.settings,
+        "RUNTIME_BUSINESS_CONNECTORS_JSON",
+        '{"couple_diary_backend":{"enabled":true,"base_url":"https://business.example.test",'
+        '"runtime_id":"agent-runtime","key_id":"dev","secret":"test-secret"}}',
+        raising=False,
+    )
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="memoir-v1-0-1-run",
+        agent_id="memoir_agent",
+        agent_version="1.0.1",
+        package_digest="sha256:memoir-1-0-1",
+        contract_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive-1",
+        status="running",
+        dispatch_state="claimed",
+        input_json={},
+        authorization_version=1,
+        caller_id="couple-diary",
+        tenant_id="couple-diary",
+        create_idempotency_key="key",
+        callback_target_id="memory_callback",
+        business_connector_id="couple_diary_backend",
+        trace_id="trace",
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(minutes=1),
+        run_deadline_at=now + timedelta(days=1),
+    )
+    session.add_all(
+        [
+            run,
+            AgentDefinition(
+                agent_id=run.agent_id,
+                version=run.agent_version,
+                runtime_type="workflow",
+                definition_json={},
+                package_digest=run.package_digest,
+                contract_version=run.contract_version,
+                status="active",
+                status_changed_at=now,
+                status_changed_by="test",
+                status_change_reason="fixture",
+            ),
+            AgentPlan(
+                plan_id="memoir-v1-0-1-plan",
+                run_id=run.run_id,
+                strategy="static_workflow",
+                steps_json=[
+                    {
+                        "node_id": "safety_review",
+                        "node_type": "guardrail",
+                        "safe_to_rerun": True,
+                    }
+                ],
+                stop_conditions_json={},
+                fallback_policy_json={},
+                status="planned",
+            ),
+        ]
+    )
+    session.commit()
+    lease = LeaseContext(
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=run.lease_expires_at,
+        privacy_version=1,
+        authorization_version=1,
+    )
+
+    result = configured_executor(session).run(run.run_id, lease)
+
+    assert (result.status, result.error_code) == ("succeeded", None)
+    step = session.scalar(select(AgentStep).where(AgentStep.run_id == run.run_id))
+    assert step is not None and step.step_name == "safety_review"
+
+
+def test_configured_executor_resumes_historical_frozen_memoir_version(
+    monkeypatch,
+) -> None:
+    """历史 Run 恢复只校验自身冻结的 1.0.0 Package，不读取后续 1.0.1 状态。"""
+    import app.worker as worker
+
+    monkeypatch.setattr(
+        worker.settings,
+        "RUNTIME_BUSINESS_CONNECTORS_JSON",
+        '{"couple_diary_backend":{"enabled":true,"base_url":"https://business.example.test",'
+        '"runtime_id":"agent-runtime","key_id":"dev","secret":"test-secret"}}',
+        raising=False,
+    )
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id="memoir-v1-0-0-resume-run",
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        package_digest="sha256:memoir-1-0-0",
+        contract_version="1.0.0",
+        business_type="couple_memory",
+        business_id="archive-1",
+        status="waiting_human",
+        dispatch_state="claimed",
+        input_json={},
+        authorization_version=1,
+        caller_id="couple-diary",
+        tenant_id="couple-diary",
+        create_idempotency_key="key",
+        callback_target_id="memory_callback",
+        business_connector_id="couple_diary_backend",
+        trace_id="trace",
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(minutes=1),
+        run_deadline_at=now + timedelta(days=1),
+    )
+    session.add_all(
+        [
+            run,
+            AgentDefinition(
+                agent_id="memoir_agent",
+                version="1.0.0",
+                runtime_type="workflow",
+                definition_json={},
+                package_digest="sha256:memoir-1-0-0",
+                contract_version="1.0.0",
+                status="active",
+                status_changed_at=now,
+                status_changed_by="test",
+                status_change_reason="fixture",
+            ),
+            AgentDefinition(
+                agent_id="memoir_agent",
+                version="1.0.1",
+                runtime_type="workflow",
+                definition_json={},
+                package_digest="sha256:memoir-1-0-1",
+                contract_version="1.0.0",
+                status="revoked",
+                status_changed_at=now,
+                status_changed_by="test",
+                status_change_reason="fixture",
+            ),
+            AgentPlan(
+                plan_id="memoir-v1-0-0-resume-plan",
+                run_id=run.run_id,
+                strategy="static_workflow",
+                steps_json=[
+                    {
+                        "node_id": "safety_review",
+                        "node_type": "guardrail",
+                        "safe_to_rerun": True,
+                    }
+                ],
+                stop_conditions_json={},
+                fallback_policy_json={},
+                status="planned",
+            ),
+        ]
+    )
+    session.commit()
+    lease = LeaseContext(
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=run.lease_expires_at,
+        privacy_version=1,
+        authorization_version=1,
+    )
+    CheckpointStore(
+        session,
+        FernetCheckpointCipher(worker.settings.MEMORY_SNAPSHOT_FERNET_KEY.encode()),
+    ).save(run.run_id, "resume", {"completed_node_ids": []}, lease)
+    session.commit()
+
+    result = configured_executor(session).resume(run.run_id, lease)
+
+    assert (result.status, result.error_code) == ("succeeded", None)
+    step = session.scalar(select(AgentStep).where(AgentStep.run_id == run.run_id))
+    assert step is not None and step.step_name == "safety_review"
+
+
+@pytest.mark.parametrize(
+    ("definition_state", "definition_digest", "expected_requests"),
+    (
+        ("active", "digest", 1),
+        ("missing", None, 0),
+        ("revoked", "digest", 0),
+        ("digest_drift", "unexpected-digest", 0),
+    ),
+)
+def test_worker_tool_gateway_honors_frozen_package_before_http_send(
+    monkeypatch,
+    definition_state: str,
+    definition_digest: str | None,
+    expected_requests: int,
+) -> None:
+    """工具发送前只接受 active 且 digest 匹配的冻结 Package。"""
+    import app.worker as worker
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
+        ],
+    )
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
+    run = AgentRun(
+        run_id=f"invalid-package-tool-{definition_state}",
+        agent_id="memoir_agent",
+        agent_version="1.0.0",
+        package_digest="digest",
+        contract_version="1",
+        business_type="memoir",
+        business_id="business",
+        status="running",
+        dispatch_state="claimed",
+        input_json={},
+        authorization_version=1,
+        caller_id="caller",
+        tenant_id="tenant",
+        create_idempotency_key="key",
+        callback_target_id="callback",
+        business_connector_id="connector",
+        trace_id="trace",
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(minutes=1),
+        run_deadline_at=now + timedelta(days=1),
+    )
+    session.add(run)
+    if definition_digest is not None:
+        session.add(
+            AgentDefinition(
+                agent_id=run.agent_id,
+                version=run.agent_version,
+                runtime_type="workflow",
+                definition_json={},
+                package_digest=definition_digest,
+                contract_version=run.contract_version,
+                status="revoked" if definition_state == "revoked" else "active",
+                status_changed_at=now,
+                status_changed_by="test",
+                status_change_reason="fixture",
+            )
+        )
+    session.commit()
+    lease = LeaseContext(
+        execution_attempt=1,
+        lease_owner="worker",
+        fencing_token=1,
+        lease_expires_at=now + timedelta(minutes=1),
+        privacy_version=1,
+        authorization_version=1,
+    )
+    requests = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, json={"output": {"diaries": []}})
+
+    gateway = ToolGateway(
+        {
+            run.business_connector_id: BusinessConnector(
+                "http://business.example.test",
+                "agent-runtime",
+                "dev",
+                "test-secret",
+            )
+        },
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        authorization_permitted=lambda _run_id: None,
+        execution_permitted=lambda checked_run_id: worker._tool_execution_permitted(
+            session,
+            checked_run_id,
+            lease,
+        ),
+    )
+
+    if expected_requests:
+        assert gateway.get_snapshot(
+            run.business_connector_id,
+            "archive-1",
+            "snapshot-1",
+            run.run_id,
+            0,
+        ) == {"diaries": []}
+    else:
+        with pytest.raises(ValueError, match="TOOL_EXECUTION_CONTEXT_INVALID"):
+            gateway.get_snapshot(
+                run.business_connector_id,
+                "archive-1",
+                "snapshot-1",
+                run.run_id,
+                0,
+            )
+
+    assert requests == expected_requests
+
 
 def test_worker_signal_requests_drain_without_raising_or_terminating_inflight_work(
     monkeypatch,
@@ -236,7 +575,7 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
     monkeypatch.setattr(worker, "Redis", FakeRedis)
     monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
-    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":1,"tpm_limit":1,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
+    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":10,"tpm_limit":10,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
     monkeypatch.setattr(
@@ -252,6 +591,11 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="guarded-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="digest", contract_version="1", business_type="memoir", business_id="business", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(minutes=1), capability_snapshot_json={"allowed_model_route_ids": ["memoir"]}, run_deadline_at=now + timedelta(days=1)))
     session.add(AgentStep(step_id="guarded-step", run_id="guarded-run", step_name="extract_highlights", step_type="model", status="running", execution_attempt=1, step_attempt=1, input_summary={"estimated_input_tokens": 1}))
+    session.add(AgentDefinition(
+        agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
+        definition_json={}, package_digest="digest", contract_version="1", status="active",
+        status_changed_at=now, status_changed_by="test", status_change_reason="fixture",
+    ))
     session.commit()
     lease = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1, lease_expires_at=now + timedelta(minutes=1), privacy_version=1, authorization_version=1)
 
@@ -267,11 +611,25 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "succeeded"
     assert RecordingProvider.calls == 1
 
-    session.add(AgentDefinition(
-        agent_id="memoir_agent", version="1.0.0", runtime_type="workflow",
-        definition_json={}, package_digest="digest", contract_version="1", status="revoked",
-        status_changed_at=now, status_changed_by="test", status_change_reason="fixture",
-    ))
+    definition = session.scalar(
+        select(AgentDefinition).where(
+            AgentDefinition.agent_id == "memoir_agent",
+            AgentDefinition.version == "1.0.0",
+        )
+    )
+    assert definition is not None
+    definition.status = "revoked"
+    session.commit()
+    assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
+    assert RecordingProvider.calls == 1
+
+    definition.status = "active"
+    definition.package_digest = "unexpected-digest"
+    session.commit()
+    assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
+    assert RecordingProvider.calls == 1
+
+    session.delete(definition)
     session.commit()
     assert active.call("guarded-run", "extract_highlights", {"source_refs": []}).status == "aborted_before_send"
     assert RecordingProvider.calls == 1
@@ -465,6 +823,7 @@ def test_worker_approve_resumes_from_completed_checkpoint_not_fallback_target() 
     now = datetime.now(UTC)
     session.add(AgentRun(run_id="approve-resume-run", agent_id="memoir_agent", agent_version="1.0.0", package_digest="sha256:test", contract_version="1.0.0", business_type="couple_memory", business_id="archive", status="pending", dispatch_state="claimed", input_json={}, authorization_version=1, caller_id="caller", tenant_id="tenant", create_idempotency_key="key", callback_target_id="callback", business_connector_id="connector", trace_id="trace", execution_attempt=1, lease_owner="worker-a", fencing_token=1, lease_expires_at=now + timedelta(seconds=60), run_deadline_at=now + timedelta(days=1)))
     session.add(AgentPlan(plan_id="approve-resume-plan", run_id="approve-resume-run", strategy="static_workflow", steps_json=[{"node_id": "review", "node_type": "guardrail", "safe_to_rerun": False}, {"node_id": "continue", "node_type": "deterministic", "safe_to_rerun": False}, {"node_id": "fallback", "node_type": "deterministic", "safe_to_rerun": False}], stop_conditions_json={"approval_ttl_seconds": 60}, fallback_policy_json={"waiting_human_fallback_node": "fallback"}, status="planned"))
+    _add_active_test_package(session, now)
     session.commit()
     cipher = FernetCheckpointCipher.generate()
     runner = HumanThenContinueRunner()
@@ -543,6 +902,7 @@ def test_worker_completes_template_memoir_workflow_and_publishes_document() -> N
             status="pending", retention_until=datetime.now(UTC) + timedelta(days=1),
         )
     )
+    _add_active_test_package(session, datetime.now(UTC))
     session.commit()
 
     def executor_factory(worker_session):

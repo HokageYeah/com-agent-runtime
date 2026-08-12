@@ -252,7 +252,7 @@ class WorkflowExecutor:
                 error_code="PACKAGE_REVOKED",
             )
         # Package/authorization 是 can_write 的一部分，但要先返回受控的业务
-        # 结论，不能把已撤销 Package 伪装成泛化 lease 错误。
+        # 结论，不能把不可执行 Package 伪装成泛化 lease 错误。
         if not self._lease.can_write(run_id, lease_context):
             return AgentRunResult(
                 run_id=run_id,
@@ -553,15 +553,18 @@ class WorkflowExecutor:
         return current is None or current != run.authorization_version
 
     def _package_revoked(self, run: AgentRun) -> bool:
-        """Package 在 Run 创建后被撤销时，旧 lease 不得再启动任何节点。"""
+        """Run 的冻结 Package 缺失、非 active 或 digest 漂移时均禁止执行。"""
         definition = self._session.scalar(
             select(AgentDefinition).where(
                 AgentDefinition.agent_id == run.agent_id,
                 AgentDefinition.version == run.agent_version,
             )
         )
-        # 兼容只装配 Run/Plan 的隔离单元测试；真实部署由创建 API 保证定义存在。
-        return definition is not None and definition.status == "revoked"
+        return (
+            definition is None
+            or definition.status != "active"
+            or definition.package_digest != run.package_digest
+        )
 
     def _record_authorization_change(self, run: AgentRun) -> None:
         """只审计版本失配结论，不记录授权配置、输入或节点数据。"""

@@ -11,7 +11,7 @@ from app.services.tool_call_audit_service import ToolCallAuditService
 
 def test_load_snapshot_writes_only_runtime_memory_state():
     class Gateway:
-        def get_snapshot(self, connector_id, archive_id, snapshot_id, run_id, generation_epoch):
+        def get_snapshot(self, connector_id, archive_id, snapshot_id, run_id, generation_epoch, tool_context=None):
             return {"diaries": ["私密正文"]}
     run = type("Run", (), {"input_json": {"archive_id": "a", "snapshot_id": "s", "generation_epoch": 0}, "business_connector_id": "c", "run_id": "r"})()
     state = AgentState()
@@ -138,7 +138,7 @@ def test_sanitize_materials_drops_sensitive_item_text():
 def test_extract_highlights_uses_stable_source_ids_without_copying_content():
     """高光只能使用脱敏后的非敏感引用，不能回读原始快照。"""
     runner = MemoirNodeRunner(object())
-    run = type("Run", (), {"run_id": "r"})()
+    run = type("Run", (), {"run_id": "r", "agent_version": "1.0.0"})()
     state = AgentState(
         snapshot={"diaries": [{"id": "forged", "content": "私密正文"}]},
         sanitized_material={"materials": [
@@ -161,14 +161,18 @@ def test_highlights_ignore_sensitive_material_reference():
         ]},
     )
 
-    MemoirNodeRunner(object()).run_node({"node_id": "extract_highlights"}, type("Run", (), {"run_id": "r"})(), state)
+    MemoirNodeRunner(object()).run_node(
+        {"node_id": "extract_highlights"},
+        type("Run", (), {"run_id": "r", "agent_version": "1.0.0"})(),
+        state,
+    )
 
     assert state.highlights == {"source_refs": [], "mode": "template"}
 
 
 def test_template_chapters_scenes_and_actions_form_playable_fallback():
     runner = MemoirNodeRunner(object())
-    run = type("Run", (), {"run_id": "r"})()
+    run = type("Run", (), {"run_id": "r", "agent_version": "1.0.0"})()
     state = AgentState(
         stats={"diary_count": 2, "bet_count": 1, "has_material": True},
         highlights={"source_refs": ["diary:d-1", "completed_bet:b-1"], "mode": "template"},

@@ -54,3 +54,19 @@ class ToolError(ToolContractModel):
     # 默认绝不让业务错误详情进入模型上下文；只有未来冻结 policy 明确允许的
     # 受控枚举才能改变此结论，不能由 Provider/Tool 响应自行声明。
     details_visible_to_model: bool = False
+
+
+# P3 冻结：业务 HTTP Tool 非 2xx 响应若自称 ToolError，error_code 必须落在以下 allowlist，
+# 且其 HTTP 状态码必须等于此处冻结的期望值。码值与状态码精确取自业务后端实际抛出点
+# (memory_publish_service.py 的 _CODE_* 与对应 HTTPException status_code)，不臆造。
+# retryable 不单独冻结，统一由 `http_status >= 500` 派生，与 runner.py 捕获 HTTPStatusError
+# 时的重试判定完全一致；当前 6 个码均为 4xx，故 retryable 全为 False。
+# 业务端未来若要新增码，必须先在此 allowlist 与双方 fixture 同步冻结，否则 Runtime fail closed。
+TOOL_ERROR_HTTP_STATUS: dict[str, int] = {
+    "MEMORY_SNAPSHOT_UNAVAILABLE": 403,  # 快照不可读（权限/缺失）
+    "GENERATION_SUPERSEDED": 403,  # 生成被更高 epoch 取代
+    "MEMORY_RUN_NOT_ACTIVE": 403,  # Run 已终结，拒绝写入
+    "MEMORY_DOCUMENT_INVALID": 403,  # 文档校验失败
+    "IDEMPOTENCY_CONFLICT": 409,  # 幂等键冲突
+    "PUBLISH_NOT_YET_OBSERVED": 404,  # 尚无可观测的发布结果（轮询信号）
+}

@@ -181,12 +181,13 @@ class MemoirNodeRunner:
             safe_refs = [ref for ref in refs if isinstance(ref, str)][:8] if isinstance(refs, list) else []
             chapter_request: dict[str, object] = {"source_refs": safe_refs}
             model_data = self._model_data(
-                run.run_id, "plan_chapters", chapter_request,
+                run.run_id, "plan_chapters", chapter_request, run.agent_version,
             )
             validated_chapters = self._valid_chapters(model_data, safe_refs)
             if validated_chapters is None and model_data is not None:
                 repaired = self._repair_model_data(
                     run.run_id, "plan_chapters", chapter_request, model_data,
+                    run.agent_version,
                 )
                 validated_chapters = self._valid_chapters(repaired, safe_refs)
             if validated_chapters is not None:
@@ -212,7 +213,7 @@ class MemoirNodeRunner:
             safe_chapters = self._safe_chapters(chapters)
             scene_request: dict[str, object] = {"chapters": safe_chapters}
             model_data = self._model_data(
-                run.run_id, "generate_scenes", scene_request,
+                run.run_id, "generate_scenes", scene_request, run.agent_version,
             )
             validated_scenes = self._valid_scenes(
                 model_data,
@@ -221,6 +222,7 @@ class MemoirNodeRunner:
             if validated_scenes is None and model_data is not None:
                 repaired = self._repair_model_data(
                     run.run_id, "generate_scenes", scene_request, model_data,
+                    run.agent_version,
                 )
                 validated_scenes = self._valid_scenes(
                     repaired,
@@ -259,7 +261,7 @@ class MemoirNodeRunner:
             refs = self._safe_material_refs(state.sanitized_material)
             highlight_request: dict[str, object] = {"source_refs": refs}
             model_data = self._model_data(
-                run.run_id, "extract_highlights", highlight_request,
+                run.run_id, "extract_highlights", highlight_request, run.agent_version,
             )
             validated_highlights = self._valid_highlights(model_data, refs)
             if validated_highlights is None and model_data is not None:
@@ -268,6 +270,7 @@ class MemoirNodeRunner:
                     "extract_highlights",
                     highlight_request,
                     model_data,
+                    run.agent_version,
                 )
                 validated_highlights = self._valid_highlights(repaired, refs)
             if validated_highlights is not None:
@@ -340,6 +343,9 @@ class MemoirNodeRunner:
                 "reason_code": "CAPABILITY_DISABLED",
             }
         if node.get("node_id") == "publish_document":
+            # publish_document 节点 3 个工具调用共用同一 step_id 的 envelope context，
+            # 统一构造一次，避免 7 字段形状在多个调用点重复拼装。
+            tool_context = ToolGateway.build_tool_context(run, "publish_document")
             if not isinstance(state.playback_document, dict):
                 raise ValueError("PLAYBACK_DOCUMENT_MISSING")
             archive_id, snapshot_id, epoch = run.input_json.get("archive_id"), run.input_json.get("snapshot_id"), run.input_json.get("generation_epoch")
@@ -359,7 +365,10 @@ class MemoirNodeRunner:
                 else None
             )
             if committed is not None:
-                reconciled = self._gateway.get_publish_result(run.business_connector_id, archive_id, run.run_id, committed.idempotency_key)
+                reconciled = self._gateway.get_publish_result(
+                    run.business_connector_id, archive_id, run.run_id,
+                    committed.idempotency_key, tool_context,
+                )
                 if reconciled is not None:
                     state.publish_result = reconciled
                     if not self._audit.succeed(
@@ -371,13 +380,13 @@ class MemoirNodeRunner:
                     return {"node_id": "publish_document", "published": True}
                 logging.warning("MemoirAgent 发布未知结果尚未可对账 run_id=%s", run.run_id)
                 raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN")
-            audit = self._audit.begin_publish(run.run_id, run.execution_attempt, logical_key, logical_key, digest) if self._audit else None
+            audit = self._audit.begin_publish(run.run_id, run.execution_attempt, logical_key, logical_key, digest, lease_context=self._lease_context) if self._audit else None
             try:
                 if audit is None:
                     raise RuntimeError("PUBLISH_AUDIT_REQUIRED")
                 state.publish_result = self._gateway.publish_playback_document(
                     run.business_connector_id, archive_id, run.run_id, snapshot_id, epoch,
-                    state.playback_document, logical_key, audit,
+                    state.playback_document, logical_key, audit, tool_context,
                 )
             except httpx.TimeoutException:
                 if audit is not None:
@@ -389,7 +398,8 @@ class MemoirNodeRunner:
                     # Idempotency 冲突不可信任响应正文；仅再次查询业务端已提交的
                     # revision/content_digest，并要求 digest 与本次规范化文档一致。
                     reconciled = self._gateway.get_publish_result(
-                        run.business_connector_id, archive_id, run.run_id, logical_key
+                        run.business_connector_id, archive_id, run.run_id,
+                        logical_key, tool_context,
                     )
                     if (
                         isinstance(reconciled, dict)
@@ -453,6 +463,7 @@ class MemoirNodeRunner:
         state.snapshot = self._gateway.get_snapshot(
             run.business_connector_id, archive_id, snapshot_id,
             run.run_id, generation_epoch,
+            ToolGateway.build_tool_context(run, "load_snapshot"),
         )
         logging.info("MemoirAgent 已加载快照 run_id=%s archive_id=%s", run.run_id, archive_id)
         return {"node_id": "load_snapshot", "snapshot_loaded": True}
@@ -619,12 +630,14 @@ class MemoirNodeRunner:
             and {action["scene_id"] for action in actions if isinstance(action, dict)} == scene_ids
         )
 
-    def _model_data(self, run_id: str, node_id: str, request: dict[str, object]) -> object | None:
+    def _model_data(
+        self, run_id: str, node_id: str, request: dict[str, object], agent_version: str,
+    ) -> object | None:
         """只接受成功 Gateway 的 data；状态和异常一律由确定性模板安全降级。"""
         if self._model_gateway is None:
             return None
         try:
-            safe_request = self._safe_model_request(node_id, request)
+            safe_request = self._safe_model_request(node_id, request, agent_version)
             if safe_request is None:
                 return None
             result = self._model_gateway.call(run_id, node_id, safe_request)
@@ -642,6 +655,7 @@ class MemoirNodeRunner:
         node_id: str,
         request: dict[str, object],
         invalid_output: object,
+        agent_version: str,
     ) -> object | None:
         """最多调用一次受信任 repair 边界；原输出只沿当前调用栈短暂传递。"""
         if self._model_gateway is None:
@@ -650,7 +664,7 @@ class MemoirNodeRunner:
         if not callable(repair):
             return None
         try:
-            safe_request = self._safe_model_request(node_id, request)
+            safe_request = self._safe_model_request(node_id, request, agent_version)
             if safe_request is None:
                 return None
             result = repair(run_id, node_id, safe_request, invalid_output)
@@ -663,7 +677,7 @@ class MemoirNodeRunner:
         return getattr(result, "data", None)
 
     def _safe_model_request(
-        self, node_id: str, request: dict[str, object],
+        self, node_id: str, request: dict[str, object], agent_version: str,
     ) -> dict[str, object] | None:
         """构造不含模板正文与素材正文的可观测请求摘要。"""
         prompt_id = {
@@ -673,7 +687,10 @@ class MemoirNodeRunner:
         }.get(node_id)
         if prompt_id is None:
             return None
-        prompt = self._prompts.load("memoir_agent", "1.0.0", prompt_id, "v1")
+        # audit 摘要的 prompt 身份按当前 Run 绑定的 agent_version 加载，与执行路径
+        # (memoir_model_gateway) 保持一致，不再硬编码版本；1.0.0/1.0.1 的 prompts 内容
+        # 相同，此处 DTO 字段值不变，仅消除“共享 runner 却钉死版本”的特殊情况。
+        prompt = self._prompts.load("memoir_agent", agent_version, prompt_id, "v1")
         refs = self._request_source_refs(request)
         context = self._contexts.build_node_context(
             trusted_instructions=prompt.template,

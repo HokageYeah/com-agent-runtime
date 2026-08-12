@@ -16,7 +16,7 @@ from app.services.memory_runtime_capability_cache import (
 def _snapshot(*, expires_at: datetime, contract_version: str = "1.0.0") -> RuntimeCapabilitySnapshot:
     return RuntimeCapabilitySnapshot(
         contract_version=contract_version, package_digest="sha256:memoir",
-        agent_versions=frozenset({("memoir_agent", "1.0.0")}),
+        agent_versions=frozenset({("memoir_agent", "1.0.1")}),
         model_policies=frozenset({"emotional_writing", "strict"}),
         workflow_agent=True, expires_at=expires_at,
     )
@@ -60,7 +60,7 @@ def test_capability_cache_refreshes_immediately_when_probe_digest_changes() -> N
         fetch,
         probe=lambda: RuntimeCapabilitySnapshot(
             contract_version="1.0.0", package_digest="sha256:new-memoir",
-            agent_versions=frozenset({("memoir_agent", "1.0.0")}),
+            agent_versions=frozenset({("memoir_agent", "1.0.1")}),
             model_policies=frozenset({"emotional_writing", "strict"}),
             workflow_agent=True, expires_at=now,
         ),
