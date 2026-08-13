@@ -1,8 +1,14 @@
 # AgentRuntime 总控 Implementation Plan
 
+> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 专用 Docker MySQL
+> `127.0.0.1:33306` 已真实运行 same/conflicting fingerprint、目标 `data_lock_waits` 与权限
+> 负向验证（`3 passed, 47 deselected`）；离线 guard 为 `14 passed, 3 skipped, 47 deselected`。
+> Runtime 收集 755 项、全量 `733 passed, 22 skipped`，Ruff/Mypy/Alembic/diff-check 通过。
+> v1.0/v1.1 fixture、ToolError 协商与身份头方向保持复验；此裁定只允许开始 B11、F5–F7。
+
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
-> **2026-08-13 验收更新：M3 代码 / 测试 / 双轴复审证据闭合；M4 维持 NO-GO，待 MySQL 运行时并发观测确认后裁定 COMPLETE/GO。** 原 2026-08-12 四类阻断已按本日代码实证全部更新：① ToolError 矩阵——业务 provider 落地 v1.0 四字段 / v1.1 五字段双矩阵，并在 `_AgentToolRoute` 全 router 失败隔离中输出协商版本 ToolError JSON（403→`AUTHORIZATION_REVOKED`，不回显 detail），Runtime v1.1 固定要求完整五字段（闭合）。② 未知 `X-Agent-Tool-Contract-Version`——`_AgentToolRoute` 入口对未知版本 fail-closed 拒绝、不进 service、不留发布副作用（测试 `test_unknown_tool_contract_version_fails_before_publish_service` 覆盖），原"静默回退 `1.0.0`"论断已证伪（闭合）。③ 发布并发——`publish_playback_document` 已按 `FOR UPDATE` Archive 行锁 → 锁内幂等查询 → 校验 → CAS 切 `published_revision` → 幂等结果 → 提交 的事务顺序实现；并发 harness 重写为单向 Event 状态机 + 独立只读 Session 观测 `performance_schema.data_lock_waits`（消除双向 Barrier 死锁）；代码层闭合，运行时 `data_lock_waits` 观测 deferred 到显式 MySQL DSN 环境（本环境无 DSN → opt-in skip，符合冻结 harness 策略，不连真实业务库）。④ 混合身份头——B9（4 头）/ B10（8 头）/ Runtime（4 头）`_require_single_headers` / `assert_single_service_headers` 守卫 + 反向身份头拒绝（callback 拒 `X-Agent-Client-Id`、Runtime 拒 `X-Agent-Runtime-Id`），全链 fail-closed，403/401 语义对齐，`runtime_id` 不入日志（闭合）。fixture SHA 不变：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。MySQL 运行时并发观测在 DSN 环境确认前 M4 维持 NO-GO；确认后即可裁定 M3 COMPLETE / M4 GO。
+> **2026-08-13 历史代码闭合记录：** MySQL 运行时观测曾待显式隔离 DSN；现已在业务端 harness 实测 `2 passed, 47 deselected`，该待验证项关闭，以页首 **M3 COMPLETE / M4 GO** 为准。fixture SHA：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。
 
 > **本复核对历史记录的优先级说明：** 下文保留的“M3 COMPLETE/M4 GO”“v1.0 字节级不变且同时承载九码五字段扩展”及“所有 v1 都要求显式 `details_visible_to_model`”均是历史记录，现已被本段取代，不得作为完成证据。v1.0 固定四字段 wire，`details_visible_to_model` 可省略且默认 `false`；只有经 `X-Agent-Tool-Contract-Version` 协商的 v1.1 固定五字段并要求该值为 `false`。内部 `memory.*` Tool 错误直接使用协商 ToolError JSON，不能回退为普通业务 `ret/data` 或 FastAPI `detail`；普通业务 API 响应合同不受影响。可信 context 的 `business_id` 现须匹配真实 Archive 业务 ID，旧的“只验证非空”记录已经失效。
 

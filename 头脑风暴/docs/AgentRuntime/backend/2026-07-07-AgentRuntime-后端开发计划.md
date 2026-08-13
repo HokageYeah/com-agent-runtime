@@ -1,8 +1,14 @@
 # AgentRuntime 后端 Implementation Plan
 
+> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 专用 Docker MySQL
+> `127.0.0.1:33306` 已真实通过 same/conflicting fingerprint、目标锁等待与权限负向验证
+> （`3 passed, 47 deselected`）；离线 guard `14 passed, 3 skipped, 47 deselected`。Runtime
+> 全量 `733 passed, 22 skipped`、Ruff/Mypy/Alembic/diff-check 均通过。M4 仅可开始
+> B11、F5–F7，仍无 Runtime 生产代码所有权。
+
 > **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
 
-> **2026-08-13 验收更新：M3 代码 / 测试 / 双轴复审证据闭合；M4 维持 NO-GO，待 MySQL 运行时并发观测确认后裁定 COMPLETE/GO。** 原 2026-08-12 四类阻断已按本日代码实证全部更新：① ToolError 矩阵——业务 provider 落地 v1.0 四字段 / v1.1 五字段双矩阵，并在 `_AgentToolRoute` 全 router 失败隔离中输出协商版本 ToolError JSON（403→`AUTHORIZATION_REVOKED`，不回显 detail），Runtime v1.1 固定要求完整五字段（闭合）。② 未知 `X-Agent-Tool-Contract-Version`——`_AgentToolRoute` 入口对未知版本 fail-closed 拒绝、不进 service、不留发布副作用（测试 `test_unknown_tool_contract_version_fails_before_publish_service` 覆盖），原”静默回退 `1.0.0`”论断已证伪（闭合）。③ 发布并发——`publish_playback_document` 已按 `FOR UPDATE` Archive 行锁 → 锁内幂等查询 → 校验 → CAS 切 `published_revision` → 幂等结果 → 提交 的事务顺序实现；并发 harness 重写为单向 Event 状态机 + 独立只读 Session 观测 `performance_schema.data_lock_waits`（消除双向 Barrier 死锁）；代码层闭合，运行时 `data_lock_waits` 观测 deferred 到显式 MySQL DSN 环境（本环境无 DSN → opt-in skip，符合冻结 harness 策略，不连真实业务库）。④ 混合身份头——B9（4 头）/ B10（8 头）/ Runtime（4 头）`_require_single_headers` / `assert_single_service_headers` 守卫 + 反向身份头拒绝（callback 拒 `X-Agent-Client-Id`、Runtime 拒 `X-Agent-Runtime-Id`），全链 fail-closed，403/401 语义对齐，`runtime_id` 不入日志（闭合）。fixture SHA 不变：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。MySQL 运行时并发观测在 DSN 环境确认前 M4 维持 NO-GO；确认后即可裁定 M3 COMPLETE / M4 GO。
+> **2026-08-13 历史代码闭合记录：** MySQL 运行时观测曾待显式隔离 DSN；现已在业务端 harness 实测 `2 passed, 47 deselected`，该待验证项关闭，以页首 **M3 COMPLETE / M4 GO** 为准。fixture SHA：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。
 
 > **本复核对历史记录的优先级说明：** 下文所有“M3 COMPLETE/M4 GO”“v1.0 已包含九码五字段强化”或“v1.0/所有版本均要求显式 `details_visible_to_model`”的陈述均保留为历史审计，现已被本段取代。v1.0 保持四字段 HEAD wire，省略的 `details_visible_to_model` 默认 `false`；显式五字段/九码只属于经 `X-Agent-Tool-Contract-Version` 协商的 v1.1。内部 `memory.*` Tool 的非 2xx 直接返回协商 ToolError JSON，不得借用普通业务 `ret/data` 或 FastAPI `detail`；普通业务 API 合同不变。context `business_id` 必须与实际 Archive 业务 ID 相同，旧“仅校验存在”的历史决定失效。
 
