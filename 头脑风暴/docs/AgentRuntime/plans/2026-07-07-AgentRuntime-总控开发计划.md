@@ -1,10 +1,10 @@
 # AgentRuntime 总控 Implementation Plan
 
-> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务端新版 schema + ownership token 的受限 DEFINER procedure 已在专用 Docker MySQL `127.0.0.1:33306` 通过严格 access-denied 权限负测、same fingerprint 重放与 conflicting fingerprint 冲突：`3 passed, 47 deselected`。业务离线 guard 为 `20 passed, 3 skipped, 55 deselected`、注入 Runtime fixture 的业务全量为 `1429 passed, 11 skipped`；Runtime fixture、ToolError 协商与身份头方向保持复验。M4 仅可开始 B11、F5–F7，未标记完成。
+> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 已把 CREATE USER 密码从 mysql argv 移至 stdin；离线 bootstrap/guard `28 passed` 证明密码不进入 fake mysql argv、调用日志或 stdout/stderr，且失败补偿未回退。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，隔离 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint、conflicting fingerprint 三项，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
-> **2026-08-13 历史代码闭合记录：** MySQL 运行时观测曾待显式隔离 DSN；现已在业务端 harness 实测 `2 passed, 47 deselected`，该待验证项关闭，以页首 **M3 COMPLETE / M4 GO** 为准。fixture SHA：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。
+> **2026-08-13 历史代码闭合记录：** MySQL 运行时观测曾待显式隔离 DSN，且旧的 `2 passed, 47 deselected` 是凭据边界改动前的历史证据。修改后已重跑完整三项 `3 passed, 47 deselected`；以页首 **M3 COMPLETE / M4 GO** 为准。fixture SHA：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。
 
 > **本复核对历史记录的优先级说明：** 下文保留的“M3 COMPLETE/M4 GO”“v1.0 字节级不变且同时承载九码五字段扩展”及“所有 v1 都要求显式 `details_visible_to_model`”均是历史记录，现已被本段取代，不得作为完成证据。v1.0 固定四字段 wire，`details_visible_to_model` 可省略且默认 `false`；只有经 `X-Agent-Tool-Contract-Version` 协商的 v1.1 固定五字段并要求该值为 `false`。内部 `memory.*` Tool 错误直接使用协商 ToolError JSON，不能回退为普通业务 `ret/data` 或 FastAPI `detail`；普通业务 API 响应合同不受影响。可信 context 的 `business_id` 现须匹配真实 Archive 业务 ID，旧的“只验证非空”记录已经失效。
 
