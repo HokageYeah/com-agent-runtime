@@ -1,10 +1,6 @@
 # AgentRuntime 后端 Implementation Plan
 
-> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 专用 Docker MySQL
-> `127.0.0.1:33306` 已真实通过 same/conflicting fingerprint、目标锁等待与权限负向验证
-> （`3 passed, 47 deselected`）；离线 guard `14 passed, 3 skipped, 47 deselected`。Runtime
-> 全量 `733 passed, 22 skipped`、Ruff/Mypy/Alembic/diff-check 均通过。M4 仅可开始
-> B11、F5–F7，仍无 Runtime 生产代码所有权。
+> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务端新版 schema + ownership token 的受限 DEFINER procedure 已在专用 Docker MySQL `127.0.0.1:33306` 通过严格 access-denied 权限负测、same fingerprint 重放与 conflicting fingerprint 冲突：`3 passed, 47 deselected`。业务离线 guard 为 `20 passed, 3 skipped, 55 deselected`、注入 Runtime fixture 的业务全量为 `1429 passed, 11 skipped`。Runtime 全量、Ruff、Mypy、Alembic 与 diff-check 的既有门禁证据保持有效；M4 仅可开始 B11、F5–F7，未标记完成。
 
 > **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
 

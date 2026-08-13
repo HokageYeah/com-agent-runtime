@@ -1,10 +1,6 @@
 # AgentRuntime 总控 Implementation Plan
 
-> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 专用 Docker MySQL
-> `127.0.0.1:33306` 已真实运行 same/conflicting fingerprint、目标 `data_lock_waits` 与权限
-> 负向验证（`3 passed, 47 deselected`）；离线 guard 为 `14 passed, 3 skipped, 47 deselected`。
-> Runtime 收集 755 项、全量 `733 passed, 22 skipped`，Ruff/Mypy/Alembic/diff-check 通过。
-> v1.0/v1.1 fixture、ToolError 协商与身份头方向保持复验；此裁定只允许开始 B11、F5–F7。
+> **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务端新版 schema + ownership token 的受限 DEFINER procedure 已在专用 Docker MySQL `127.0.0.1:33306` 通过严格 access-denied 权限负测、same fingerprint 重放与 conflicting fingerprint 冲突：`3 passed, 47 deselected`。业务离线 guard 为 `20 passed, 3 skipped, 55 deselected`、注入 Runtime fixture 的业务全量为 `1429 passed, 11 skipped`；Runtime fixture、ToolError 协商与身份头方向保持复验。M4 仅可开始 B11、F5–F7，未标记完成。
 
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
