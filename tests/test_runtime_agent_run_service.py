@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -79,6 +80,50 @@ def test_create_freezes_authoritative_authorization_version() -> None:
 
     run = session.scalar(select(AgentRun).where(AgentRun.run_id == created.run_id))
     assert run is not None and run.authorization_version == 9
+
+
+def test_create_log_does_not_expose_caller_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """创建日志只保留 Run 摘要，调用方身份仍仅用于持久化与授权。"""
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    caller_id = "identity-header-value-must-not-log"
+    session.add(
+        AgentDefinition(
+            agent_id="agent",
+            version="1",
+            runtime_type="workflow",
+            definition_json={},
+            package_digest="sha256:test",
+            contract_version="1.0.0",
+            status="active",
+            status_changed_at=datetime.now(UTC),
+            status_changed_by="test",
+            status_change_reason="fixture",
+        )
+    )
+    session.commit()
+
+    with caplog.at_level(logging.INFO):
+        AgentRunService(session).create(
+            CreateRunCommand(
+                agent_id="agent",
+                agent_version="1",
+                business_type="memoir",
+                business_id="business",
+                input={},
+                callback_target_id="callback",
+                business_connector_id="connector",
+            ),
+            caller_id,
+            "tenant",
+            "identity-log-test",
+        )
+
+    assert all(caller_id not in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.parametrize("policy", [

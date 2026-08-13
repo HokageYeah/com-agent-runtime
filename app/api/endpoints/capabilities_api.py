@@ -6,7 +6,11 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, status
 
 from app.contracts.api import CONTRACT_VERSION
-from app.core.security import SignatureError, verify_signature
+from app.core.security import (
+    SignatureError,
+    assert_single_service_headers,
+    verify_signature,
+)
 from app.runtime.model_gateway import (
     ModelCapabilityEvaluator,
     ModelPolicyRegistry,
@@ -47,7 +51,9 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
     """只向已验签业务服务提供 Runtime 的安全能力摘要。"""
     body = await request.body()
     try:
-        client_id = verify_signature(
+        # 重复服务认证头必须在压平前拒绝：dict 推导会抹掉同名头基数，导致 fail-open。
+        assert_single_service_headers(request.headers)
+        verify_signature(
             {key.lower(): value for key, value in request.headers.items()},
             request.method, request.url.path, body,
             request.app.state.settings.trusted_clients,
@@ -59,7 +65,7 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid service signature",
         ) from exc
-    # 不记录请求头中可能出现的签名、Key ID 或其它凭据，只保留客户端标识。
+    # 不记录请求头中的身份、签名、Key ID 或其它凭据。
     try:
         # capabilities 必须暴露实际不可变 package digest，供业务侧立刻发现版本漂移。
         # 暴露当前活跃 Agent 版本 1.0.1：1.0.0 已恢复为冻结原貌、不再用于新建 Run，
@@ -70,7 +76,7 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
     except AgentPackageValidationError as exc:
         logging.error("Runtime capabilities 无法加载 MemoirAgent 摘要")
         raise HTTPException(status_code=503, detail="agent package unavailable") from exc
-    logging.info("Runtime capability 查询通过 client_id=%s", client_id)
+    logging.info("Runtime capability 查询通过")
     model_enhancement_available, model_policies = _model_capability_summary(
         request.app.state.settings
     )

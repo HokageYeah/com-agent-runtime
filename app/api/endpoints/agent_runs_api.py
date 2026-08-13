@@ -16,7 +16,12 @@ from app.contracts.api import (
 )
 from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.connectors import ConnectorRegistry, ConnectorValidationError
-from app.core.security import SignatureError, request_hash, verify_signature
+from app.core.security import (
+    SignatureError,
+    assert_single_service_headers,
+    request_hash,
+    verify_signature,
+)
 from app.schemas.agent_run import (
     ApprovalCommand,
     CreateRunCommand,
@@ -42,8 +47,11 @@ def _admission_limits(request: Request) -> AdmissionLimits:
 async def _caller(request: Request, write: bool) -> tuple[str, str, bytes]:
     """所有调用统一验签；body 取原始 bytes，防止重序列化导致签名漂移。"""
     body = await request.body()
-    headers = {key.lower(): value for key, value in request.headers.items()}
     try:
+        # 重复服务认证头检测与验签必须在同一 try 内：重复头也要被映射为 401，
+        # 而不是穿透成 500。检测在压平前完成，dict 推导会抹掉同名头基数。
+        assert_single_service_headers(request.headers)
+        headers = {key.lower(): value for key, value in request.headers.items()}
         client_id = verify_signature(
             headers,
             request.method,
@@ -161,11 +169,11 @@ async def create_run(request: Request, command: CreateRunCommand) -> RunSummary:
         session.commit()
         return result
     except AgentRunServiceError as exc:
-        logging.warning("AgentRun create 被拒绝 caller=%s reason=%s", caller, exc)
+        logging.warning("AgentRun create 被拒绝 reason=%s", exc)
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (AuthorizationError, ConnectorValidationError) as exc:
         session.rollback()
-        logging.warning("AgentRun create 授权拒绝 caller=%s reason=%s", caller, exc)
+        logging.warning("AgentRun create 授权拒绝 reason=%s", exc)
         raise HTTPException(status_code=403, detail="run authorization denied") from exc
     except AdmissionRejected as exc:
         session.rollback()

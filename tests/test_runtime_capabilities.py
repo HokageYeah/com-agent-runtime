@@ -4,6 +4,8 @@ import hashlib
 import hmac
 from datetime import UTC, datetime
 
+import pytest
+
 from app.api.endpoints.health_api import RuntimeHealth
 from app.core.config import settings
 
@@ -44,6 +46,32 @@ def test_runtime_capabilities_rejects_invalid_service_signatures_without_secret_
         assert response.status_code == 401
         serialized = str(response.json())
         assert all(secret not in serialized for secret in _FIXTURE_SECRETS)
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    (
+        "X-Agent-Client-Id",
+        "X-Agent-Key-Id",
+        "X-Agent-Timestamp",
+        "X-Agent-Signature",
+    ),
+)
+def test_runtime_capabilities_rejects_duplicate_service_auth_header(
+    client, header_name: str
+) -> None:
+    """认证前拒绝重复大小写变体，不能让 HTTP 层任意选择其中一个值。"""
+
+    timestamp = str(int(datetime.now(UTC).timestamp()))
+    signed_headers = _runtime_capability_headers(timestamp)
+    headers = [
+        *signed_headers.items(),
+        (header_name.lower(), signed_headers[header_name]),
+    ]
+
+    response = client.get(_CAPABILITIES_PATH, headers=headers)
+
+    assert response.status_code == 401
 
 
 def test_runtime_capabilities_requires_valid_service_signature(client) -> None:

@@ -164,10 +164,9 @@ class AgentRunService:
         if command.start_mode == "auto":
             self._outbox.append_run_dispatch(run_id, "auto_create")
         logging.info(
-            "创建 AgentRun run_id=%s start_mode=%s caller=%s",
+            "创建 AgentRun run_id=%s start_mode=%s",
             run_id,
             command.start_mode,
-            caller_id,
         )
         return self._summary(run)
 
@@ -203,7 +202,7 @@ class AgentRunService:
         run.queued_at = datetime.now(UTC)
         self._admission.transition_run(run, "held", "queued")
         self._outbox.append_run_dispatch(run_id, "explicit_start")
-        logging.info("启动 held AgentRun run_id=%s caller=%s", run_id, caller_id)
+        logging.info("启动 held AgentRun run_id=%s", run_id)
         return self._summary(run)
 
     def get(

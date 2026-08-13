@@ -6,6 +6,7 @@ import hashlib
 import hmac
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -15,6 +16,7 @@ from app.db.sqlalchemy_db import Base
 from app.main import app
 from app.services.memory_agent_binding_service import MemoryAgentBindingService
 from app.services.memory_archive_service import FrozenMemoryInput, MemoryArchiveService
+from app.services.memory_generation_status_service import MemoryGenerationStatusService
 
 
 def _headers(path: str) -> dict[str, str]:
@@ -26,6 +28,42 @@ def _headers(path: str) -> dict[str, str]:
         "X-Agent-Client-Id": "couple-diary", "X-Agent-Key-Id": "dev",
         "X-Agent-Timestamp": timestamp, "X-Agent-Signature": signature,
     }
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    (
+        "X-Agent-Client-Id",
+        "X-Agent-Key-Id",
+        "X-Agent-Timestamp",
+        "X-Agent-Signature",
+    ),
+)
+def test_generation_status_rejects_duplicate_service_auth_header(
+    client, monkeypatch, header_name: str
+) -> None:
+    """状态查询也必须在认证前拒绝重复大小写变体。
+
+    stub 掉下游查询，使 RED 只反映认证边界 fail-open：默认 client 的 session 是
+    Mock，重复头穿透认证后会因 Mock 序列化异常返回 500，失败信号会被下游噪声污染。
+    stub 后修复前稳定返回 200、修复后稳定返回 401。
+    """
+    monkeypatch.setattr(
+        MemoryGenerationStatusService,
+        "get",
+        lambda self, archive_id: {"archive_id": archive_id, "content_status": "running"},
+    )
+
+    path = "/api/v1/memory-archives/not-a-real-archive/generation-status"
+    signed_headers = _headers(path)
+    headers = [
+        *signed_headers.items(),
+        (header_name.lower(), signed_headers[header_name]),
+    ]
+
+    response = client.get(path, headers=headers)
+
+    assert response.status_code == 401
 
 
 def test_generation_status_returns_safe_active_run_summary(client) -> None:

@@ -42,8 +42,7 @@ class AuthorizationService:
         self._require_allowed(client, "connector_ids", connector_id, "connector")
         self._require_allowed(client, "data_domains", data_domain, "data domain")
         logging.info(
-            "Runtime 授权通过 client_id=%s agent_id=%s business_type=%s",
-            client_id,
+            "Runtime 授权通过 agent_id=%s business_type=%s",
             agent_id,
             business_type,
         )

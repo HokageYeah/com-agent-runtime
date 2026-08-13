@@ -43,7 +43,7 @@ class IdempotencyService:
             return None
         if record.request_hash != digest:
             raise IdempotencyConflict("IDEMPOTENCY_CONFLICT")
-        logging.info("幂等重放 client_id=%s scope=%s", client_id, scope)
+        logging.info("幂等重放 scope=%s", scope)
         return record.response_json
 
     def store(
@@ -126,5 +126,5 @@ class IdempotencyService:
             expires_at = expires_at.replace(tzinfo=UTC)
         if expires_at < datetime.now(UTC):
             return None
-        logging.info("副作用结果对账命中 client_id=%s scope=%s", client_id, scope)
+        logging.info("副作用结果对账命中 scope=%s", scope)
         return record.response_json
