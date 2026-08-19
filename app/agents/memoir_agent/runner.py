@@ -298,13 +298,30 @@ class MemoirNodeRunner:
             snapshot = state.snapshot if isinstance(state.snapshot, dict) else {}
             # compute_stats 同样要求 envelope 不混用；与 sanitize_materials 共用 fail closed。
             detect_envelope_mixing(snapshot)
-            diaries = snapshot.get("diary_items", snapshot.get("diaries", []))
-            bets = snapshot.get(
-                "completed_bet_items",
-                snapshot.get("completed_bets", snapshot.get("bet_items", snapshot.get("bets", []))),
-            )
-            diary_count = len(diaries) if isinstance(diaries, list) else 0
-            bet_count = len(bets) if isinstance(bets, list) else 0
+            # 方案 A 契约：业务端 get_snapshot 透传 canonical materials 列表时，
+            # 它是唯一事实源（按 material_type 计数），不再读 legacy envelope 键，
+            # 避免同一份素材双计数；旧形状（diary_items/diaries/...）保持兼容。
+            raw_materials = snapshot.get("materials")
+            if isinstance(raw_materials, list):
+                diary_count = sum(
+                    1
+                    for item in raw_materials
+                    if isinstance(item, Mapping) and item.get("material_type") == "diary"
+                )
+                bet_count = sum(
+                    1
+                    for item in raw_materials
+                    if isinstance(item, Mapping)
+                    and item.get("material_type") == "completed_bet"
+                )
+            else:
+                diaries = snapshot.get("diary_items", snapshot.get("diaries", []))
+                bets = snapshot.get(
+                    "completed_bet_items",
+                    snapshot.get("completed_bets", snapshot.get("bet_items", snapshot.get("bets", []))),
+                )
+                diary_count = len(diaries) if isinstance(diaries, list) else 0
+                bet_count = len(bets) if isinstance(bets, list) else 0
             state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
             logging.info("MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s", run.run_id, diary_count, bet_count)
             return {"node_id": "compute_stats", "stats_ready": True}
@@ -545,6 +562,12 @@ class MemoirNodeRunner:
             return [], 0, 0
         # envelope 混用先于任何素材读取；fail closed 比产生漂移 allowlist 更安全。
         detect_envelope_mixing(snapshot)
+        # 方案 A 契约：业务端 canonical materials 列表（get_snapshot 解密透传）
+        # 存在时它是唯一素材来源，legacy envelope 键不再读取（避免双计数）；
+        # 业务端已在物化时做白名单脱敏，本方法仍按 Runtime 最小视图二次收敛。
+        raw_materials = snapshot.get("materials")
+        if isinstance(raw_materials, list):
+            return MemoirNodeRunner._sanitize_canonical_materials(raw_materials)
         materials: list[dict[str, object]] = []
         sensitive_count = invalid_count = 0
         # diary 与 completed_bet 走完整脱敏：保留稳定引用 + 80 字摘要。
@@ -607,6 +630,61 @@ class MemoirNodeRunner:
                     }
                 )
                 sensitive_count += 1
+        return materials, sensitive_count, invalid_count
+
+    @staticmethod
+    def _sanitize_canonical_materials(
+        raw_materials: list[object],
+    ) -> tuple[list[dict[str, object]], int, int]:
+        """消费业务端 canonical 脱敏素材列表（get_snapshot 方案 A 契约）。
+
+        业务端物化时已做白名单脱敏（sanitized_payload 只含可定位元数据，
+        不含日记/赌局正文）；本方法按 Runtime 最小视图二次收敛：
+
+        - ``diary`` / ``completed_bet``：payload 为 Mapping 时输出 80 字元数据
+          摘要（sensitive=False，source_ref 可进入模型 allowlist）；
+        - 其余三类与异常项：只保留稳定 source_ref（sensitive=True），
+          与 legacy 路径"三类 ref-only"语义一致。
+        """
+
+        materials: list[dict[str, object]] = []
+        sensitive_count = invalid_count = 0
+        # 只有这两类产出摘要：与 legacy sanitize_slots 的完整脱敏组对齐。
+        summary_types = ("diary", "completed_bet")
+        for item in raw_materials:
+            if not isinstance(item, Mapping):
+                invalid_count += 1
+                continue
+            source_ref = item.get("source_ref")
+            material_type = item.get("material_type")
+            if (
+                not isinstance(source_ref, str)
+                or not source_ref
+                or not isinstance(material_type, str)
+                or not material_type
+            ):
+                invalid_count += 1
+                continue
+            payload = item.get("sanitized_payload")
+            if material_type in summary_types and isinstance(payload, Mapping):
+                # 元数据摘要：白名单元数据紧凑 JSON 后复用统一截断/脱敏，
+                # 与 legacy content 摘要走同一条 _sanitize_material_summary 管线。
+                summary = MemoirNodeRunner._sanitize_material_summary(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                )
+                materials.append(
+                    {
+                        "source_ref": source_ref,
+                        "type": material_type,
+                        "sensitive": False,
+                        "summary": summary,
+                    }
+                )
+                continue
+            materials.append(
+                {"source_ref": source_ref, "type": material_type, "sensitive": True}
+            )
+            sensitive_count += 1
         return materials, sensitive_count, invalid_count
 
     @staticmethod

@@ -352,3 +352,110 @@ def test_sanitize_materials_recognizes_all_five_canonical_material_types() -> No
     assert "handbook-private" not in serialized
     assert "wish-private" not in serialized
     assert "checklist-private" not in serialized
+
+
+def test_compute_stats_prefers_canonical_materials_without_double_counting() -> None:
+    """方案 A 契约：顶层 materials 列表是唯一计数源，legacy envelope 键被遮蔽。
+
+    业务端 get_snapshot 透传 canonical materials 后，diary/bet 计数只看
+    material_type，同一份素材不会因 legacy 键同时存在而双计数。
+    """
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            # legacy 键若被读取会得到 5+5；canonical 真值是 2+1。
+            "diaries": [{"content": "legacy"}] * 5,
+            "bets": [{"title": "legacy"}] * 5,
+            "materials": [
+                {"material_type": "diary", "source_ref": "diary:d1", "sanitized_payload": {"id": "d1"}},
+                {"material_type": "diary", "source_ref": "diary:d2", "sanitized_payload": {"id": "d2"}},
+                {"material_type": "completed_bet", "source_ref": "completed_bet:b1", "sanitized_payload": {"id": "b1"}},
+            ],
+        }
+    )
+
+    runner.run_node({"node_id": "compute_stats"}, run, state)
+
+    assert state.stats == {"diary_count": 2, "bet_count": 1, "has_material": True}
+
+
+def test_sanitize_materials_consumes_canonical_materials_contract() -> None:
+    """方案 A 契约：canonical materials 逐类收敛为最小视图。
+
+    - diary/completed_bet + Mapping payload：sensitive=False + 80 字元数据摘要
+      （source_ref 可进入模型 allowlist），摘要内敏感标识符仍被 redact；
+    - 其余三类：ref-only sensitive=True，payload 不进入视图；
+    - 非法项（非 Mapping / 缺 source_ref）被丢弃且不影响其余素材。
+    """
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "materials": [
+                {
+                    "material_type": "diary",
+                    "source_ref": "diary:d1",
+                    "sanitized_payload": {"id": "d1", "entry_date": "2026-08-01", "tags": ["电话13800138000"]},
+                },
+                {
+                    "material_type": "completed_bet",
+                    "source_ref": "completed_bet:b1",
+                    "sanitized_payload": {"id": "b1", "winner_user_id": 1},
+                },
+                {
+                    "material_type": "handbook_note",
+                    "source_ref": "handbook_note:h1",
+                    "sanitized_payload": {"id": "h1"},
+                },
+                "not-a-mapping",
+                {"material_type": "matured_wish"},
+            ]
+        }
+    )
+
+    assert runner.run_node({"node_id": "sanitize_materials"}, run, state) == {
+        "node_id": "sanitize_materials",
+        "sanitized": True,
+    }
+    materials = state.sanitized_material["materials"]
+    assert materials[0] == {
+        "source_ref": "diary:d1",
+        "type": "diary",
+        "sensitive": False,
+        "summary": '{"id":"d1","entry_date":"2026-08-01","tags":["电话[REDACTED]"]}',
+    }
+    assert materials[1] == {
+        "source_ref": "completed_bet:b1",
+        "type": "completed_bet",
+        "sensitive": False,
+        "summary": '{"id":"b1","winner_user_id":1}',
+    }
+    assert materials[2] == {"source_ref": "handbook_note:h1", "type": "handbook_note", "sensitive": True}
+    # 非法项被丢弃：只剩 3 条合法素材。
+    assert len(materials) == 3
+    # 三类敏感素材的 payload 不进入 sanitized 视图。
+    assert '"id":"h1"' not in str(state.sanitized_material)
+
+
+def test_canonical_material_refs_flow_into_model_allowlist() -> None:
+    """canonical sensitive=False 的 source_ref 必须能进入模型 allowlist（反空壳关键链路）。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r", "agent_version": "1.0.0"})()
+    state = AgentState(
+        snapshot={
+            "materials": [
+                {"material_type": "diary", "source_ref": "diary:d1", "sanitized_payload": {"id": "d1"}},
+                {"material_type": "completed_bet", "source_ref": "completed_bet:b1", "sanitized_payload": {"id": "b1"}},
+                {"material_type": "matured_wish", "source_ref": "matured_wish:w1", "sanitized_payload": {"id": "w1"}},
+            ]
+        }
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+    runner.run_node({"node_id": "extract_highlights"}, run, state)
+
+    assert state.highlights == {
+        "source_refs": ["diary:d1", "completed_bet:b1"],
+        "mode": "template",
+    }
