@@ -664,3 +664,33 @@ def test_reject_fallback_marks_only_the_fallback_resume_path() -> None:
 
     assert (result.status, result.dispatch_state) == ("waiting_human", "queued")
     assert run.error_code == "WAITING_HUMAN_FALLBACK"
+
+
+def test_create_returns_status_version_without_flush() -> None:
+    """create 在 flush 前返回的 status_version 必须是 1（生产 autoflush=False 回归锚点）。
+
+    2026-08-18 线上故障：生产 session 工厂 autoflush=False，create 内 _summary 在
+    flush 前读取 ORM 对象，column default 未生效读到 None，AgentRunResponse 校验
+    500。测试默认 sessionmaker autoflush=True 会掩盖该路径，这里显式关掉复现。
+    """
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autoflush=False)()
+    session.add(AgentDefinition(
+        agent_id="governed-agent", version="1", runtime_type="workflow",
+        definition_json={"policy": {}, "workflow_nodes": []},
+        package_digest="sha256:test", contract_version="1.0.0", status="active",
+        status_changed_at=datetime.now(UTC), status_changed_by="test",
+        status_change_reason="fixture",
+    ))
+    session.commit()
+
+    created = AgentRunService(session).create(
+        CreateRunCommand(
+            agent_id="governed-agent", agent_version="1", business_type="memoir",
+            business_id="business", start_mode="held", input={},
+            callback_target_id="callback", business_connector_id="connector",
+        ), "caller", "tenant", "idem-status-version-flush",
+    )
+
+    assert created.status_version == 1

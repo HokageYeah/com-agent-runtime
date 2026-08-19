@@ -112,13 +112,20 @@ class ToolGateway:
         peer_ip_provider: Callable[[], str | None] | None = None,
         reset_peer_ip: Callable[[], None] | None = None,
         test_transport: LoopbackTestTransport | None = None,
+        allow_private_endpoints: bool = False,
     ) -> None:
         # 仅测试 harness 显式注入的对象可绕过公网 DNS/peer 校验；生产默认 None。
         self._test_transport = test_transport
+        # 开发联调逃生门：本机双进程部署时 connector 指向 127.0.0.1。仅当运维
+        # 通过 RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS 显式开启（config
+        # 侧仅 development/test 允许置真）才跳过公网 DNS/对端复核；其余 SSRF
+        # 防线（scheme 白名单/端口/无路径凭据）保持不变，生产默认 False。
+        self._allow_private_endpoints = allow_private_endpoints
         self._connectors = connectors
         self._connector_origins = {
             connector_id: self._fixed_origin(
-                connector.base_url, allow_loopback=test_transport is not None
+                connector.base_url,
+                allow_loopback=allow_private_endpoints or test_transport is not None,
             )
             for connector_id, connector in connectors.items()
         }
@@ -470,6 +477,10 @@ class ToolGateway:
                 if not self._test_transport.allows(connector.base_url):
                     raise ValueError("TEST_HARNESS_LOOPBACK_REQUIRED")
                 allowed_peer_ips = frozenset()
+            elif self._allow_private_endpoints:
+                # 开发联调显式放行私网 connector：跳过公网 DNS 解析与对端复核，
+                # 仅信任运维装配的 base_url（业务请求/Package 无法提供 endpoint）。
+                allowed_peer_ips = frozenset()
             else:
                 allowed_peer_ips = self._ensure_public_endpoint(connector.base_url)
             if self._test_transport is None and not self._is_mock_transport and self._peer_ip_provider is None:
@@ -484,7 +495,8 @@ class ToolGateway:
                     timeout=self._effective_timeout(10.0),
                     follow_redirects=False,
                 )
-                if self._test_transport is None:
+                # 开发联调放行时同样跳过 TCP 对端复核（对端就是本机 loopback）。
+                if self._test_transport is None and not self._allow_private_endpoints:
                     self._verify_connected_peer(allowed_peer_ips)
                 break
             except httpx.TransportError:

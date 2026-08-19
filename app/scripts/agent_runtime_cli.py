@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import ipaddress
 import json
 import os
 import re
@@ -52,7 +53,7 @@ _LOCAL_CONFIG_SECTIONS = {
     "DB_DRIVER": "# 数据库连接：应用账号应只授予当前业务库的最小权限。",
     "RUNTIME_ID": "# Runtime 基础治理：本机默认关闭外部导出器。",
     "RUNTIME_TRUSTED_CLIENTS_JSON": "# Runtime 入站身份：与 MEMORY_RUNTIME_SECRET 使用同一 client secret。",
-    "RUNTIME_BUSINESS_CONNECTORS_JSON": "# Runtime 出站工具与 callback：三个注册表必须使用同一 tool secret。",
+    "RUNTIME_BUSINESS_CONNECTORS_JSON": "# Runtime 出站工具与 callback：身份与密钥必须与业务侧 MEMORY_RUNTIME_* 对称。",
     "MEMORY_RUNTIME_BASE_URL": "# 回忆录业务调用 Runtime 的服务身份：必须与入站注册表一致。",
     "MEMORY_SNAPSHOT_FERNET_KEY": "# 持久化加密与用户登录：轮换前必须先规划旧数据解密和 token 过渡。",
     "MODEL_ROUTES_JSON": "# 模型路由为空时关闭真实模型增强，使用确定性模板降级。",
@@ -76,9 +77,10 @@ _LOCAL_CONFIG_COMMENTS = {
     "RUNTIME_EXTERNAL_EXPORTER_ENABLED": "[可选/安全默认] 外部观测导出：默认 false，未完成隐私治理前不得开启。",
     "RUNTIME_REDIS_URL": "[必填/手动输入] Redis 地址：宿主机填 redis://127.0.0.1:发布端口/DB，Docker 内填 redis://service:6379/DB。",
     "RUNTIME_TRUSTED_CLIENTS_JSON": "[必填/自动生成] Runtime 入站调用方注册表：含租户、allowlist、授权版本和 client secret。",
-    "RUNTIME_BUSINESS_CONNECTORS_JSON": "[必填/自动生成] 业务 connector 注册表：base_url 由 Service base URL 生成，不得在业务请求中覆盖。",
-    "RUNTIME_CALLBACK_TARGETS_JSON": "[必填/自动生成] callback 目标注册表：URL 由 Service base URL 生成，不得携带凭据。",
-    "MEMORY_TOOL_TRUSTED_RUNTIMES_JSON": "[必填/自动生成] 业务端信任的 Runtime 注册表：必须与 connector/callback 的 tool secret 一致。",
+    "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS": "[必填/自动确定] 私网 connector 放行开关：business 指向本机/私网时自动 true，公网部署必须 false。",
+    "RUNTIME_BUSINESS_CONNECTORS_JSON": "[必填/自动生成] 业务 connector 注册表：base_url 由 Business service base URL 生成，runtime_id/secret 与业务侧 MEMORY_RUNTIME_* 对称，不得在业务请求中覆盖。",
+    "RUNTIME_CALLBACK_TARGETS_JSON": "[必填/自动生成] callback 目标注册表：URL 指向业务后端 B10 路由 /api/v1/internal/memory-callbacks，不得携带凭据。",
+    "MEMORY_TOOL_TRUSTED_RUNTIMES_JSON": "[必填/自动生成] 业务端信任的 Runtime 注册表：密钥与 client secret 保持一致。",
     "MEMORY_RUNTIME_BASE_URL": "[必填/手动输入] Runtime 服务基础 URL：本地填当前 API 地址，真实环境填经 allowlist 的 HTTPS 地址。",
     "MEMORY_RUNTIME_CLIENT_ID": "[必填/自动填写] Runtime client ID：必须存在于 RUNTIME_TRUSTED_CLIENTS_JSON。",
     "MEMORY_RUNTIME_KEY_ID": "[必填/自动填写] Runtime client key ID：必须存在于对应 client 的 keys 中。",
@@ -103,6 +105,9 @@ class LocalSetup:
     database_name: str
     redis_url: str
     service_base_url: str
+    # 业务后端（couple-diary-b）地址：connector 工具调用与 callback 都指向它，
+    # 不是 Runtime 自身地址；两个进程本机联调时默认 127.0.0.1:8008。
+    business_base_url: str
 
 
 @dataclass(frozen=True)
@@ -251,6 +256,39 @@ def _env_line(field: str, value: str | int | bool) -> str:
     return f"{field}={json.dumps(rendered, ensure_ascii=False)}"
 
 
+def _validated_origin_url(value: str, error_code: str):
+    """校验无路径/查询/片段的 HTTP(S) origin，供 Service/Business 地址复用。"""
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(error_code) from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or port is None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(error_code)
+    return parsed
+
+
+def _business_endpoint_is_private(hostname: str | None) -> bool:
+    """判定业务后端地址是否为本机/私网，仅用于 dev 联调放行开关的自动取值。"""
+    if not hostname:
+        return False
+    if hostname.rstrip(".").lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(hostname.split("%", 1)[0])
+    except ValueError:
+        # DNS 名称无法静态判定，按公网处理，不放宽 SSRF 防线。
+        return False
+    return not address.is_global
+
+
 def create_local_config(
     project_root: Path,
     environment: str,
@@ -277,23 +315,16 @@ def create_local_config(
         raise ValueError("LOCAL_DATABASE_DRIVER_UNSUPPORTED")
     if not 1 <= setup.database_port <= 65535:
         raise ValueError("DATABASE_PORT_INVALID")
-    service_url = urlsplit(setup.service_base_url)
-    try:
-        service_port = service_url.port
-    except ValueError as exc:
-        raise ValueError("SERVICE_BASE_URL_INVALID") from exc
-    if (
-        service_url.scheme not in {"http", "https"}
-        or not service_url.hostname
-        or service_port is None
-        or service_url.path not in {"", "/"}
-        or service_url.query
-        or service_url.fragment
-    ):
-        raise ValueError("SERVICE_BASE_URL_INVALID")
+    service_url = _validated_origin_url(setup.service_base_url, "SERVICE_BASE_URL_INVALID")
+    business_url = _validated_origin_url(
+        setup.business_base_url, "BUSINESS_SERVICE_BASE_URL_INVALID"
+    )
 
+    # 对称密钥合同（业务侧 B9/B10 冻结）：Runtime 出站调用业务（工具 + callback）
+    # 时，X-Agent-Runtime-Id / X-Agent-Key-Id / HMAC 密钥必须与业务侧
+    # MEMORY_RUNTIME_CLIENT_ID / MEMORY_RUNTIME_KEY_ID / MEMORY_RUNTIME_SECRET 完全
+    # 一致。因此只生成一个 client secret 双向共用，不再生成独立的 tool secret。
     client_secret = secret_factory()
-    tool_secret = secret_factory()
     jwt_secret = secret_factory()
     trusted_clients = {
         "couple-diary": {
@@ -311,29 +342,35 @@ def create_local_config(
     connector = {
         "couple_diary_backend": {
             "enabled": True,
-            "base_url": setup.service_base_url,
-            "runtime_id": "agent-runtime",
+            # connector 是 Runtime 调用业务后端的地址，不是 Runtime 自身地址。
+            "base_url": setup.business_base_url,
+            # 冻结合同：业务侧校验 runtime_id == MEMORY_RUNTIME_CLIENT_ID（couple-diary）。
+            "runtime_id": "couple-diary",
             "key_id": "local",
-            "secret": tool_secret,
+            "secret": client_secret,
         }
     }
     callback_targets = {
         "memory_callback": {
             "enabled": True,
+            # 业务侧 B10 的实际路由是 /api/v1/internal/memory-callbacks。
             "url": (
-                f"{setup.service_base_url.rstrip('/')}"
-                "/api/v1/internal/agent-callbacks/memory"
+                f"{setup.business_base_url.rstrip('/')}"
+                "/api/v1/internal/memory-callbacks"
             ),
-            "runtime_id": "agent-runtime",
+            "runtime_id": "couple-diary",
             "key_id": "local",
-            "secret": tool_secret,
+            "secret": client_secret,
         }
     }
-    trusted_runtimes = {"agent-runtime": {"keys": {"local": tool_secret}}}
+    trusted_runtimes = {"agent-runtime": {"keys": {"local": client_secret}}}
+    # 本机双进程联调（business 指向 loopback/私网）时自动放行 ToolGateway 私网
+    # 校验；business 指向公网时保持 False，不放宽 SSRF 防线。
+    allow_private_endpoints = _business_endpoint_is_private(business_url.hostname)
     values: tuple[tuple[str, str | int | bool], ...] = (
         ("ENVIRONMENT", normalized),
         ("HOST", service_url.hostname),
-        ("PORT", service_port),
+        ("PORT", service_url.port),
         ("DB_AUTO_CREATE", True),
         ("DB_DRIVER", setup.database_driver),
         ("DB_USER", setup.database_user),
@@ -347,6 +384,7 @@ def create_local_config(
         ("RUNTIME_AUDIT_SINK_CONFIGURED", True),
         ("RUNTIME_EXTERNAL_EXPORTER_ENABLED", False),
         ("RUNTIME_REDIS_URL", setup.redis_url),
+        ("RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS", allow_private_endpoints),
         ("RUNTIME_TRUSTED_CLIENTS_JSON", json.dumps(trusted_clients, separators=(",", ":"))),
         ("RUNTIME_BUSINESS_CONNECTORS_JSON", json.dumps(connector, separators=(",", ":"))),
         ("RUNTIME_CALLBACK_TARGETS_JSON", json.dumps(callback_targets, separators=(",", ":"))),
@@ -821,6 +859,9 @@ def _prompt_setup(environment: str) -> LocalSetup:
         database_name=prompt("DB name", default_database),
         redis_url=prompt("Redis URL", "redis://127.0.0.1:6379/15"),
         service_base_url=prompt("Service base URL", "http://127.0.0.1:8010"),
+        business_base_url=prompt(
+            "Business backend base URL", "http://127.0.0.1:8008"
+        ),
     )
 
 

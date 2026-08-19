@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:
@@ -267,10 +267,14 @@ class Settings(BaseSettings):
     )
     RUNTIME_CALLBACK_TARGETS_JSON: str = (
         '{"memory_callback":{"enabled":true,'
-        '"url":"http://127.0.0.1:8002/api/v1/internal/agent-callbacks/memory",'
+        '"url":"http://127.0.0.1:8002/api/v1/internal/memory-callbacks",'
         '"runtime_id":"agent-runtime","key_id":"dev",'
         '"secret":"runtime-tool-development-secret"}}'
     )
+    # 开发联调逃生门：connector 指向本机业务后端（127.0.0.1）时由运维显式
+    # 开启，ToolGateway 跳过公网 DNS/对端复核。生产默认关闭，且仅
+    # development/test 环境允许置真（见下方 validator）。
+    RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS: bool = False
     RUNTIME_SIGNATURE_TOLERANCE_SECONDS: int = 300
     RUNTIME_ADMISSION_MAX_HELD: int = 100
     RUNTIME_ADMISSION_MAX_QUEUED: int = 500
@@ -306,6 +310,23 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    @field_validator("RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS")
+    @classmethod
+    def validate_private_connector_only_in_dev(cls, value: bool, info: ValidationInfo) -> bool:
+        """私网 connector 放行开关只允许 development/test 开启。
+
+        生产/预发误配置该开关会在启动时立即失败（fail-fast），保住
+        ToolGateway 的 SSRF 公网校验这一安全不变量。
+        """
+
+        environment = info.data.get("ENVIRONMENT")
+        if value and environment not in {"development", "test"}:
+            raise ValueError(
+                "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS 仅允许在 "
+                "development/test 环境开启"
+            )
+        return value
 
     @field_validator("MODEL_ROUTES_JSON")
     @classmethod

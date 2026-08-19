@@ -389,6 +389,11 @@ def configured_executor(
                     )
                     else None
                 ),
+                # 开发联调逃生门：connector 指向本机业务后端（127.0.0.1:8008）时
+                # 由运维配置显式放行；生产环境 config validator 强制为 False。
+                allow_private_endpoints=(
+                    runtime_settings.RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS
+                ),
             )
             model_gateway = configured_model_gateway(
                 session, is_draining=is_draining, dependencies=dependencies

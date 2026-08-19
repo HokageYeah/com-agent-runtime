@@ -6,7 +6,7 @@
 
 - `development` 和 `test` 优先使用 `./agent-runtime.sh configure <environment>` 生成 HMAC、Fernet 和 JWT secret。
 - `production` 不允许使用 `configure` 生成本地密钥文件；密钥和凭据应由 secret manager 或部署平台注入。
-- development/test/production 必须使用三套完全独立的密钥，client HMAC、tool HMAC、JWT 和数据库密码之间也不得复用。
+- development/test/production 必须使用三套完全独立的密钥，client HMAC、JWT 和数据库密码之间也不得复用。client HMAC 由业务侧与 Runtime 出站（connector/callback）按 B9/B10 冻结合同双向共用，不再有独立的 tool HMAC。
 - 不得将密钥、凭据、签名 URL、私有 endpoint、prompt、模型原文或工具 payload 写入 Git、日志、trace、callback、审计、artifact、checkpoint、测试输出或工单。
 - 本地 `.env.<environment>.local` 必须设为 `0600`；`.env.local` 优先级最高，其中的同名字段会覆盖环境专用配置。
 
@@ -22,7 +22,7 @@ chmod 600 .env.development.local .env.test.local .env.production.local
 | test | `./agent-runtime.sh configure test` | `8010` | 脚本自动生成三类密钥，不复用 development |
 | production | secret manager / 部署平台 | `8011` | 在受控边界生成、注入和轮换 |
 
-`configure` 会直接把生成的 secret 写入官方 Settings 字段和 JSON 注册表。`RUNTIME_CLIENT_HMAC_SECRET` / `RUNTIME_TOOL_HMAC_SECRET` 是手工 `.env` 模板中为避免重复而使用的辅助变量，不是 `Settings` 的业务字段。
+`configure` 会直接把生成的 secret 写入官方 Settings 字段和 JSON 注册表。`RUNTIME_CLIENT_HMAC_SECRET` 是手工 `.env` 模板中为避免重复而使用的辅助变量，不是 `Settings` 的业务字段；业务侧 `MEMORY_RUNTIME_SECRET` 与 Runtime 出站 connector/callback 共用同一值（B9/B10 冻结对称合同）。
 
 如果必须手工生成本地密钥，可以使用：
 
@@ -75,13 +75,16 @@ DB_NAME=couple_diary_agent_runtime_dev
 
 ### 4.1 它的作用
 
-`SERVICE_BASE_URL` 是 `.env.*.local` 模板中的复用变量，用于同时生成：
+`SERVICE_BASE_URL` 是 `.env.*.local` 模板中的复用变量，表示 Runtime 自身地址，用于生成：
 
-- `MEMORY_RUNTIME_BASE_URL`；
+- `MEMORY_RUNTIME_BASE_URL`。
+
+Runtime 出站调用业务后端使用独立的 `BUSINESS_SERVICE_BASE_URL`（业务后端 couple-diary-b 的地址）：
+
 - `RUNTIME_BUSINESS_CONNECTORS_JSON` 中 connector 的 `base_url`；
 - `RUNTIME_CALLBACK_TARGETS_JSON` 中 callback URL。
 
-它不是 `app.core.config.Settings` 的正式字段。Python dotenv 加载 `.env.production.local` 时可以展开 `${SERVICE_BASE_URL}`；Docker Compose、Kubernetes 或云平台直接注入环境变量时，不应假设它们会在 JSON 字符串内自动展开。这类部署应直接注入展开后的 `MEMORY_RUNTIME_BASE_URL`、`RUNTIME_BUSINESS_CONNECTORS_JSON` 和 `RUNTIME_CALLBACK_TARGETS_JSON`。
+两者不是 `app.core.config.Settings` 的正式字段。Python dotenv 加载 `.env.production.local` 时可以展开 `${SERVICE_BASE_URL}` / `${BUSINESS_SERVICE_BASE_URL}`；Docker Compose、Kubernetes 或云平台直接注入环境变量时，不应假设它们会在 JSON 字符串内自动展开。这类部署应直接注入展开后的 `MEMORY_RUNTIME_BASE_URL`、`RUNTIME_BUSINESS_CONNECTORS_JSON` 和 `RUNTIME_CALLBACK_TARGETS_JSON`。
 
 ### 4.2 值的要求
 
@@ -176,13 +179,12 @@ development/test 优先交给脚本：
 ./agent-runtime.sh configure test
 ```
 
-手工或 secret manager 生成时，必须创建两个不同的 256-bit secret：
+手工或 secret manager 生成时，必须创建一个 256-bit client secret：
 
-1. `RUNTIME_CLIENT_HMAC_SECRET`：业务服务调用 Runtime；
-2. `RUNTIME_TOOL_HMAC_SECRET`：Runtime 调用 connector 和 callback。
+1. `RUNTIME_CLIENT_HMAC_SECRET`：业务服务调用 Runtime 的入站验签，同时是 Runtime 调用业务 connector 和 callback 的出站签名密钥（B9/B10 冻结对称合同，双向共用同一值）。
 
 ```bash
-# 执行第一次生成 client secret，第二次生成 tool secret。
+# 生成 client secret（双向共用）。
 openssl rand -hex 32
 ```
 
@@ -191,26 +193,29 @@ openssl rand -hex 32
 client secret 必须同时出现在：
 
 - `RUNTIME_TRUSTED_CLIENTS_JSON[MEMORY_RUNTIME_CLIENT_ID].keys[MEMORY_RUNTIME_KEY_ID]`；
-- `MEMORY_RUNTIME_SECRET`。
-
-tool secret 必须同时出现在：
-
+- `MEMORY_RUNTIME_SECRET`；
 - `RUNTIME_BUSINESS_CONNECTORS_JSON` 目标的 `secret`；
 - `RUNTIME_CALLBACK_TARGETS_JSON` 目标的 `secret`；
 - `MEMORY_TOOL_TRUSTED_RUNTIMES_JSON[RUNTIME_ID].keys[key_id]`。
 
+同时 Runtime 出站身份必须与业务侧 `MEMORY_RUNTIME_*` 完全对称（业务侧 B9/B10 校验入站 header）：
+
+- connector 与 callback 的 `runtime_id` 必须等于业务侧 `MEMORY_RUNTIME_CLIENT_ID`（当前为 `couple-diary`）；
+- `key_id` 必须等于业务侧 `MEMORY_RUNTIME_KEY_ID`；
+- callback URL 必须指向业务后端 `BUSINESS_SERVICE_BASE_URL` 的 `/api/v1/internal/memory-callbacks`（B10 实际路由）。
+
 ```dotenv
 RUNTIME_CLIENT_HMAC_SECRET=
-RUNTIME_TOOL_HMAC_SECRET=
+BUSINESS_SERVICE_BASE_URL=https://business.example.com
 
 RUNTIME_TRUSTED_CLIENTS_JSON='{"couple-diary":{"tenant_id":"couple-diary","keys":{"production-v1":"${RUNTIME_CLIENT_HMAC_SECRET}"},"agent_ids":["memoir_agent"],"business_types":["couple_memory"],"callback_target_ids":["memory_callback"],"connector_ids":["couple_diary_backend"],"data_domains":["couple_memory"],"authorization_version":1,"model_data_residency":"private"}}'
 MEMORY_RUNTIME_CLIENT_ID=couple-diary
 MEMORY_RUNTIME_KEY_ID=production-v1
 MEMORY_RUNTIME_SECRET=${RUNTIME_CLIENT_HMAC_SECRET}
 
-RUNTIME_BUSINESS_CONNECTORS_JSON='{"couple_diary_backend":{"enabled":true,"base_url":"${SERVICE_BASE_URL}","runtime_id":"agent-runtime-production","key_id":"production-v1","secret":"${RUNTIME_TOOL_HMAC_SECRET}"}}'
-RUNTIME_CALLBACK_TARGETS_JSON='{"memory_callback":{"enabled":true,"url":"${SERVICE_BASE_URL}/api/v1/internal/agent-callbacks/memory","runtime_id":"agent-runtime-production","key_id":"production-v1","secret":"${RUNTIME_TOOL_HMAC_SECRET}"}}'
-MEMORY_TOOL_TRUSTED_RUNTIMES_JSON='{"agent-runtime-production":{"keys":{"production-v1":"${RUNTIME_TOOL_HMAC_SECRET}"}}}'
+RUNTIME_BUSINESS_CONNECTORS_JSON='{"couple_diary_backend":{"enabled":true,"base_url":"${BUSINESS_SERVICE_BASE_URL}","runtime_id":"couple-diary","key_id":"production-v1","secret":"${RUNTIME_CLIENT_HMAC_SECRET}"}}'
+RUNTIME_CALLBACK_TARGETS_JSON='{"memory_callback":{"enabled":true,"url":"${BUSINESS_SERVICE_BASE_URL}/api/v1/internal/memory-callbacks","runtime_id":"couple-diary","key_id":"production-v1","secret":"${RUNTIME_CLIENT_HMAC_SECRET}"}}'
+MEMORY_TOOL_TRUSTED_RUNTIMES_JSON='{"agent-runtime-production":{"keys":{"production-v1":"${RUNTIME_CLIENT_HMAC_SECRET}"}}}'
 ```
 
 示例同时展示密钥关系和当前 memoir Agent 所需的最小 allowlist；新增 Agent、业务类型、callback、connector 或 data domain 时必须经授权评审，不得用通配或删除 allowlist 的方式放行。

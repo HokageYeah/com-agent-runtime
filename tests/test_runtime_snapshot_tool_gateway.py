@@ -76,6 +76,47 @@ def test_harness_explicitly_allows_loopback_mock_connector() -> None:
     assert gateway is not None
 
 
+def test_gateway_allows_loopback_connector_and_send_when_operator_opted_in() -> None:
+    """开发联调逃生门：运维显式开启后 loopback connector 构造与发送都放行。
+
+    对应 2026-08-18 本机双进程联调故障：connector 指向 127.0.0.1:8008 时
+    worker 构造 ToolGateway 即崩（BUSINESS_CONNECTOR_ENDPOINT_UNSAFE）。
+    allow_private_endpoints=True 必须同时豁免三重 SSRF 门中的
+    静态校验与发送前 DNS 解析（_ensure_public_endpoint 会对 127.0.0.1
+    抛错，本测试若未跳过必然失败）；默认关闭的拒绝行为由上方参数化测试覆盖。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "127.0.0.1"
+        return httpx.Response(
+            200,
+            json={"output": {"archive_id": "a", "snapshot": {"revision": 1}}},
+        )
+
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://127.0.0.1:8008", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(handler)),
+        allow_private_endpoints=True,
+    )
+    result = gateway.get_snapshot("c", "archive-1", "snapshot-1", "run-1", 0)
+    assert result["snapshot"]["revision"] == 1
+
+
+def test_config_rejects_private_connector_switch_outside_development() -> None:
+    """私网放行开关只在 development/test 生效；production 配置直接 fail-fast。"""
+    from pydantic import ValidationError
+
+    from app.core.config import Settings
+
+    with pytest.raises(ValidationError, match="仅允许在.*环境开启"):
+        Settings.model_validate(
+            {
+                "ENVIRONMENT": "production",
+                "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS": True,
+            }
+        )
+
+
 def test_gateway_audits_connector_and_authorization_rejections_without_request_data() -> None:
     """拒绝审计只能收到 run ID 与固定码，不能携带 connector 配置或工具输入。"""
     events: list[tuple[str, str]] = []

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 import sys
 from pathlib import Path
@@ -50,6 +51,7 @@ def _setup() -> LocalSetup:
         database_name="couple_diary_agent_runtime_test",
         redis_url="redis://127.0.0.1:6379/15",
         service_base_url="http://127.0.0.1:8002",
+        business_base_url="http://127.0.0.1:8008",
     )
 
 
@@ -133,7 +135,7 @@ def test_prepare_requires_explicit_auto_create_for_a_missing_database() -> None:
 
 
 def test_create_local_config_writes_private_file_without_overwriting(tmp_path: Path) -> None:
-    secret_values = iter(("client-secret", "tool-secret", "jwt-secret"))
+    secret_values = iter(("client-secret", "jwt-secret"))
 
     path = create_local_config(
         tmp_path,
@@ -149,7 +151,7 @@ def test_create_local_config_writes_private_file_without_overwriting(tmp_path: P
     assert "# 应用运行环境：决定加载哪一套基础配置。" in content
     assert "# 数据库连接：应用账号应只授予当前业务库的最小权限。" in content
     assert "# Runtime 入站身份：与 MEMORY_RUNTIME_SECRET 使用同一 client secret。" in content
-    assert "# Runtime 出站工具与 callback：三个注册表必须使用同一 tool secret。" in content
+    assert "# Runtime 出站工具与 callback：身份与密钥必须与业务侧 MEMORY_RUNTIME_* 对称。" in content
     assert "# 模型路由为空时关闭真实模型增强，使用确定性模板降级。" in content
     assert "# [必填] MySQL 应用账号：由配置时的 DB user 生成" in content
     assert "# [必填/自动生成] Snapshot Fernet 加密密钥" in content
@@ -168,6 +170,32 @@ def test_create_local_config_writes_private_file_without_overwriting(tmp_path: P
     assert "MODEL_ROUTES_JSON=[]" in content
     assert "MEMOIR_MODEL_NODE_ROUTES_JSON={}" in content
     assert "USER_AUTH_JWT_SECRET=jwt-secret" in content
+    # 对称合同防回归（2026-08-18 callback 403 根因）：connector/callback 的
+    # runtime_id 与 secret 必须与 MEMORY_RUNTIME_CLIENT_ID / MEMORY_RUNTIME_SECRET
+    # 完全一致，callback 指向业务后端 B10 实际路由。
+    raw_values: dict[str, str] = {}
+    for line in content.splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            field, _, rendered = line.partition("=")
+            raw_values[field] = (
+                json.loads(rendered) if rendered.startswith('"') else rendered
+            )
+    connector = json.loads(raw_values["RUNTIME_BUSINESS_CONNECTORS_JSON"])
+    callback = json.loads(raw_values["RUNTIME_CALLBACK_TARGETS_JSON"])
+    assert connector["couple_diary_backend"] == {
+        "enabled": True,
+        "base_url": "http://127.0.0.1:8008",
+        "runtime_id": "couple-diary",
+        "key_id": "local",
+        "secret": "client-secret",
+    }
+    assert callback["memory_callback"]["url"] == (
+        "http://127.0.0.1:8008/api/v1/internal/memory-callbacks"
+    )
+    assert callback["memory_callback"]["runtime_id"] == "couple-diary"
+    assert callback["memory_callback"]["secret"] == "client-secret"
+    assert raw_values["MEMORY_RUNTIME_SECRET"] == "client-secret"
+    assert raw_values["RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS"] == "true"
     assert inspect_configuration(tmp_path, "test", process_env={}) == ()
 
     with pytest.raises(FileExistsError, match="CONFIG_FILE_EXISTS"):
@@ -202,7 +230,7 @@ def test_inspect_configuration_reports_field_names_without_secret_values(
 def test_doctor_refuses_a_business_database_name_before_migration(
     tmp_path: Path,
 ) -> None:
-    secret_values = iter(("client-secret", "tool-secret", "jwt-secret"))
+    secret_values = iter(("client-secret", "jwt-secret"))
     path = create_local_config(
         tmp_path,
         "development",

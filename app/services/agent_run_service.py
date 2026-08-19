@@ -155,6 +155,10 @@ class AgentRunService:
             else None,
             queued_at=now if command.start_mode == "auto" else None,
             run_deadline_at=now + timedelta(days=1),
+            # 生产 session autoflush=False，_summary 在 flush 前读取 ORM 对象；
+            # column default 只在 INSERT 时生效，不显式赋值会读到 None 导致响应 500
+            # （2026-08-18 线上故障：create 201 变 500，AgentRunResponse 校验失败）。
+            status_version=1,
         )
         self._session.add(run)
         self._admission.transition_run(run, "none", run.dispatch_state)
