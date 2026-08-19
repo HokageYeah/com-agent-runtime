@@ -282,7 +282,7 @@ def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary(
             assert route_id == "summary"
             assert isinstance(request, dict)
             assert request["messages"][0]["role"] == "system"
-            assert request["messages"][1]["role"] == "human"
+            assert request["messages"][1]["role"] == "user"
             assert "forged" not in str(request)
             self.prompt = prompt
             return type("Result", (), {"status": "succeeded", "data": {}})()
@@ -371,7 +371,7 @@ def test_memoir_adapter_uses_versioned_repair_prompt_and_untrusted_data_slot() -
     assert isinstance(gateway.request, dict)
     messages = gateway.request["messages"]
     assert messages[0]["role"] == "system"
-    assert messages[1]["role"] == "human"
+    assert messages[1]["role"] == "user"
 
 
 def test_memoir_repair_creates_separate_usage_permit_and_prompt_attempt() -> None:

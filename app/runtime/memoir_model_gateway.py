@@ -108,7 +108,11 @@ class MemoirModelGatewayAdapter:
             provider_request = {
                 "messages": render_model_messages(
                     prompt, node_context, candidate_input
-                )
+                ),
+                # 结构化节点只接受 JSON；显式开启 JSON 模式，避免 Provider
+                # 返回散文导致 parse_json_once 判定 JSON_PARSE_FAILED（2026-08-19
+                # DeepSeek 实测：仅靠 prompt 契约仍可能夹带解释文字）。
+                "response_format": {"type": "json_object"},
             }
         except ValueError:
             return ModelGatewayResult("aborted_before_send")
@@ -224,6 +228,8 @@ class MemoirModelGatewayAdapter:
                         "validation_code": "MODEL_OUTPUT_INVALID",
                     },
                 ),
+                # repair 同样只接受 JSON；与 generate 路径保持同一硬约束。
+                "response_format": {"type": "json_object"},
             }
             encoded_request = json.dumps(
                 provider_request,
