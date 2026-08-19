@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import logging
 import re
@@ -67,6 +68,20 @@ _FIXED_NATIVE_TOOLS: dict[str, tuple[tuple[str, ...], Callable[..., object]]] = 
     "runtime.contains_sensitive_identifier": (("value",), contains_sensitive_identifier),
 }
 _TOOL_OUTPUT_SENSITIVE = re.compile(r"(?<!\d)(?:1[3-9]\d{9}|\d{17}[\dXx])(?!\d)")
+# 业务端工具幂等键冻结合同：Idempotency-Key 必须匹配 ^[A-Za-z0-9_-]{1,64}$
+# （couple-diary-b Header pattern，违约由 FastAPI 在进 handler 前直接 422，
+# 2026-08-19 线上故障：publish 逻辑键含冒号且超长 → BUSINESS_DATA_INVALID）。
+# 逻辑键含冒号命名空间或超长时派生 sha256 hex（64 位小写十六进制，恒合规、
+# 确定性可重放）；Runtime 内部审计坐标（logical_key）不受影响。
+_WIRE_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _wire_idempotency_key(logical_key: str) -> str:
+    """逻辑幂等键 → 业务 wire 合规键；合规即透传，违约派生 sha256 hex。"""
+
+    if _WIRE_IDEMPOTENCY_KEY.fullmatch(logical_key):
+        return logical_key
+    return hashlib.sha256(logical_key.encode("utf-8")).hexdigest()
 _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {"1.0.0": "1.0.0", "1.0.1": "1.1.0"}
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 
@@ -431,7 +446,7 @@ class ToolGateway:
             headers["X-Agent-Run-Id"] = header_run_id
         headers["X-Agent-Tool-Name"] = tool_name
         if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+            headers["Idempotency-Key"] = _wire_idempotency_key(idempotency_key)
         attempts = 2 if retry_transport else 1
         for attempt in range(attempts):
             run_id = input_data.get("run_id")

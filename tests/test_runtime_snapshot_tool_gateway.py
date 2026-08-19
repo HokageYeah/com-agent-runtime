@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import socket
@@ -498,6 +499,44 @@ def test_gateway_allows_query_after_commit_while_draining() -> None:
 
     assert gateway.get_publish_result("c", "a", "s", "r", 1, "write-1") == {"revision": 1}
     assert calls == 1
+
+
+def test_gateway_wire_idempotency_key_matches_business_contract() -> None:
+    """逻辑幂等键含冒号/超长时，wire 头必须派生为业务冻结合同 ^[A-Za-z0-9_-]{1,64}$ 的合规键。
+
+    2026-08-19 线上故障回归锚点：runner 的 logical_key 形如
+    "{run_id}:publish_document:memory.publish_playback_document:{epoch}"，
+    冒号 + 超长双重违约，被业务端 FastAPI Header pattern 自动 422 →
+    BUSINESS_DATA_INVALID → WORKFLOW_NODE_FAILED。合规键必须原样透传。
+    """
+
+    observed: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request.headers["Idempotency-Key"])
+        return httpx.Response(200, json={"output": {"revision": 1}})
+
+    gateway = ToolGateway(
+        {"c": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    document = {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []}
+    logical_key = "run-abc:publish_document:memory.publish_playback_document:3"
+
+    gateway.publish_playback_document(
+        "c", "a", "r", "s", 1, document, logical_key,
+        AgentToolCall(tool_call_id="call-1", run_id="r", tool_attempt=1, side_effect=True),
+    )
+    gateway.publish_playback_document(
+        "c", "a", "r", "s", 1, document, "write-1",
+        AgentToolCall(tool_call_id="call-2", run_id="r", tool_attempt=1, side_effect=True),
+    )
+
+    # 违约键派生为确定性 sha256 hex（64 位小写十六进制，恒合规、可重放）；合规键透传
+    assert observed == [
+        hashlib.sha256(logical_key.encode("utf-8")).hexdigest(),
+        "write-1",
+    ]
 
 
 def test_generic_call_validates_fixed_cancellation_behavior() -> None:
