@@ -371,7 +371,7 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 **Plan:** 后端计划 Task 3、Task 12 的包定义部分。
 
 - [✅] 定义 AgentPackage schema。
-- [✅] 创建 `memoir_agent@1.0.0` 文件包。**（2026-08-11 第六次最小收口 P1：1.0.0 恢复 `enqueue_media_tasks` 缺 `safe_to_rerun` 的冻结原貌——620f44a 曾给该节点补 `safe_to_rerun=False` 违反同版本 digest 不可变铁律；另发 `memoir_agent@1.0.1` 承载显式 `safe_to_rerun=False`，新 Run 路由 1.0.1，旧 Run 绑 1.0.0。两版本 digest 独立、`contract_version` 都 1.0.0）**
+- [✅] 创建 `memoir_agent@1.0.0` 文件包。**（2026-08-11 第六次最小收口 P1：1.0.0 恢复 `enqueue_media_tasks` 缺 `safe_to_rerun` 的冻结原貌——620f44a 曾给该节点补 `safe_to_rerun=False` 违反同版本 digest 不可变铁律；另发 `memoir_agent@1.0.1` 承载显式 `safe_to_rerun=False`，新 Run 路由 1.0.1，旧 Run 绑 1.0.0。两版本 digest 独立、`contract_version` 都 1.0.0）**（2026-08-19 M5 收尾追注：另发 `memoir_agent@1.0.2`——各模型节点 `guardrail_policy` 由 `private_first` 改 `redacted_only`，修复与公有 DeepSeek route（仅 `structured_output` 能力）互斥导致的静默 `capability_disabled` 全模板兜底；新 Run 路由 1.0.2，1.0.0/1.0.1 旧 Run 绑原版本，`contract_version` 仍 1.0.0。注册入口统一为 `./agent-runtime.sh register <env> --agent-id memoir_agent --version 1.0.2`）**
 - [✅] 固定 `agent.yaml`、`input.schema.json`、`output.schema.json`、受信任 `workflow.graph.py`、`prompts/`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml` 和 `evals/`。
 - [✅] 加载器校验版本、schema、workflow、prompt 引用、工具清单、guardrails、callback、ui trace 和至少 5 条最小 eval 用例。
 - [✅] 冻结 `policy.waiting_human_timeout_action=fallback|failed|cancelled`；只有启用 `waiting_human` callback 的 package 才允许进入人工等待，fallback 必须指向确定性的恢复节点。

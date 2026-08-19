@@ -61,7 +61,7 @@
 - `app/middleware/request_logging.py`：请求日志与 `request_id` 入口
 - `app/middleware/exception_handlers.py`：统一错误返回入口
 - `app/scripts/set_env.py`：环境切换与命令转发入口
-- `agent-runtime.sh`：AgentRuntime 配置检查、安全建库、Alembic 迁移与进程托管入口
+- `agent-runtime.sh`：AgentRuntime 配置检查、安全建库、Alembic 迁移、AgentPackage 注册与进程托管入口
 
 ### 最常用命令速查
 
@@ -71,6 +71,9 @@ poetry install
 
 # 首次初始化 AgentRuntime 开发专库
 ./agent-runtime.sh prepare development
+
+# 注册/升级 AgentPackage 到指定环境库（磁盘包不会自动入库；--version 必填，--dry-run 可预检不落库）
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.2
 
 # 启动开发环境
 ./run.sh development
@@ -227,7 +230,7 @@ poetry run ruff check app tests
 
 ## 快速开始
 
-项目根目录的 `agent-runtime.sh` 是 AgentRuntime 的统一入口。它负责生成本机私有配置、检查必填项、执行 Alembic 迁移、前台托管 API/Worker/Reconciler/launcher，以及运行隔离的 PostgreSQL/Redis 真实 harness。
+项目根目录的 `agent-runtime.sh` 是 AgentRuntime 的统一入口。它负责生成本机私有配置、检查必填项、执行 Alembic 迁移、把部署目录内的 AgentPackage 注册进库（`register`，须显式 `--version`）、前台托管 API/Worker/Reconciler/launcher，以及运行隔离的 PostgreSQL/Redis 真实 harness。
 
 首次启动测试环境：
 

@@ -283,6 +283,9 @@ class Settings(BaseSettings):
     MODEL_ROUTES_JSON: str = "[]"
     RUNTIME_REDIS_URL: str = ""
     MEMOIR_MODEL_NODE_ROUTES_JSON: str = "{}"
+    # Provider API Key 只经部署 env 注入（route_id -> key），不进 route JSON、日志或响应；
+    # 用于 openai_compatible Provider 的 Authorization Bearer 头。
+    MODEL_PROVIDER_API_KEYS_JSON: str = "{}"
     MEMORY_SNAPSHOT_FERNET_KEY: str = "UIdCWOsJY0GWrMpXlM444_JDKJC-zFwylDAJCymPvPg="
     MEMORY_TOOL_TRUSTED_RUNTIMES_JSON: str = '{"agent-runtime":{"keys":{"dev":"runtime-tool-development-secret"}}}'
     # 回忆录业务 worker 调用 Runtime 的服务身份；仅允许部署环境注入，绝不回传。
@@ -501,6 +504,20 @@ class Settings(BaseSettings):
         ):
             raise ValueError("MEMOIR_MODEL_NODE_ROUTES_JSON 必须是字符串映射")
         return routes
+
+    @property
+    def model_provider_api_keys(self) -> dict[str, str]:
+        """返回 route_id 到 Provider API Key 的部署映射（仅内存使用，绝不写日志）。"""
+        try:
+            keys = json.loads(self.MODEL_PROVIDER_API_KEYS_JSON)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MODEL_PROVIDER_API_KEYS_JSON 必须是 JSON 对象") from exc
+        if not isinstance(keys, dict) or not all(
+            isinstance(route_id, str) and isinstance(key, str)
+            for route_id, key in keys.items()
+        ):
+            raise ValueError("MODEL_PROVIDER_API_KEYS_JSON 必须是字符串映射")
+        return keys
 
 
 settings = Settings()

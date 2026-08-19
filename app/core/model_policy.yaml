@@ -35,3 +35,11 @@ private_first:
   thinking_enabled: false
   requires_vision: false
   fallback: template
+# 仅脱敏数据护栏：模型请求只携带 prompt 模板与素材引用 ID 占位符，
+# 不含日记/赌约正文与摘要，因此允许走公有 Provider（如 DeepSeek）。
+redacted_only:
+  max_output_tokens: 512
+  required_capabilities: [structured_output]
+  thinking_enabled: false
+  requires_vision: false
+  fallback: template

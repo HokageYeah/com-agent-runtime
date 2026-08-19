@@ -533,6 +533,11 @@ class ProviderAdapter(Protocol):
     def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object: ...
 
 
+# OpenAI 兼容 Provider 标识：请求自动补 model 字段并解包 choices[0].message.content。
+# 其余 provider（如内部 harness）保持原有"响应体即结构化 JSON"契约，零行为变化。
+OPENAI_COMPATIBLE_PROVIDER = "openai_compatible"
+
+
 class HttpProviderAdapter:
     """模型 Provider 的 HTTP 边界，发送后校验真实 TCP 对端以阻断 DNS rebinding。"""
 
@@ -542,11 +547,17 @@ class HttpProviderAdapter:
         *,
         peer_ip_provider: Callable[[], str | None] | None = None,
         reset_peer_ip: Callable[[], None] | None = None,
+        api_keys: Mapping[str, str] | None = None,
     ) -> None:
-        """注入受控 HTTP Client；生产调用必须同时提供对端 IP 读取器。"""
+        """注入受控 HTTP Client；生产调用必须同时提供对端 IP 读取器。
+
+        api_keys 是部署 env 提供的 route_id -> API Key 映射，仅进入请求头，
+        绝不进入日志、异常消息或响应处理。
+        """
         self._client = client
         self._peer_ip_provider = peer_ip_provider
         self._reset_peer_ip = reset_peer_ip
+        self._api_keys = dict(api_keys or {})
 
     def call(self, route: ModelRoute, request: object, *, timeout_seconds: float) -> object:
         """物理发送前重做 DNS 预检，并在响应解析前核对 socket 实际对端。"""
@@ -557,18 +568,51 @@ class HttpProviderAdapter:
             raise ValueError("MODEL_PROVIDER_PEER_UNVERIFIABLE")
         if self._reset_peer_ip is not None:
             self._reset_peer_ip()
+        headers: dict[str, str] = {}
+        api_key = self._api_keys.get(route.route_id)
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        outbound: object = request
+        if route.provider == OPENAI_COMPATIBLE_PROVIDER and isinstance(request, Mapping):
+            # OpenAI 兼容供应商要求 body 携带 model；model 固定取部署 route 配置，
+            # 请求本身没有任何覆盖 provider/model 的入口。
+            body = dict(request)
+            body.setdefault("model", route.model)
+            outbound = body
         response = self._client.post(
             route.endpoint,
-            json=request,
+            json=outbound,
+            headers=headers,
             timeout=timeout_seconds,
             follow_redirects=False,
         )
         self._verify_connected_peer(allowed_peer_ips, route.route_id)
         response.raise_for_status()
         payload = response.json()
+        if route.provider == OPENAI_COMPATIBLE_PROVIDER:
+            return self._extract_openai_content(payload)
         if not isinstance(payload, (dict, list)):
             raise ValueError("Provider JSON 响应格式无效")
         return payload
+
+    @staticmethod
+    def _extract_openai_content(payload: object) -> str:
+        """从 OpenAI 兼容响应解包 choices[0].message.content 作为模型输出。
+
+        只取 content 字符串交给结构化解析器；envelope 其余字段不进入 Runtime。
+        注意：该路径下 token 计量不可得，账本按既有"未知 token"口径结算
+        （与 harness 无 usage 响应同路径）；需要精确计量时再扩展 payload 契约。
+        """
+        if not isinstance(payload, Mapping):
+            raise ValueError("Provider JSON 响应格式无效")
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
+            raise ValueError("Provider JSON 响应格式无效")
+        message = choices[0].get("message")
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, str):
+            raise ValueError("Provider JSON 响应格式无效")
+        return content
 
     def _verify_connected_peer(self, allowed_peer_ips: frozenset[str], route_id: str) -> None:
         """仅接受本轮 DNS 公网集合中的真实 TCP 对端，不记录请求或响应内容。"""

@@ -117,6 +117,16 @@ class _ScenePlanOutput(BaseModel):
         return self
 
 
+# 模板兜底场景的固定安全正文：模型不可用或输出被拒时，前端播放卡渲染 scene.body，
+# 缺失正文会发布出三张空白卡。文案为字面量（不含用户素材），每条均满足
+# _is_safe_playback 的 80 字上限与 MemoirGuardrails 的敏感词/情绪风险拦截。
+_TEMPLATE_SCENE_BODIES: tuple[str, ...] = (
+    "这一路的小事，都被好好收藏在这本回忆里。",
+    "每一次并肩与交心，都是我们最珍贵的默契。",
+    "往后的日子，也一起慢慢写下新的故事吧。",
+)
+
+
 class MemoirNodeRunner:
     """回忆录 MVP 节点执行器，只输出不含日记正文的结构化播放文档。"""
 
@@ -240,12 +250,12 @@ class MemoirNodeRunner:
                 state.fallback_flags.append("model_invalid_scenes")
             scenes: list[dict[str, object]] = []
             for index, chapter in enumerate(safe_chapters[:3], start=1):
-                refs = chapter["source_refs"]
-                scenes.append({"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": refs})
+                # _safe_chapters 已保证 source_refs 全为 str；复用 _source_refs 做类型收窄，避免再写一份推导式。
+                refs = MemoirNodeRunner._source_refs([chapter])
+                scenes.append(self._template_scene(index, refs))
             # 素材不足时仅补无引用基础卡，避免为凑数量重复引用用户素材。
             while len(scenes) < 3:
-                scene_index = len(scenes) + 1
-                scenes.append({"scene_id": f"scene-{scene_index}", "scene_type": "summary", "source_refs": []})
+                scenes.append(self._template_scene(len(scenes) + 1, []))
             state.apply_tool_output("scenes", scenes)
             state.fallback_flags.append("template_scenes")
             logging.info("MemoirAgent 模板场景完成 run_id=%s scene_count=%s", run.run_id, len(state.scenes))
@@ -721,12 +731,19 @@ class MemoirNodeRunner:
         }
 
     @staticmethod
+    def _template_scene(index: int, source_refs: list[str]) -> dict[str, object]:
+        """构造模板兜底场景：引用外的全部字段固定，正文按序取安全文案，保证卡片不空白。"""
+        return {
+            "scene_id": f"scene-{index}",
+            "scene_type": "summary",
+            "source_refs": source_refs,
+            "body": _TEMPLATE_SCENE_BODIES[(index - 1) % len(_TEMPLATE_SCENE_BODIES)],
+        }
+
+    @staticmethod
     def _base_scenes_actions() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         """生成三张无素材引用的基础卡，作为唯一发布前安全回退文档。"""
-        scenes = [
-            {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": []}
-            for index in range(1, 4)
-        ]
+        scenes = [MemoirNodeRunner._template_scene(index, []) for index in range(1, 4)]
         actions = [
             {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
             for index in range(1, 4)

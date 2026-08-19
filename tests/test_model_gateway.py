@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import time
@@ -711,9 +712,12 @@ def test_memoir_runner_uses_template_when_adapter_capability_is_unavailable_befo
     step.step_name = "extract_highlights"
     session.commit()
     provider = RecordingProvider()
+    # route 缺少 structured_output 能力，与 strict 模型策略不匹配；
+    # 能力判定必须在适配器边界失败（不依赖护栏策略的具体取值）。
+    mismatched_route = ModelRoute(**{**_route().__dict__, "capabilities": frozenset({"chat"})})
     adapter = MemoirModelGatewayAdapter(
         session,
-        _gateway(session, RevokingLease([True]), provider),
+        _gateway(session, RevokingLease([True]), provider, mismatched_route),
         {"extract_highlights": "summary"},
         lease,
     )
@@ -2251,3 +2255,104 @@ def test_created_run_freezes_server_route_and_residency_governance() -> None:
     assert gateway.call(context, "summary", {"message": "private"}).status == "succeeded"
     assert gateway.call(context, "other", {"message": "private"}).status == "route_not_allowed"
     assert provider.calls == 1
+
+
+def _openai_route() -> ModelRoute:
+    """OpenAI 兼容路由：与默认 route 同一公网域名，仅 provider/model 不同。"""
+    return ModelRoute(**{
+        **_route().__dict__,
+        "provider": "openai_compatible",
+        "model": "deepseek-chat",
+    })
+
+
+def test_http_provider_adapter_openai_compatible_adds_bearer_and_model() -> None:
+    """OpenAI 兼容调用必须注入部署 route 的 model 并携带 Bearer 密钥头。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"source_refs\": []}"}}]},
+            request=request,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: "8.8.8.8",
+        reset_peer_ip=lambda: None,
+        # api_keys 按 route_id 索引；_openai_route() 继承默认 route_id="summary"。
+        api_keys={"summary": "sk-test-placeholder"},
+    ).call(_openai_route(), {"messages": []}, timeout_seconds=1)
+
+    assert result == "{\"source_refs\": []}"
+    assert captured["authorization"] == "Bearer sk-test-placeholder"
+    # model 只来自部署 route 配置，请求侧无法覆盖 provider/model。
+    assert captured["body"] == {"messages": [], "model": "deepseek-chat"}
+
+
+def test_http_provider_adapter_openai_compatible_without_key_sends_no_auth() -> None:
+    """api_keys 未覆盖该 route 时不携带 Authorization 头，仍按兼容格式解包。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers.get("Authorization")
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+            request=request,
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: "8.8.8.8",
+        reset_peer_ip=lambda: None,
+    ).call(_openai_route(), {"messages": []}, timeout_seconds=1)
+
+    assert result == "ok"
+    assert captured["authorization"] is None
+
+
+def test_http_provider_adapter_openai_compatible_rejects_malformed_choices() -> None:
+    """choices 缺失或形状错误时按无效响应拒绝，不把 envelope 泄入 Runtime。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"choices": []}, request=request),
+    ))
+
+    with pytest.raises(ValueError, match="Provider JSON 响应格式无效"):
+        HttpProviderAdapter(
+            client,
+            peer_ip_provider=lambda: "8.8.8.8",
+            reset_peer_ip=lambda: None,
+        ).call(_openai_route(), {"messages": []}, timeout_seconds=1)
+
+
+def test_http_provider_adapter_plain_provider_keeps_legacy_contract() -> None:
+    """非 openai_compatible provider 保持原契约：不注入 model、不解包 choices。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"source_refs": []}, request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    result = HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: "8.8.8.8",
+        reset_peer_ip=lambda: None,
+    ).call(_route(), {"messages": []}, timeout_seconds=1)
+
+    assert result == {"source_refs": []}
+    assert captured["body"] == {"messages": []}

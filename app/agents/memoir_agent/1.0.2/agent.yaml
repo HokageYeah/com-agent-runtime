@@ -1,0 +1,20 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.2：prompts manifest 的 guardrail_policy 由 private_first
+# 调整为 redacted_only。模型请求只携带 prompt 模板与素材引用 ID 占位符（正文与摘要
+# 不出业务边界），因此允许公有 Provider（如 DeepSeek）；private_first 因要求
+# private_residency 与公有 route 互斥，导致所有模型节点 capability_disabled、
+# 只能模板兜底。按不可变 Package 规则发新版本承载该治理调整。
+# contract_version 仍为 1.0.0（Tool/Snapshot/Playback 契约未变，不随 Agent 版本升级）。
+version: 1.0.2
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+prompts:
+  - highlight-extract.v1.md
+  - chapter-plan.v1.md
+  - scene-generate.v1.md
+  - safety-review.v1.md
+  - action-generate.v1.md

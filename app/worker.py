@@ -283,6 +283,8 @@ def configured_model_gateway(
             reset_peer_ip=provider_peer_transport.reset_peer_ip
             if provider_peer_transport
             else None,
+            # 密钥只经部署 env 注入（route_id -> key），进入请求头，绝不写日志。
+            api_keys=runtime_settings.model_provider_api_keys,
         ),
         PolicyEngine(session),
         call_guard=_WorkerDrainingGuard(),

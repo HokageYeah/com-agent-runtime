@@ -207,10 +207,11 @@ def test_template_chapters_scenes_and_actions_form_playable_fallback():
     assert runner.run_node({"node_id": "generate_scenes"}, run, state) == {"node_id": "generate_scenes", "fallback": True}
     assert runner.run_node({"node_id": "generate_actions"}, run, state) == {"node_id": "generate_actions", "fallback": True}
     assert state.chapter_plan == {"chapters": [{"chapter_id": "chapter-1", "source_refs": ["diary:d-1", "completed_bet:b-1"], "kind": "memory_overview"}]}
+    # 模板兜底场景必须带固定安全正文：前端播放卡渲染 scene.body，缺失正文会发布空白卡。
     assert state.scenes == [
-        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "completed_bet:b-1"]},
-        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
-        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:d-1", "completed_bet:b-1"], "body": "这一路的小事，都被好好收藏在这本回忆里。"},
+        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": [], "body": "每一次并肩与交心，都是我们最珍贵的默契。"},
+        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": [], "body": "往后的日子，也一起慢慢写下新的故事吧。"},
     ]
     assert state.actions == [
         {"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000},

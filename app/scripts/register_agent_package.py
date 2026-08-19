@@ -7,10 +7,14 @@
 "AgentPackage 不可用于创建 Run"。本脚本用 AgentPackageService.load()
 复用全部包校验与真实 package_digest 后落库，注册结果与磁盘包严格一致。
 
-用法（在 com-agent-runtime 根目录）::
+用法（推荐走 CLI 入口，doctor 校验 + 按环境加载 .env）::
 
-    .venv/bin/python -m app.scripts.register_agent_package --dry-run
-    .venv/bin/python -m app.scripts.register_agent_package               # 默认 memoir_agent 1.0.1
+    ./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.2
+    ./agent-runtime.sh register development --version 1.0.2 --dry-run
+
+也可直接调用本模块（依赖进程已加载目标环境的 ENVIRONMENT/.env）::
+
+    .venv/bin/python -m app.scripts.register_agent_package --version 1.0.2 --dry-run
     .venv/bin/python -m app.scripts.register_agent_package --agent-id X --version Y
 """
 
@@ -149,7 +153,9 @@ def main() -> int:
         description="把部署目录内的 AgentPackage 幂等注册进 agent_definitions 表",
     )
     parser.add_argument("--agent-id", default="memoir_agent", help="默认 memoir_agent")
-    parser.add_argument("--version", default="1.0.1", help="默认 1.0.1")
+    # version 必填：包版本随每次升级变化，静默默认值会注册过期版本（曾默认
+    # 1.0.1 在 1.0.2 发布后成为陷阱）；注册动作必须显式声明目标版本。
+    parser.add_argument("--version", required=True, help="要注册的包版本，如 1.0.2")
     parser.add_argument(
         "--dry-run", action="store_true", help="只加载并打印，不写数据库"
     )

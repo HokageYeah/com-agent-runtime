@@ -401,6 +401,20 @@ def test_internal_launcher_loop_is_not_listed_as_a_public_command() -> None:
     assert "launcher-loop" not in build_parser().format_help()
 
 
+def test_register_requires_an_explicit_package_version() -> None:
+    """register 子命令必须显式带版本：静默默认值会注册过期包版本。"""
+
+    args = build_parser().parse_args(
+        ("register", "development", "--agent-id", "memoir_agent", "--version", "1.0.2")
+    )
+    assert args.command == "register"
+    assert args.agent_id == "memoir_agent"
+    assert args.version == "1.0.2"
+    assert args.dry_run is False
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(("register", "development"))
+
+
 def test_launcher_loop_consumes_new_outbox_events_on_each_cycle(tmp_path: Path) -> None:
     commands: list[tuple[str, ...]] = []
     sleeps: list[float] = []

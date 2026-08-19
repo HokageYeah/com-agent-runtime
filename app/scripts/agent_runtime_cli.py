@@ -731,6 +731,41 @@ def _prepare(environment: str) -> dict[str, str]:
     return command_environment
 
 
+def _register(
+    environment: str, agent_id: str, version: str, *, dry_run: bool
+) -> None:
+    """注册部署目录内的 AgentPackage 进指定环境的 agent_definitions 表。
+
+    流程与 prepare 同款：先 doctor 校验配置，再以带 ENVIRONMENT 的合并环境
+    启动子进程复用 app.scripts.register_agent_package（与 alembic 迁移同一
+    子进程模式，保证子进程按目标环境加载 .env 与 settings，不重复实现）。
+    """
+
+    command_environment = _doctor(environment)
+    command = (
+        "poetry",
+        "run",
+        "python",
+        "-m",
+        "app.scripts.register_agent_package",
+        "--agent-id",
+        agent_id,
+        "--version",
+        version,
+    )
+    if dry_run:
+        command = (*command, "--dry-run")
+    try:
+        subprocess.run(command, cwd=PROJECT_ROOT, env=command_environment, check=True)
+    except subprocess.CalledProcessError as exc:
+        print("[ERROR] agent package registration failed")
+        raise SystemExit(exc.returncode or 1) from None
+    print(
+        f"[OK] agent package register agent_id={agent_id} version={version} "
+        f"environment={environment}"
+    )
+
+
 def _wait_until_ready(process: subprocess.Popen[bytes], base_url: str) -> None:
     deadline = time.monotonic() + 30
     urls = (
@@ -883,6 +918,21 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument(
             "environment", choices=("development", "test", "production")
         )
+    register = subparsers.add_parser(
+        "register", help="register a deployed agent package into agent_definitions"
+    )
+    register.add_argument(
+        "environment", choices=("development", "test", "production")
+    )
+    register.add_argument("--agent-id", default="memoir_agent", help="default memoir_agent")
+    register.add_argument(
+        "--version",
+        required=True,
+        help="package version to register (e.g. 1.0.2); must be explicit",
+    )
+    register.add_argument(
+        "--dry-run", action="store_true", help="load and print without writing"
+    )
     subparsers.add_parser("verify", help="run isolated PostgreSQL/Redis/Worker harness")
     return parser
 
@@ -905,6 +955,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _doctor(args.environment)
     elif args.command == "prepare":
         _prepare(args.environment)
+    elif args.command == "register":
+        _register(
+            args.environment, args.agent_id, args.version, dry_run=args.dry_run
+        )
     elif args.command == "start":
         _start(args.environment)
     elif args.command == "verify":

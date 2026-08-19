@@ -1,6 +1,6 @@
 # AgentRuntime 敏感与条件环境配置
 
-本文说明 `development` / `test` / `production` 中的 Runtime 服务地址、外部观测治理、HMAC、Snapshot 加密、JWT 验签和私有媒体桶配置。完整启动和真实验收流程见 [VERIFICATION.md](VERIFICATION.md)。
+本文说明 `development` / `test` / `production` 中的 Runtime 服务地址、外部观测治理、HMAC、Snapshot 加密、JWT 验签、私有媒体桶和模型路由配置。完整启动和真实验收流程见 [VERIFICATION.md](VERIFICATION.md)。
 
 ## 1. 安全前提
 
@@ -315,7 +315,46 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 预期：五项全空时只输出 `MEDIA_DISABLED`；五项完整且格式合法时只输出 `MEDIA_CONFIG_OK`；半配置、非法桶名、非法 TTL 或生产 HTTP endpoint 应以固定配置错误失败。此命令不应输出 access key、secret、endpoint 或签名 URL。
 
-## 10. 最终检查顺序
+## 10. 模型路由与 Provider API Key
+
+### 10.1 默认关闭与降级行为
+
+`MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的三个模型节点退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
+
+### 10.2 三个配置键
+
+| 字段 | 作用 | 要求 |
+|---|---|---|
+| `MODEL_ROUTES_JSON` | 部署预注册的路由数组（route_id、provider、model、endpoint、限流、价格、capabilities、allowlist） | 只从部署配置读取；业务请求、Package 和 prompt 不能覆盖 provider/model/endpoint/价格 |
+| `MEMOIR_MODEL_NODE_ROUTES_JSON` | Memoir 三个模型节点（extract_highlights/plan_chapters/generate_scenes）到 route_id 的映射 | 键必须恰好覆盖这三个节点；值必须是已注册的 route_id |
+| `MODEL_PROVIDER_API_KEYS_JSON` | route_id 到 Provider API Key 的映射 | 只进入请求头 `Authorization: Bearer`；不写入 route JSON、日志、trace、响应或 Git |
+
+### 10.3 openai_compatible Provider 与密钥占位
+
+`provider` 为 `openai_compatible` 的路由面向 DeepSeek、Qwen 等标准 chat/completions API：
+
+- 请求体自动补 `model` 字段，固定取 route 配置的 model，请求侧没有任何覆盖入口；
+- 响应自动解包 `choices[0].message.content`，其余 envelope 字段不进入 Runtime；
+- API Key 按 route_id 从 `MODEL_PROVIDER_API_KEYS_JSON` 取出注入请求头；没有对应条目的路由不发送 Authorization。
+
+当前三个环境均已配置 `deepseek-chat` 路由（endpoint 为 DeepSeek 官方 chat/completions，价格字段仅用于内部记账）。若 `MODEL_PROVIDER_API_KEYS_JSON` 中的值仍是占位符“待填入”，Provider 会返回 401，该次模型调用失败并走模板降级；替换为真实 Key 并重启 Worker 后即恢复模型增强。
+
+新增其他 openai_compatible 模型时，复制 DeepSeek 的 route 与节点映射，替换 route_id、model、endpoint、限流和价格，并在 `MODEL_PROVIDER_API_KEYS_JSON` 中补上对应条目，例如：
+
+```dotenv
+# 仅为格式示例；真实 Key 只从 secret manager 或 .env.<environment>.local 注入，绝不提交 Git。
+MODEL_PROVIDER_API_KEYS_JSON={"deepseek-chat":"<由 secret manager 注入>","qwen-plus":"<由 secret manager 注入>"}
+```
+
+### 10.4 无凭据结构校验
+
+```bash
+ENVIRONMENT=development poetry run python -c 'from app.core.config import settings; print("ROUTES", [f"{r.route_id}:{r.provider}" for r in settings.model_routes]); print("NODES", sorted(settings.memoir_model_node_routes)); print("KEYS", sorted(settings.model_provider_api_keys))'
+```
+
+预期：输出路由清单、三个节点映射键和 Key 条目的 route_id 列表，不输出任何 Key 值。
+
+## 11. 最终检查顺序
 
 ### development / test
 

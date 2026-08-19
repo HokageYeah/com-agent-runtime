@@ -1,0 +1,6 @@
+mode: public_summary
+step_labels:
+  load_snapshot: 读取回忆素材
+  extract_highlights: 提炼回忆片段
+  generate_scenes: 生成回忆卡片
+  publish_document: 发布回忆录

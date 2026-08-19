@@ -950,7 +950,12 @@ def test_v1_1_requires_explicit_false_visibility() -> None:
 
 
 def test_tool_wire_version_is_selected_from_trusted_agent_run_identity() -> None:
-    """历史 1.0.0 Run 继续请求 v1，1.0.1 新 Run 显式请求 v1.1。"""
+    """历史 1.0.0 Run 继续请求 v1；1.0.1/1.0.2 新 Run 显式请求 v1.1。
+
+    1.0.2 只改 guardrail 策略、Tool 合同与 1.0.1 一致；若忘记在
+    _TOOL_WIRE_VERSION_BY_AGENT_VERSION 登记，发包前会以
+    TOOL_WIRE_VERSION_INVALID 瞬时失败，本用例锁死该映射不回退。
+    """
 
     versions: list[str] = []
 
@@ -975,7 +980,11 @@ def test_tool_wire_version_is_selected_from_trusted_agent_run_identity() -> None
     assert gateway.get_publish_result(
         "c", "a", "r", "write-2", tool_context=_tool_context("a", "r")
     ) is None
-    assert versions == ["1.0.0", "1.1.0"]
+    assert gateway.get_publish_result(
+        "c", "a", "r", "write-3",
+        tool_context={**_tool_context("a", "r"), "agent_version": "1.0.2"},
+    ) is None
+    assert versions == ["1.0.0", "1.1.0", "1.1.0"]
 
 
 def test_non_2xx_response_with_tool_error_claiming_model_visibility_fails_closed() -> None:

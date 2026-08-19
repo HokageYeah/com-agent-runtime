@@ -82,7 +82,18 @@ def _wire_idempotency_key(logical_key: str) -> str:
     if _WIRE_IDEMPOTENCY_KEY.fullmatch(logical_key):
         return logical_key
     return hashlib.sha256(logical_key.encode("utf-8")).hexdigest()
-_TOOL_WIRE_VERSION_BY_AGENT_VERSION = {"1.0.0": "1.0.0", "1.0.1": "1.1.0"}
+
+
+# agent_version → Tool wire 合同的显式允许表：1.0.0 走四字段/六码 v1，
+# 1.0.1 起走 v1.1 完整错误合同；1.0.2 只改了 prompt manifest 的 guardrail
+# 策略（redacted_only），Tool 合同与 1.0.1 完全一致，沿用 v1.1.0。
+# 新版本包注册时若忘记在此登记，Worker 会在发包前以 TOOL_WIRE_VERSION_INVALID
+# 瞬时失败（无日志、无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
+_TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
+    "1.0.0": "1.0.0",
+    "1.0.1": "1.1.0",
+    "1.0.2": "1.1.0",
+}
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 
 
@@ -748,12 +759,20 @@ class ToolGateway:
         """从可信 AgentRun identity 选择 Tool wire；Mock 单测默认最新 wire。
 
         该选择不能来自 Tool input 或 Provider response。历史 1.0.0 Run 明确请求
-        四字段/六码 v1，1.0.1 新 Run 才请求 v1.1 的完整错误合同。
+        四字段/六码 v1，1.0.1 起新 Run 请求 v1.1 的完整错误合同。
         """
         if not context:
             return _DEFAULT_TOOL_WIRE_VERSION
         version = _TOOL_WIRE_VERSION_BY_AGENT_VERSION.get(context.get("agent_version", ""))
         if version is None:
+            # agent_version 是经过格式校验的受控标识（非正文），允许入日志。
+            # 该 raise 发生在发送前且历史上两次造成"瞬时 WORKFLOW_NODE_FAILED
+            # 且无任何工具日志"的静默故障（升包未登记 / 旧 Worker 残留进程），
+            # 这行日志是排查该症状的唯一线索，不能省。
+            logging.warning(
+                "Tool wire 版本未登记，发送前中止 agent_version=%s",
+                context.get("agent_version", ""),
+            )
             raise ValueError("TOOL_WIRE_VERSION_INVALID")
         return version
 

@@ -12,13 +12,14 @@
 
 ## 一键配置、启动与验收
 
-项目根目录的 `agent-runtime.sh` 提供五个对外命令：
+项目根目录的 `agent-runtime.sh` 提供六个对外命令：
 
 | 命令 | 用途 | 是否修改数据 |
 |---|---|---|
 | `configure development|test` | 交互生成 `.env.<env>.local` 和随机本机密钥 | 只写本机忽略文件 |
 | `doctor development|test|production` | 检查必填字段、占位值、JSON 与文件权限 | 否 |
 | `prepare development|test|production` | 先 doctor，再执行 `alembic upgrade head` 和单 head 检查 | 是，仅数据库迁移 |
+| `register development|test|production --agent-id <id> --version <ver> [--dry-run]` | 先 doctor，再把部署目录内的 AgentPackage 幂等注册进 `agent_definitions` 表 | 是，仅写 `agent_definitions` |
 | `start development|test|production` | 先 prepare，再前台托管 API、launcher、Worker、Reconciler | 是，运行正常业务流程 |
 | `verify` | 运行隔离 PostgreSQL/Redis/真实 Worker harness | 只写临时容器，结束后 `down -v` |
 
@@ -164,7 +165,7 @@ docker volume ls --filter name=agent-runtime-redis-harness
 
 `configure` 不允许写入 `.env.production.local`。生产值从部署平台或 secret manager 注入，并由所有 Runtime 进程共享。
 
-生产 `SERVICE_BASE_URL`、受治理 exporter、HMAC/Fernet/JWT 以及 S3 兼容私有桶的完整配置规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
+生产 `SERVICE_BASE_URL`、受治理 exporter、HMAC/Fernet/JWT、S3 兼容私有桶以及模型路由与 Provider API Key 的完整配置规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
 
 | 分组 | 必填配置 | 要求 |
 |---|---|---|
@@ -175,7 +176,7 @@ docker volume ls --filter name=agent-runtime-redis-harness
 | 回忆录联通调用方 | 不适用 | `MEMORY_RUNTIME_BASE_URL`、`MEMORY_RUNTIME_CLIENT_ID`、`MEMORY_RUNTIME_KEY_ID`、`MEMORY_RUNTIME_SECRET` 与 `MEMORY_RUNTIME_TIMEOUT_SECONDS` 仅由 `couple-diary-b` 持有并创建出站 HMAC；AgentRuntime 仅作为已签名 `/api/v1/runtime/capabilities` 目标，继续使用本表既有 Runtime 入站认证配置 |
 | 加密与登录 | `MEMORY_SNAPSHOT_FERNET_KEY/USER_AUTH_JWT_SECRET/USER_AUTH_JWT_ISSUER` | 从 secret manager 注入；轮换前先制定旧数据解密和 token 过渡方案 |
 | 共享流控 | `RUNTIME_REDIS_URL` | 使用独立 namespace/DB，故障时模型调用 fail-closed |
-| 模型路由 | `MODEL_ROUTES_JSON/MEMOIR_MODEL_NODE_ROUTES_JSON` | 只从部署配置读取，业务请求、Package 和 prompt 不能覆盖 |
+| 模型路由 | `MODEL_ROUTES_JSON/MEMOIR_MODEL_NODE_ROUTES_JSON/MODEL_PROVIDER_API_KEYS_JSON` | 只从部署配置读取，业务请求、Package 和 prompt 不能覆盖 |
 | 审计与观测 | `RUNTIME_AUDIT_SINK_CONFIGURED=true` | 外部 exporter 默认关闭；启用时必须补齐分级、区域、保留、访问审计和 purge 能力 |
 
 生产模型路由示例只表示字段结构：
@@ -183,9 +184,10 @@ docker volume ls --filter name=agent-runtime-redis-harness
 ```env
 MODEL_ROUTES_JSON=[{"route_id":"memoir-private-v1","provider":"trusted_gateway","model":"approved-structured-model","endpoint":"https://model-gateway.example.com/v1","rate_limit_key":"memoir-private","max_concurrency":4,"rpm_limit":60,"tpm_limit":120000,"timeout_seconds":30,"permit_ttl_seconds":35,"settle_margin_seconds":5,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":32768,"max_output_tokens":4096,"enabled":true,"allowed_tenant_ids":["couple-diary"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]
 MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_chapters":"memoir-private-v1","generate_scenes":"memoir-private-v1"}
+MODEL_PROVIDER_API_KEYS_JSON={"memoir-private-v1":"<由 secret manager 注入的 Provider Key>"}
 ```
 
-替换示例 endpoint、model、限流和价格前，需要由部署管理员确认驻留、许可和成本单位。Provider 凭据不属于 route JSON，由受信模型网关或部署密钥边界注入；不得放入业务请求、Package、prompt 或 URL。
+替换示例 endpoint、model、限流和价格前，需要由部署管理员确认驻留、许可和成本单位。Provider 凭据不属于 route JSON；`openai_compatible` 路由的 API Key 通过 `MODEL_PROVIDER_API_KEYS_JSON`（route_id -> key）从部署 env 或 secret manager 注入请求头，不得放入业务请求、Package、prompt、route JSON 或 URL，也不写入日志。
 
 注入配置后先执行：
 
@@ -195,6 +197,15 @@ MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_ch
 ```
 
 预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 和周期 launcher 分为独立 workload，并使用同一权威数据库与配置版本。
+
+AgentPackage 不随部署自动入库：正式服务链路只读 `agent_definitions` 表内的 definition，从不自动同步磁盘包。发布或升级包版本后，须在启动服务前把它幂等注册进目标环境（`--version` 必填，防止静默注册过期版本；`--dry-run` 只加载打印不写库，可用于预检库内现状）：
+
+```bash
+./agent-runtime.sh register production --agent-id memoir_agent --version <部署包版本>
+./agent-runtime.sh register production --agent-id memoir_agent --version <部署包版本> --dry-run
+```
+
+预期：doctor 先输出 `[OK] configuration ...`，随后输出磁盘包加载成功（含 package digest 与节点数）和 `[OK] agent package register ...`；库内已存在相同 digest 的同版本记录时幂等退出不重写。development/test 同样使用该命令，仅环境参数不同。
 
 ### 6. 常见失败和观察结果
 
@@ -206,6 +217,7 @@ MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_ch
 | Runtime readiness 503 | 根据 checks 修复 database/trusted client/audit/callback 配置 | `/api/v1/runtime/health/ready` 返回 200 |
 | `model_enhancement_available=false` | 检查 Redis、route 治理字段和节点 route 映射 | 验签 capabilities 中出现允许的逻辑 model policy |
 | Worker 退出 | 先保留受控错误码，检查 DB/Redis/connector 与 package | supervisor 回收其他进程，无孤儿进程 |
+| create Run 409 提示 AgentPackage 不可用 | 用 `register` 把所需 `--version` 注册进目标环境库 | 注册后 create Run 正常受理 |
 
 ## 脚本行为定向回归
 

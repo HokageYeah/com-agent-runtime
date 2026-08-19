@@ -93,10 +93,11 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
     )
 
     assert result == {"node_id": "generate_scenes", "fallback": True}
+    # 模板兜底场景带固定安全正文，保证模型输出被拒时发布卡片不空白。
     assert state.scenes == [
-        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"]},
-        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": []},
-        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": []},
+        {"scene_id": "scene-1", "scene_type": "summary", "source_refs": ["diary:diary-1"], "body": "这一路的小事，都被好好收藏在这本回忆里。"},
+        {"scene_id": "scene-2", "scene_type": "summary", "source_refs": [], "body": "每一次并肩与交心，都是我们最珍贵的默契。"},
+        {"scene_id": "scene-3", "scene_type": "summary", "source_refs": [], "body": "往后的日子，也一起慢慢写下新的故事吧。"},
     ]
     assert state.fallback_flags == ["model_invalid_scenes", "template_scenes"]
     assert gateway.rejections == [("generate_scenes", ("UNKNOWN_SOURCE_REF", "SCENE_COUNT_INVALID"))]
