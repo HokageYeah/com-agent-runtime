@@ -2356,3 +2356,136 @@ def test_http_provider_adapter_plain_provider_keeps_legacy_contract() -> None:
 
     assert result == {"source_refs": []}
     assert captured["body"] == {"messages": []}
+
+
+def test_memoir_adapter_injects_material_texts_into_provider_messages() -> None:
+    """Phase A：adapter 必须把 request["materials"] 真实文本送进 Provider 消息。
+
+    - 有 materials 时不再使用 [SOURCE_REF] 占位符（模型终于能看到真实细节）；
+    - ref 不在本次候选 allowlist 内的素材文本必须丢弃（防越权注入）；
+    - 无 materials 时保持占位符回退（旧请求形状零破坏，由现有测试隐式覆盖）。
+    """
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.request: object = None
+
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 3000
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            self.request = request
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"extract_highlights": "summary"}, lease,  # type: ignore[arg-type]
+    ).call(
+        "run-1", "extract_highlights",
+        {
+            "prompt_id": "highlight-extract",
+            "prompt_version": "v1",
+            "model_policy": "strict",
+            "context": {},
+            "input": {"source_refs": ["diary:d1", "diary:d2"]},
+            "materials": [
+                {"source_ref": "diary:d1", "text": "火锅之夜：今晚一起吃了火锅"},
+                {"source_ref": "diary:d2", "text": "周末去了海边看日落"},
+                # ref 不在候选 allowlist：必须被丢弃，不能借道进入上下文。
+                {"source_ref": "diary:forged", "text": "越权素材文本"},
+            ],
+        },
+    )
+
+    assert result.status == "succeeded"
+    assert isinstance(gateway.request, dict)
+    messages_text = str(gateway.request["messages"])
+    # 真实素材文本进入 Provider 消息（模型引用细节的唯一来源）。
+    assert "火锅之夜" in messages_text
+    assert "海边看日落" in messages_text
+    # 占位符口径被真实文本取代；越权 ref 的文本绝不出现。
+    assert "[SOURCE_REF]" not in messages_text
+    assert "越权素材文本" not in messages_text
+
+
+def test_memoir_adapter_repair_context_includes_materials_and_candidate() -> None:
+    """repair 上下文 = 素材真实文本 + 原始候选，修复时两者都必须可见。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id, run.agent_version = "memoir_agent", "1.0.0"
+    step.step_name = "extract_highlights"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.request: object = None
+
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 3000
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            self.request = request
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"extract_highlights": "summary"}, lease,  # type: ignore[arg-type]
+    ).repair(
+        "run-1",
+        "extract_highlights",
+        {
+            "prompt_id": "highlight-extract",
+            "prompt_version": "v1",
+            "model_policy": "strict",
+            "context": {},
+            "input": {"source_refs": ["diary:d1"]},
+            "materials": [
+                {"source_ref": "diary:d1", "text": "火锅之夜：今晚一起吃了火锅"},
+            ],
+        },
+        "not-json",
+    )
+
+    assert result.status == "succeeded"
+    assert isinstance(gateway.request, dict)
+    messages_text = str(gateway.request["messages"])
+    # 素材文本与原始候选同时进入 repair 上下文。
+    assert "火锅之夜" in messages_text
+    assert "not-json" in messages_text

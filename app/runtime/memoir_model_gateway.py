@@ -99,9 +99,14 @@ class MemoirModelGatewayAdapter:
             token_budget = self._contexts.node_token_budget(
                 node_id, self._model_gateway.context_token_budget(route_id, prompt)
             )
+            # Phase A：Runner 脱敏通道携带素材真实文本时优先使用（模型引用
+            # 真实细节的唯一来源）；无 materials 的旧请求形状回退占位符，零破坏。
+            context_materials = _candidate_materials(request.get("materials"), refs) or [
+                {"source_ref": ref, "text": "[SOURCE_REF]"} for ref in refs
+            ]
             node_context = self._contexts.build_node_context(
                 trusted_instructions=prompt.template,
-                materials=[{"source_ref": ref, "text": "[SOURCE_REF]"} for ref in refs],
+                materials=context_materials,
                 tool_results=[],
                 token_budget=token_budget,
             )
@@ -205,14 +210,15 @@ class MemoirModelGatewayAdapter:
                 node_id,
                 self._model_gateway.context_token_budget(route_id, repair_prompt),
             )
+            # repair 上下文 = 素材真实文本 + 原始候选：修复时模型需要同时看到
+            # 真实素材（判断该引用哪些细节）与待修复候选。
+            repair_materials = _candidate_materials(request.get("materials"), refs)
+            repair_materials.append(
+                {"source_ref": "model_candidate", "text": raw_candidate},
+            )
             repair_context = self._contexts.build_node_context(
                 trusted_instructions=repair_prompt.template,
-                materials=[
-                    {
-                        "source_ref": "model_candidate",
-                        "text": raw_candidate,
-                    },
-                ],
+                materials=repair_materials,
                 tool_results=[],
                 token_budget=token_budget,
             )
@@ -293,6 +299,32 @@ class MemoirModelGatewayAdapter:
                 raise ValueError("MODEL_REPAIR_INPUT_INVALID") from exc
             return serialized[:_MAX_REPAIR_CANDIDATE_CHARS]
         raise ValueError("MODEL_REPAIR_INPUT_INVALID")
+
+
+def _candidate_materials(
+    materials: object, allowed_refs: list[str]
+) -> list[dict[str, str]]:
+    """从 safe_request 提取素材真实文本，只保留候选 allowlist 内的条目。
+
+    素材文本由 Runner 的脱敏通道（text_digest 二次脱敏）产出，仅在内存中进入
+    Provider 请求；这里做最后一道形状校验（ref 必须 ∈ 候选引用、text 必须是非空
+    字符串、上限 8 条与 Runner 侧口径一致），防止越权 ref 或畸形载荷借道注入。
+    """
+    if not isinstance(materials, list):
+        return []
+    allowed = [
+        {
+            "source_ref": item["source_ref"],
+            "text": item["text"],
+        }
+        for item in materials
+        if isinstance(item, Mapping)
+        and isinstance(item.get("source_ref"), str)
+        and item["source_ref"] in allowed_refs
+        and isinstance(item.get("text"), str)
+        and item["text"]
+    ]
+    return allowed[:8]
 
 
 def _candidate_source_refs(candidate_input: Mapping[str, object]) -> list[str]:

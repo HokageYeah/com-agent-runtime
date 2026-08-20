@@ -460,3 +460,105 @@ def test_canonical_material_refs_flow_into_model_allowlist() -> None:
         "source_refs": ["diary:d1", "completed_bet:b1"],
         "mode": "template",
     }
+
+
+def test_sanitize_canonical_materials_uses_text_digest_for_all_five_types() -> None:
+    """Phase A：payload 带 text_digest 时五类素材全部产出可引用脱敏文本。
+
+    - digest 是业务端第一层脱敏后的截断摘要，Runtime 复用统一二次脱敏管道，
+      敏感标识符仍被替换；长度上限放宽到 200（digest 摘要无下游发布消费方）；
+    - 原 ref-only 三类（便签/心愿/清单）有 digest 后同样 sensitive=False，
+      source_ref 可进 allowlist，模型上下文可拿到真实细节文本。
+    """
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    long_digest = "长文" + "细" * 250
+    state = AgentState(
+        snapshot={
+            "materials": [
+                {
+                    "material_type": "diary",
+                    "source_ref": "diary:d1",
+                    "sanitized_payload": {"id": "d1", "text_digest": "火锅之夜：今晚吃了火锅，电话13800138000"},
+                },
+                {
+                    "material_type": "handbook_note",
+                    "source_ref": "handbook_note:h1",
+                    "sanitized_payload": {"id": "h1", "text_digest": "记得周五一起去看电影"},
+                },
+                {
+                    "material_type": "matured_wish",
+                    "source_ref": "matured_wish:w1",
+                    "sanitized_payload": {"id": "w1", "text_digest": "一起去看海"},
+                },
+                {
+                    "material_type": "bucket_list_completion",
+                    "source_ref": "bucket_list_completion:c1",
+                    "sanitized_payload": {"id": "c1", "text_digest": "一起看日出"},
+                },
+                {
+                    "material_type": "diary",
+                    "source_ref": "diary:d2",
+                    "sanitized_payload": {"id": "d2", "text_digest": long_digest},
+                },
+            ]
+        }
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    materials = state.sanitized_material["materials"]
+    by_ref = {item["source_ref"]: item for item in materials}
+    # 五类全部 sensitive=False：ref 进 allowlist，text 供模型上下文引用。
+    assert {ref: item["sensitive"] for ref, item in by_ref.items()} == {
+        "diary:d1": False,
+        "diary:d2": False,
+        "handbook_note:h1": False,
+        "matured_wish:w1": False,
+        "bucket_list_completion:c1": False,
+    }
+    # digest 进入 text 字段（与 legacy 元数据 summary 区分），敏感标识仍被替换。
+    assert by_ref["diary:d1"]["text"] == "火锅之夜：今晚吃了火锅，电话[REDACTED]"
+    assert by_ref["handbook_note:h1"]["text"] == "记得周五一起去看电影"
+    assert by_ref["matured_wish:w1"]["text"] == "一起去看海"
+    assert by_ref["bucket_list_completion:c1"]["text"] == "一起看日出"
+    # 长摘要截断到 200 字，保证有界。
+    assert len(by_ref["diary:d2"]["text"]) == 200
+
+
+def test_text_digest_falls_back_to_legacy_view_without_digest() -> None:
+    """旧快照（payload 无 text_digest）保持现状：元数据 summary / ref-only 不变。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(
+        snapshot={
+            "materials": [
+                {
+                    "material_type": "diary",
+                    "source_ref": "diary:d1",
+                    "sanitized_payload": {"id": "d1", "entry_date": "2026-08-01"},
+                },
+                {
+                    "material_type": "handbook_note",
+                    "source_ref": "handbook_note:h1",
+                    "sanitized_payload": {"id": "h1"},
+                },
+            ]
+        }
+    )
+
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    materials = state.sanitized_material["materials"]
+    # diary 走 legacy 元数据摘要（summary，无 text）；便签保持 ref-only。
+    assert materials[0] == {
+        "source_ref": "diary:d1",
+        "type": "diary",
+        "sensitive": False,
+        "summary": '{"id":"d1","entry_date":"2026-08-01"}',
+    }
+    assert materials[1] == {
+        "source_ref": "handbook_note:h1",
+        "type": "handbook_note",
+        "sensitive": True,
+    }

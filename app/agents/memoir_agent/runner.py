@@ -96,7 +96,9 @@ class _SceneOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scene_id: str
-    scene_type: Literal["summary"]
+    # 六种冻结场景类型，与业务端 PLAYBACK_SCENE_TYPES / 前端 KNOWN_SCENE_TYPES
+    # 三端对齐；image 依赖 Phase D 媒体清单（media_manifest 恒空）暂不生成。
+    scene_type: Literal["summary", "cover", "stats", "diary_highlight", "bet_highlight", "milestone"]
     source_refs: list[str]
     # 正文为可选字段，最终仍由 safety_review 统一限制长度与情绪风险表达。
     body: str | None = None
@@ -125,6 +127,25 @@ _TEMPLATE_SCENE_BODIES: tuple[str, ...] = (
     "每一次并肩与交心，都是我们最珍贵的默契。",
     "往后的日子，也一起慢慢写下新的故事吧。",
 )
+
+# 播放词表（三端冻结契约的 Runtime 侧口径）：业务端发布白名单与前端 adapter
+# 白名单均已放行全部 7 场景/6 动作；Runtime 生成集排除 image（Phase D 媒体未就绪，
+# media_manifest 恒空）与 focus_image/play_tts（M4 恒关动作）。
+_SCENE_TYPES: tuple[str, ...] = (
+    "summary", "cover", "stats", "diary_highlight", "bet_highlight", "milestone",
+)
+_ACTION_TYPES: tuple[str, ...] = ("show_card", "type_text", "hold", "transition")
+
+# 规则动作映射：动作是调度结构而非内容，按 scene_type 确定性推导（不接模型，
+# 杜绝幻觉调度与额外模型调用）；type_text 打字机正文需要更长停留时间。
+_SCENE_ACTION_RULES: dict[str, tuple[str, int]] = {
+    "cover": ("show_card", 3000),
+    "stats": ("show_card", 3000),
+    "diary_highlight": ("type_text", 6000),
+    "bet_highlight": ("type_text", 6000),
+    "milestone": ("show_card", 3000),
+    "summary": ("show_card", 3000),
+}
 
 
 class MemoirNodeRunner:
@@ -190,14 +211,17 @@ class MemoirNodeRunner:
             refs = highlights.get("source_refs", [])
             safe_refs = [ref for ref in refs if isinstance(ref, str)][:8] if isinstance(refs, list) else []
             chapter_request: dict[str, object] = {"source_refs": safe_refs}
+            # 章节规划只携带高光选中 refs 对应的素材文本，省 token 且不越权。
+            chapter_materials = self._safe_material_texts(state.sanitized_material, safe_refs)
             model_data = self._model_data(
                 run.run_id, "plan_chapters", chapter_request, run.agent_version,
+                materials=chapter_materials,
             )
             validated_chapters = self._valid_chapters(model_data, safe_refs)
             if validated_chapters is None and model_data is not None:
                 repaired = self._repair_model_data(
                     run.run_id, "plan_chapters", chapter_request, model_data,
-                    run.agent_version,
+                    run.agent_version, materials=chapter_materials,
                 )
                 validated_chapters = self._valid_chapters(repaired, safe_refs)
             if validated_chapters is not None:
@@ -222,8 +246,13 @@ class MemoirNodeRunner:
             chapters = plan.get("chapters", [])
             safe_chapters = self._safe_chapters(chapters)
             scene_request: dict[str, object] = {"chapters": safe_chapters}
+            # 场景生成只携带章节选中 refs 对应的素材文本，省 token 且不越权。
+            scene_materials = self._safe_material_texts(
+                state.sanitized_material, self._source_refs(safe_chapters),
+            )
             model_data = self._model_data(
                 run.run_id, "generate_scenes", scene_request, run.agent_version,
+                materials=scene_materials,
             )
             validated_scenes = self._valid_scenes(
                 model_data,
@@ -232,7 +261,7 @@ class MemoirNodeRunner:
             if validated_scenes is None and model_data is not None:
                 repaired = self._repair_model_data(
                     run.run_id, "generate_scenes", scene_request, model_data,
-                    run.agent_version,
+                    run.agent_version, materials=scene_materials,
                 )
                 validated_scenes = self._valid_scenes(
                     repaired,
@@ -262,7 +291,23 @@ class MemoirNodeRunner:
             return {"node_id": "generate_scenes", "fallback": True}
         if node.get("node_id") == "generate_actions":
             scenes = state.scenes if isinstance(state.scenes, list) else []
-            state.actions = [{"action_id": f"action-{index}", "scene_id": scene.get("scene_id"), "action_type": "show_card", "duration_ms": 3000} for index, scene in enumerate(scenes, start=1) if isinstance(scene, dict) and isinstance(scene.get("scene_id"), str)]
+            # 动作按 scene_type 确定性映射：日记/赌约精选卡正文用打字机呈现
+            # （type_text，停留更久），其余用 show_card；映射表冻结在
+            # _SCENE_ACTION_RULES，不接模型，保证零幻觉调度。
+            rule_actions: list[dict[str, object]] = []
+            for index, scene in enumerate(scenes, start=1):
+                if not (isinstance(scene, dict) and isinstance(scene.get("scene_id"), str)):
+                    continue
+                action_type, duration_ms = _SCENE_ACTION_RULES.get(
+                    str(scene.get("scene_type")), ("show_card", 3000),
+                )
+                rule_actions.append({
+                    "action_id": f"action-{index}",
+                    "scene_id": scene["scene_id"],
+                    "action_type": action_type,
+                    "duration_ms": duration_ms,
+                })
+            state.actions = rule_actions
             state.fallback_flags.append("template_actions")
             logging.info("MemoirAgent 规则动作完成 run_id=%s action_count=%s", run.run_id, len(state.actions))
             return {"node_id": "generate_actions", "fallback": True}
@@ -270,8 +315,11 @@ class MemoirNodeRunner:
             # 原始 snapshot 不得在此节点回读，高光只可消费脱敏视图中的非敏感引用。
             refs = self._safe_material_refs(state.sanitized_material)
             highlight_request: dict[str, object] = {"source_refs": refs}
+            # 高光抽取携带全部非敏感素材文本（digest 通道），让模型看到真实细节。
+            highlight_materials = self._safe_material_texts(state.sanitized_material, refs)
             model_data = self._model_data(
                 run.run_id, "extract_highlights", highlight_request, run.agent_version,
+                materials=highlight_materials,
             )
             validated_highlights = self._valid_highlights(model_data, refs)
             if validated_highlights is None and model_data is not None:
@@ -281,6 +329,7 @@ class MemoirNodeRunner:
                     highlight_request,
                     model_data,
                     run.agent_version,
+                    materials=highlight_materials,
                 )
                 validated_highlights = self._valid_highlights(repaired, refs)
             if validated_highlights is not None:
@@ -676,6 +725,24 @@ class MemoirNodeRunner:
                 invalid_count += 1
                 continue
             payload = item.get("sanitized_payload")
+            # Phase A：业务端 text_digest（第一层脱敏后的截断摘要）存在时优先直出。
+            # 全五类均可携带 digest；Runtime 只复用统一二次脱敏管道并放宽长度到
+            # 200（digest 仅供模型上下文引用，无下游发布消费方，放宽无副作用）。
+            # 存入 text 字段与 legacy 元数据 summary 区分：后者是 ID/日期等
+            # 结构化 JSON 摘要，对模型引用真实细节没有增量价值。
+            digest = payload.get("text_digest") if isinstance(payload, Mapping) else None
+            if isinstance(digest, str) and digest.strip():
+                materials.append(
+                    {
+                        "source_ref": source_ref,
+                        "type": material_type,
+                        "sensitive": False,
+                        "text": MemoirNodeRunner._sanitize_material_summary(
+                            digest, limit=200
+                        ),
+                    }
+                )
+                continue
             if material_type in summary_types and isinstance(payload, Mapping):
                 # 元数据摘要：白名单元数据紧凑 JSON 后复用统一截断/脱敏，
                 # 与 legacy content 摘要走同一条 _sanitize_material_summary 管线。
@@ -698,10 +765,14 @@ class MemoirNodeRunner:
         return materials, sensitive_count, invalid_count
 
     @staticmethod
-    def _sanitize_material_summary(content: str) -> str:
-        """替换敏感标识与可识别昵称，并将普通素材摘要限制在 80 字内。"""
+    def _sanitize_material_summary(content: str, limit: int = 80) -> str:
+        """替换敏感标识与可识别昵称，并将素材摘要限制在给定字数内。
+
+        默认 80 字（legacy 元数据摘要）；text_digest 路径放宽到 200：
+        digest 本身在业务端已截断，二次放宽只为避免标题+正文被再次切半。
+        """
         redacted = _MATERIAL_SENSITIVE_TEXT.sub("[REDACTED]", content)
-        return _MATERIAL_SELF_NICKNAME.sub("我", redacted).strip()[:80]
+        return _MATERIAL_SELF_NICKNAME.sub("我", redacted).strip()[:limit]
 
     @staticmethod
     def _safe_material_refs(sanitized_material: object) -> list[str]:
@@ -718,6 +789,39 @@ class MemoirNodeRunner:
             and item.get("sensitive") is False
             and isinstance(item.get("source_ref"), str)
         ))[:8]
+
+    @staticmethod
+    def _safe_material_texts(
+        sanitized_material: object, allowed_refs: list[str],
+    ) -> list[dict[str, str]]:
+        """提取脱敏视图中带真实文本（text_digest 派生）的素材，最多八条。
+
+        只取 sensitive=False 且 text 非空且 source_ref 在 allowed_refs 内的条目：
+        与引用白名单双保险，模型只能看到当前节点已授权引用的素材文本。
+        text 由 sanitize 阶段统一脱敏并截断，此处不再复制或改写。
+        """
+        if not isinstance(sanitized_material, Mapping):
+            return []
+        materials = sanitized_material.get("materials")
+        if not isinstance(materials, list):
+            return []
+        allowlist = set(allowed_refs)
+        texts: list[dict[str, str]] = []
+        for item in materials:
+            if len(texts) >= 8:
+                break
+            if not isinstance(item, Mapping):
+                continue
+            ref, text = item.get("source_ref"), item.get("text")
+            if (
+                item.get("sensitive") is False
+                and isinstance(ref, str)
+                and ref in allowlist
+                and isinstance(text, str)
+                and text.strip()
+            ):
+                texts.append({"source_ref": ref, "text": text})
+        return texts
 
     @staticmethod
     def _playback_source_refs(scenes: object) -> set[str]:
@@ -758,7 +862,7 @@ class MemoirNodeRunner:
         if not all(
             isinstance(scene, dict)
             and isinstance(scene.get("scene_id"), str)
-            and scene.get("scene_type") == "summary"
+            and scene.get("scene_type") in _SCENE_TYPES
             and isinstance(scene.get("source_refs"), list)
             and all(isinstance(ref, str) for ref in scene["source_refs"])
             and ("body" not in scene or isinstance(scene["body"], str))
@@ -777,7 +881,7 @@ class MemoirNodeRunner:
                 isinstance(action, dict)
                 and isinstance(action.get("action_id"), str)
                 and action.get("scene_id") in scene_ids
-                and action.get("action_type") == "show_card"
+                and action.get("action_type") in _ACTION_TYPES
                 and isinstance(action.get("duration_ms"), int)
                 and 1 <= action["duration_ms"] <= 30000
                 for action in actions
@@ -787,12 +891,15 @@ class MemoirNodeRunner:
 
     def _model_data(
         self, run_id: str, node_id: str, request: dict[str, object], agent_version: str,
+        materials: list[dict[str, str]] | None = None,
     ) -> object | None:
         """只接受成功 Gateway 的 data；状态和异常一律由确定性模板安全降级。"""
         if self._model_gateway is None:
             return None
         try:
-            safe_request = self._safe_model_request(node_id, request, agent_version)
+            safe_request = self._safe_model_request(
+                node_id, request, agent_version, materials=materials,
+            )
             if safe_request is None:
                 return None
             result = self._model_gateway.call(run_id, node_id, safe_request)
@@ -811,6 +918,7 @@ class MemoirNodeRunner:
         request: dict[str, object],
         invalid_output: object,
         agent_version: str,
+        materials: list[dict[str, str]] | None = None,
     ) -> object | None:
         """最多调用一次受信任 repair 边界；原输出只沿当前调用栈短暂传递。"""
         if self._model_gateway is None:
@@ -819,7 +927,9 @@ class MemoirNodeRunner:
         if not callable(repair):
             return None
         try:
-            safe_request = self._safe_model_request(node_id, request, agent_version)
+            safe_request = self._safe_model_request(
+                node_id, request, agent_version, materials=materials,
+            )
             if safe_request is None:
                 return None
             result = repair(run_id, node_id, safe_request, invalid_output)
@@ -833,8 +943,14 @@ class MemoirNodeRunner:
 
     def _safe_model_request(
         self, node_id: str, request: dict[str, object], agent_version: str,
+        materials: list[dict[str, str]] | None = None,
     ) -> dict[str, object] | None:
-        """构造不含模板正文与素材正文的可观测请求摘要。"""
+        """构造进入网关的执行请求（含素材脱敏文本通道）。
+
+        隐私边界：materials 携带 text_digest 派生的脱敏文本，只在内存中经
+        ContextManager 进入 Provider 请求；可观测 context 摘要仍保持占位符
+        口径（source_ref_count / redaction 计数），素材正文绝不进入 audit 视图。
+        """
         prompt_id = {
             "extract_highlights": "highlight-extract",
             "plan_chapters": "chapter-plan",
@@ -853,13 +969,18 @@ class MemoirNodeRunner:
             tool_results=[], token_budget=256,
         )
         # 仅传 Prompt 身份、策略和无正文上下文摘要；模板正文绝不进入可观测 DTO。
-        return {
+        safe_request: dict[str, object] = {
             "prompt_id": prompt.prompt_id,
             "prompt_version": prompt.version,
             "model_policy": prompt.model_policy,
             "context": context.safe_summary(),
             "input": request,
         }
+        # 素材文本通道：非空才挂键（旧快照无 text_digest 时形状与历史完全一致，
+        # 现有网关与测试夹具零破坏）。
+        if materials:
+            safe_request["materials"] = materials
+        return safe_request
 
     @staticmethod
     def _request_source_refs(request: Mapping[str, object]) -> list[str]:
@@ -920,14 +1041,15 @@ class MemoirNodeRunner:
         scenes = output.model_dump()["scenes"]
         if not 3 <= len(scenes) <= 8:
             return None
-        if not all(isinstance(scene, Mapping) and isinstance(scene.get("scene_id"), str) and scene.get("scene_type") == "summary" and isinstance(scene.get("source_refs"), list) and all(isinstance(ref, str) and ref in allowed_refs for ref in scene["source_refs"]) for scene in scenes):
+        if not all(isinstance(scene, Mapping) and isinstance(scene.get("scene_id"), str) and scene.get("scene_type") in _SCENE_TYPES and isinstance(scene.get("source_refs"), list) and all(isinstance(ref, str) and ref in allowed_refs for ref in scene["source_refs"]) for scene in scenes):
             return None
         if len({scene["scene_id"] for scene in scenes}) != len(scenes):
             return None
         return [
             {
                 "scene_id": scene["scene_id"],
-                "scene_type": "summary",
+                # 场景类型透传（六种冻结类型），前端按类型渲染差异化卡片。
+                "scene_type": scene["scene_type"],
                 "source_refs": list(dict.fromkeys(scene["source_refs"])),
                 **({"body": scene["body"]} if isinstance(scene.get("body"), str) else {}),
             }
