@@ -601,13 +601,18 @@ def test_model_scenes_with_unknown_scene_type_use_template() -> None:
 
 def test_generate_actions_maps_scene_types_to_action_types() -> None:
     """B1：动作按 scene_type 确定性映射——日记/赌约精选卡正文用打字机呈现
-    （type_text，停留更久），其余用 show_card；映射冻结在 Runner，不接模型。"""
+    （type_text），其余用 show_card；映射冻结在 Runner，不接模型。
+    type_text 停留时长按正文长度自适应：len(body)*75+1500 夹在 [3000, 9000]，
+    对齐前端 75ms/字打字机节奏（40 字 → 4500ms），短正文不再固定空等 6000ms。"""
 
     state = AgentState()
     state.apply_tool_output("scenes", [
-        {"scene_id": "scene-1", "scene_type": "cover", "source_refs": []},
-        {"scene_id": "scene-2", "scene_type": "diary_highlight", "source_refs": []},
-        {"scene_id": "scene-3", "scene_type": "milestone", "source_refs": []},
+        {"scene_id": "scene-1", "scene_type": "cover", "source_refs": [], "body": "封面主题"},
+        # 40 字正文：40*75+1500=4500ms，落在区间内验证公式本体。
+        {"scene_id": "scene-2", "scene_type": "diary_highlight", "source_refs": [], "body": "字" * 40},
+        # 无 body 的异常场景：长度按 0 计，命中 3000ms 下限兜底。
+        {"scene_id": "scene-3", "scene_type": "bet_highlight", "source_refs": []},
+        {"scene_id": "scene-4", "scene_type": "milestone", "source_refs": [], "body": "里程碑"},
     ])
 
     result = MemoirNodeRunner(object()).run_node({"node_id": "generate_actions"}, _run(), state)
@@ -615,8 +620,9 @@ def test_generate_actions_maps_scene_types_to_action_types() -> None:
     assert result == {"node_id": "generate_actions", "fallback": True}
     assert state.actions == [
         {"action_id": "action-1", "scene_id": "scene-1", "action_type": "show_card", "duration_ms": 3000},
-        {"action_id": "action-2", "scene_id": "scene-2", "action_type": "type_text", "duration_ms": 6000},
-        {"action_id": "action-3", "scene_id": "scene-3", "action_type": "show_card", "duration_ms": 3000},
+        {"action_id": "action-2", "scene_id": "scene-2", "action_type": "type_text", "duration_ms": 4500},
+        {"action_id": "action-3", "scene_id": "scene-3", "action_type": "type_text", "duration_ms": 3000},
+        {"action_id": "action-4", "scene_id": "scene-4", "action_type": "show_card", "duration_ms": 3000},
     ]
 
 

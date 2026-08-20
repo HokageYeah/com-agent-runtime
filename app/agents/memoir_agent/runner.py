@@ -136,15 +136,16 @@ _SCENE_TYPES: tuple[str, ...] = (
 )
 _ACTION_TYPES: tuple[str, ...] = ("show_card", "type_text", "hold", "transition")
 
-# 规则动作映射：动作是调度结构而非内容，按 scene_type 确定性推导（不接模型，
-# 杜绝幻觉调度与额外模型调用）；type_text 打字机正文需要更长停留时间。
-_SCENE_ACTION_RULES: dict[str, tuple[str, int]] = {
-    "cover": ("show_card", 3000),
-    "stats": ("show_card", 3000),
-    "diary_highlight": ("type_text", 6000),
-    "bet_highlight": ("type_text", 6000),
-    "milestone": ("show_card", 3000),
-    "summary": ("show_card", 3000),
+# 规则动作映射：动作是调度结构而非内容，按 scene_type 确定性推导动作类型
+# （不接模型，杜绝幻觉调度与额外模型调用）；停留时长在 generate_actions 里
+# 推导：show_card 固定 3000ms，type_text 按正文长度自适应（打字机 75ms/字）。
+_SCENE_ACTION_RULES: dict[str, str] = {
+    "cover": "show_card",
+    "stats": "show_card",
+    "diary_highlight": "type_text",
+    "bet_highlight": "type_text",
+    "milestone": "show_card",
+    "summary": "show_card",
 }
 
 
@@ -292,15 +293,25 @@ class MemoirNodeRunner:
         if node.get("node_id") == "generate_actions":
             scenes = state.scenes if isinstance(state.scenes, list) else []
             # 动作按 scene_type 确定性映射：日记/赌约精选卡正文用打字机呈现
-            # （type_text，停留更久），其余用 show_card；映射表冻结在
+            # （type_text），其余用 show_card；映射表冻结在
             # _SCENE_ACTION_RULES，不接模型，保证零幻觉调度。
             rule_actions: list[dict[str, object]] = []
             for index, scene in enumerate(scenes, start=1):
                 if not (isinstance(scene, dict) and isinstance(scene.get("scene_id"), str)):
                     continue
-                action_type, duration_ms = _SCENE_ACTION_RULES.get(
-                    str(scene.get("scene_type")), ("show_card", 3000),
+                action_type = _SCENE_ACTION_RULES.get(
+                    str(scene.get("scene_type")), "show_card",
                 )
+                if action_type == "type_text":
+                    # 打字机停留时长随正文长度自适应：前端 xxt-text-type 冻结
+                    # 75ms/字，先让全文打完（len*75）再留 1500ms 阅读停留；
+                    # 夹在 [3000, 9000]，消除短正文（30~40 字）下固定 6000ms
+                    # 每卡约 3s 的尾部空等，同时 80 字上限也不会超时截断。
+                    body = scene.get("body")
+                    body_len = len(body) if isinstance(body, str) else 0
+                    duration_ms = max(3000, min(body_len * 75 + 1500, 9000))
+                else:
+                    duration_ms = 3000
                 rule_actions.append({
                     "action_id": f"action-{index}",
                     "scene_id": scene["scene_id"],

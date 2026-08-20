@@ -306,6 +306,15 @@ class Settings(BaseSettings):
     # 微信登录模块签发用户 JWT 后，本服务只验签并提取数字 sub；空值 fail-closed。
     USER_AUTH_JWT_SECRET: str = ""
     USER_AUTH_JWT_ISSUER: str = "couple-diary"
+    
+
+    # 阿里云配置
+    ACCESS_KEY_ID: str = '' # 阿里云Access Key ID
+    ACCESS_KEY_SECRET: str = '' # 阿里云Access Key Secret
+    BUCKET_NAME: str = '' # 阿里云Bucket Name
+    REGION: str = '' # 阿里云Region
+    ENDPOINT: str = '' # 阿里云Endpoint
+    OSS_AUDIO_PREFIX: str = 'audio' # AI制作音频上传到 OSS 的目录前缀
 
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,
