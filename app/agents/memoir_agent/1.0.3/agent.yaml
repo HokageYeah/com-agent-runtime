@@ -1,0 +1,21 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.3（M6 媒体通道）：图重排——enqueue_media_tasks 前移到
+# generate_actions 与 safety_review 之间、publish 前同步执行，逐张生成 image
+# 场景配图并产出六键 media_manifest；scene-generate prompt 新增 image 场景与
+# title_word 字段契约。媒体总开关 MEMOIR_MEDIA_ENABLED 默认关闭：关闭时 image
+# 场景由模型仍可产出但媒体节点按能力关闭跳过（后续 safety_review 因 image 无
+# manifest 条目拒绝，故部署关闭媒体时应继续使用 1.0.2）。词表与 schema_version
+# 均零变更（contract_version 维持 1.0.0）。
+version: 1.0.3
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+prompts:
+  - highlight-extract.v1.md
+  - chapter-plan.v1.md
+  - scene-generate.v1.md
+  - safety-review.v1.md
+  - action-generate.v1.md

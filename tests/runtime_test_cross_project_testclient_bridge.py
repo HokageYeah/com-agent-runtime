@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 import textwrap
 from datetime import UTC, datetime, timedelta
@@ -48,7 +49,7 @@ _SNAPSHOT_ID = "01J00000000000000000000002"
 # MemoryRuntimeClient signs it and the parent routes it to Runtime's real endpoint.
 _BUSINESS_SERVER = textwrap.dedent(
     """
-    import base64, importlib.util, json, sys
+    import base64, importlib.util, json, os, sys
     from pathlib import Path
     from unittest.mock import patch
     import httpx
@@ -87,7 +88,8 @@ _BUSINESS_SERVER = textwrap.dedent(
     def override_db():
         yield session
     app.dependency_overrides[get_sqlalchemy_db] = override_db
-    archive, snapshot, runref = helpers._seed_archive(session, run_id="historical-cross-repo-1-0-0")
+    archive, snapshot, runref = helpers._seed_archive(
+        session, run_id=os.environ.get("BRIDGE_RUN_ID", "historical-cross-repo-1-0-0"))
     # Start from the actual predecessor physical shape, then run the real Alembic
     # upgrade in this *same* provider database. The migration itself must not guess.
     session.commit()
@@ -104,9 +106,18 @@ _BUSINESS_SERVER = textwrap.dedent(
     session.expire_all()
     runref = session.get(type(runref), runref.id)
     assert runref is not None
+    # BRIDGE_IDENTITY：现代创建路径的 RunRef 在建行时即写入身份三列（repair
+    # 冻结表只覆盖历史 1.0.0/1.0.1 digest，生产中不存在 1.0.3 的 NULL 历史行）。
+    identity_override = os.environ.get("BRIDGE_IDENTITY")
+    if identity_override:
+        agent_id, agent_version, business_type = identity_override.split(":", 2)
+        runref.agent_id, runref.agent_version, runref.business_type = agent_id, agent_version, business_type
+        session.commit()
+        session.refresh(runref)
     with patch("app.main.setup_logging"), patch("app.main.database.connect"), patch("app.main.database.close"), TestClient(app) as client:
         print(json.dumps({"kind":"ready", "archive_id":archive.archive_id,
-            "snapshot_id":snapshot.snapshot_id, "epoch":archive.generation_epoch}), flush=True)
+            "snapshot_id":snapshot.snapshot_id, "epoch":archive.generation_epoch,
+            "identity":[runref.agent_id, runref.agent_version, runref.business_type]}), flush=True)
         for raw in sys.stdin:
             command = json.loads(raw)
             if command["kind"] == "repair":
@@ -136,11 +147,13 @@ _BUSINESS_SERVER = textwrap.dedent(
 class _PersistentBusinessBridge(httpx.BaseTransport):
     """Pipes all ToolGateway calls to one independent provider interpreter."""
 
-    def __init__(self, runtime_client: TestClient) -> None:
+    def __init__(self, runtime_client: TestClient, *, run_id: str = _RUN_ID,
+                 identity: str | None = None) -> None:
         self._runtime_client = runtime_client
         self._process = subprocess.Popen(
             [_BUSINESS_PYTHON, "-c", _BUSINESS_SERVER], cwd=_BUSINESS_ROOT,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "BRIDGE_RUN_ID": run_id, "BRIDGE_IDENTITY": identity or ""},
         )
         self.ready = self._read_until({"ready"})
 
@@ -193,13 +206,13 @@ def _package_100() -> AgentPackage:
     return package
 
 
-def _runtime_run(session: Session, package: AgentPackage, monkeypatch: Any) -> AgentRun:
+def _runtime_run(session: Session, package: AgentPackage, monkeypatch: Any, *, run_id: str = _RUN_ID) -> AgentRun:
     session.add(AgentDefinition(agent_id=package.agent_id, version=package.version,
         runtime_type="workflow", definition_json=package.model_dump(mode="json"),
         package_digest=package.package_digest, contract_version=package.contract_version,
         status="active", status_changed_at=datetime.now(UTC), status_changed_by="test",
         status_change_reason="historical bridge"))
-    run = AgentRun(run_id=_RUN_ID, agent_id=package.agent_id, agent_version=package.version,
+    run = AgentRun(run_id=run_id, agent_id=package.agent_id, agent_version=package.version,
         package_digest=package.package_digest, contract_version=package.contract_version,
         business_type="couple_memory", business_id=_ARCHIVE_ID, status="waiting_human",
         dispatch_state="claimed", input_json={"archive_id":_ARCHIVE_ID, "snapshot_id":_SNAPSHOT_ID, "generation_epoch":1},
@@ -259,11 +272,104 @@ def test_historical_1_0_0_cross_repo_single_persistent_chain(monkeypatch: Any) -
             snapshot = gateway.get_snapshot("couple_diary_backend", _ARCHIVE_ID, _SNAPSHOT_ID, _RUN_ID, 1, context)
             assert snapshot["snapshot_id"] == _SNAPSHOT_ID
             tool_call = AgentToolCall(tool_call_id="historic-publish", run_id=_RUN_ID, step_id="historical-cross-step", tool_name="memory.publish_playback_document", tool_version="1.0.0", transport="http", side_effect=True, idempotency_key="historic-publish", logical_operation_key="historic-publish", request_digest="safe", execution_attempt=1, tool_attempt=1, input_summary=None, output_summary=None, status="started", created_at=datetime.now(UTC))
-            document = {"schemaVersion":"1.0.0", "title":"Historical", "scenes":[{"scene_id":"scene_cover", "scene_type":"cover", "order":1, "safety_level":"normal", "payload":{"hint":"safe"}, "source_refs":[]}], "actions":[{"action_id":"action_1", "scene_id":"scene_cover", "action_type":"advance", "duration_ms":1000, "order":1, "payload":{}}], "mediaManifest":[]}
+            # 发布文档必须符合冻结的 snake_case 最小形状（见业务端
+            # _validate_runtime_document_top_level）：四键精确集合、3-16 个
+            # 场景、7 类场景/6 类动作白名单、source_refs 只能引用种子快照
+            # 冻结的 diary:1 来源索引、media_manifest 为 list（历史链无媒体）。
+            document = {"schema_version":"1.0.0",
+                "scenes":[
+                    {"scene_id":"scene-cover", "scene_type":"cover", "source_refs":["diary:1"], "body":"翻开这本属于我们的回忆录", "safety_level":"normal", "order":1},
+                    {"scene_id":"scene-stats", "scene_type":"stats", "source_refs":[], "body":"这一年的点滴", "order":2},
+                    {"scene_id":"scene-summary", "scene_type":"summary", "source_refs":[], "body":"未完待续", "order":3}],
+                "actions":[
+                    {"action_id":"action-show-card", "action_type":"show_card", "scene_id":"scene-cover", "duration_ms":3000, "order":1},
+                    {"action_id":"action-type-text", "action_type":"type_text", "scene_id":"scene-summary", "duration_ms":2000, "order":2}],
+                "media_manifest":[]}
             published = gateway.publish_playback_document("couple_diary_backend", _ARCHIVE_ID, _RUN_ID, _SNAPSHOT_ID, 1, document, "historic-publish", tool_call, context)
             assert published["revision"] == 1
             # Historical v1.0 uses the legacy two-field query shape.
             observed = gateway.get_publish_result("couple_diary_backend", _ARCHIVE_ID, _RUN_ID, "historic-publish", tool_context=context)
+            assert observed is not None and observed["revision"] == 1
+        finally:
+            bridge.close()
+            session.close()
+
+
+# 跨仓 fixture 冻结的媒体测试域（业务端 settings 默认白名单已含此域）；
+# object_key 采用 Runtime 生成端真实形状（memoir/images/ + UUID，不可猜测）。
+_MEDIA_URL = "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+
+
+def _media_document() -> dict[str, Any]:
+    """M6 媒体文档：与业务端冻结 fixture 同形状（7 场景 / 6 动作 / 1 manifest）。
+
+    scene-image 携带白名单 payload {image_url, title_word}，manifest 条目与
+    scene-image 1:1 配对且 URL 完全一致。桥接全程不触真实 OSS 与计费 API：
+    这里只证明业务端 publish 校验接受 Runtime 1.0.3 链路产出的媒体形状。
+    """
+    return {
+        "schema_version": "1.0.0",
+        "scenes": [
+            {"scene_id": "scene-cover", "scene_type": "cover", "source_refs": ["diary:1"], "body": "翻开回忆"},
+            {"scene_id": "scene-stats", "scene_type": "stats", "source_refs": [], "body": "两百天"},
+            {"scene_id": "scene-diary", "scene_type": "diary_highlight", "source_refs": [], "body": "日记精选"},
+            {"scene_id": "scene-bet", "scene_type": "bet_highlight", "source_refs": [], "body": "赌局精选"},
+            {"scene_id": "scene-image", "scene_type": "image", "source_refs": [], "body": "照片回忆",
+             "payload": {"image_url": _MEDIA_URL, "title_word": "夏日海边"}},
+            {"scene_id": "scene-milestone", "scene_type": "milestone", "source_refs": [], "body": "第一次看海"},
+            {"scene_id": "scene-summary", "scene_type": "summary", "source_refs": [], "body": "慢慢走下去"},
+        ],
+        "actions": [
+            {"action_id": "action-show", "scene_id": "scene-cover", "action_type": "show_card", "duration_ms": 1000},
+            {"action_id": "action-type", "scene_id": "scene-diary", "action_type": "type_text", "duration_ms": 1000},
+            {"action_id": "action-hold", "scene_id": "scene-stats", "action_type": "hold", "duration_ms": 1000},
+            {"action_id": "action-transition", "scene_id": "scene-milestone", "action_type": "transition", "duration_ms": 1000},
+            {"action_id": "action-focus", "scene_id": "scene-image", "action_type": "focus_image", "duration_ms": 1000},
+            {"action_id": "action-tts", "scene_id": "scene-summary", "action_type": "play_tts", "duration_ms": 1000},
+        ],
+        "media_manifest": [
+            {"media_id": "media-image-1", "kind": "image",
+             "object_key": "memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png",
+             "url": _MEDIA_URL, "mime": "image/png", "scene_id": "scene-image"},
+        ],
+    }
+
+
+def test_1_0_3_cross_repo_publish_media_document(monkeypatch: Any) -> None:
+    """M6 跨仓媒体联调：1.0.3 带非空 manifest 的文档发布进真实业务端校验链。
+
+    D5 联调证据：Runtime 生成端形状 → ToolGateway v1.1.0 wire → 业务端
+    publish 三层校验（manifest 六键 / image payload 白名单 / URL 域白名单）
+    在跨仓边界零契约摩擦；发布成功后四字段对账查询同样命中。
+    """
+    assert _BUSINESS_PYTHON.is_file(), "cross-repo bridge requires the isolated business venv"
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    from app.db.sqlalchemy_db import Base
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    session = factory()
+    run_id = "cross-repo-media-1-0-3"
+    package = AgentPackageService(Path(__file__).parents[1] / "app" / "agents").load("memoir_agent", "1.0.3")
+    run = _runtime_run(session, package, monkeypatch, run_id=run_id)
+    runtime_app = create_runtime_app(runtime_settings=settings, session_factory=factory)
+    with TestClient(runtime_app) as runtime_client:
+        bridge = _PersistentBusinessBridge(runtime_client, run_id=run_id,
+            identity="memoir_agent:1.0.3:couple_memory")
+        try:
+            assert bridge.ready["archive_id"] == _ARCHIVE_ID
+            # 媒体链模拟现代创建路径：RunRef 建行时即写入 1.0.3 身份（repair
+            # 冻结表只覆盖历史 1.0.0/1.0.1 digest，生产中不存在 1.0.3 的 NULL
+            # 历史行），因此这里断言直写结果而非走 repair 回填。
+            assert bridge.ready["identity"] == ["memoir_agent", "1.0.3", "couple_memory"]
+            harness = RuntimeHarnessConfig(factory, {"test":{"keys":{"test":"test-agent-tool-secret"}}}, "couple-diary-test", "http://127.0.0.1:8765")
+            gateway = ToolGateway({"couple_diary_backend": BusinessConnector("http://127.0.0.1:8765", "couple-diary-test", "test-key-1", "test-agent-tool-secret")}, httpx.Client(transport=bridge), test_transport=LoopbackTestTransport(harness))
+            context = ToolGateway.build_tool_context(run, "cross-media-step")
+            snapshot = gateway.get_snapshot("couple_diary_backend", _ARCHIVE_ID, _SNAPSHOT_ID, run_id, 1, context)
+            assert snapshot["snapshot_id"] == _SNAPSHOT_ID
+            tool_call = AgentToolCall(tool_call_id="cross-media-publish", run_id=run_id, step_id="cross-media-step", tool_name="memory.publish_playback_document", tool_version="1.1.0", transport="http", side_effect=True, idempotency_key="cross-media-publish", logical_operation_key="cross-media-publish", request_digest="safe", execution_attempt=1, tool_attempt=1, input_summary=None, output_summary=None, status="started", created_at=datetime.now(UTC))
+            published = gateway.publish_playback_document("couple_diary_backend", _ARCHIVE_ID, run_id, _SNAPSHOT_ID, 1, _media_document(), "cross-media-publish", tool_call, context)
+            assert published["revision"] == 1
+            observed = gateway.get_publish_result("couple_diary_backend", _ARCHIVE_ID, _SNAPSHOT_ID, run_id, 1, "cross-media-publish", tool_context=context)
             assert observed is not None and observed["revision"] == 1
         finally:
             bridge.close()

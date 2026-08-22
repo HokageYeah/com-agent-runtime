@@ -104,7 +104,13 @@ class ModelUsageService:
             .values(status="started")
             .execution_options(synchronize_session=False)
         )
-        self._session.flush()
+        # 发送权确立即提交：让 started 状态与 permit_id 先于 Provider HTTP
+        # 调用落库（与 policy.reserve 的“预留先提交”约束同向）。若只 flush，
+        # activate/mark_started 的 UPDATE 会留在未提交事务里，usage 行锁将
+        # 横跨整个 HTTP 调用——模型响应一旦超过 50 秒，对账器的超期 UPDATE
+        # 就会被行锁阻塞至 MySQL 1205。提交后若 Worker 在 HTTP 途中崩溃，
+        # 对账器也能按 started 行保守结算为 outcome_unknown。
+        self._session.commit()
         return transitioned.rowcount == 1  # type: ignore[attr-defined]
 
     def activate_reservation(self, usage_id: str, permit_id: str) -> bool:

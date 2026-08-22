@@ -1,0 +1,224 @@
+{
+  "publishInput": {
+    "archive_id": "01J00000000000000000000001",
+    "snapshot_id": "01J00000000000000000000002",
+    "run_id": "run_test_0001",
+    "generation_epoch": 1,
+    "document": {
+      "schema_version": "1.0.0",
+      "scenes": [
+        {
+          "scene_id": "scene-cover",
+          "scene_type": "cover",
+          "source_refs": ["diary:1"],
+          "body": "翻开这本属于我们的回忆录"
+        },
+        {
+          "scene_id": "scene-stats",
+          "scene_type": "stats",
+          "source_refs": [],
+          "body": "两百个日夜，写满了彼此的惦记"
+        },
+        {
+          "scene_id": "scene-diary",
+          "scene_type": "diary_highlight",
+          "source_refs": [],
+          "body": "那些一起走过的日子"
+        },
+        {
+          "scene_id": "scene-bet",
+          "scene_type": "bet_highlight",
+          "source_refs": [],
+          "body": "小小的约定，大大的欢喜"
+        },
+        {
+          "scene_id": "scene-image",
+          "scene_type": "image",
+          "source_refs": [],
+          "body": "照片里的笑容一直都在",
+          "payload": {
+            "image_url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+            "title_word": "夏日海边"
+          }
+        },
+        {
+          "scene_id": "scene-milestone",
+          "scene_type": "milestone",
+          "source_refs": [],
+          "body": "第一次一起看海的夏天"
+        },
+        {
+          "scene_id": "scene-summary",
+          "scene_type": "summary",
+          "source_refs": [],
+          "body": "往后的路，我们一起慢慢走"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "action-show-card",
+          "scene_id": "scene-cover",
+          "action_type": "show_card",
+          "duration_ms": 3000
+        },
+        {
+          "action_id": "action-type-text",
+          "scene_id": "scene-diary",
+          "action_type": "type_text",
+          "duration_ms": 1500
+        },
+        {
+          "action_id": "action-hold",
+          "scene_id": "scene-stats",
+          "action_type": "hold",
+          "duration_ms": 1000
+        },
+        {
+          "action_id": "action-transition",
+          "scene_id": "scene-milestone",
+          "action_type": "transition",
+          "duration_ms": 800
+        },
+        {
+          "action_id": "action-focus-image",
+          "scene_id": "scene-image",
+          "action_type": "focus_image",
+          "duration_ms": 2000
+        },
+        {
+          "action_id": "action-play-tts",
+          "scene_id": "scene-summary",
+          "action_type": "play_tts",
+          "duration_ms": 2500
+        }
+      ],
+      "media_manifest": [
+        {
+          "media_id": "media-image-1",
+          "kind": "image",
+          "object_key": "memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "mime": "image/png",
+          "scene_id": "scene-image"
+        }
+      ]
+    }
+  },
+  "expectedPublicPlayback": {
+    "archiveId": "01J00000000000000000000001",
+    "publishedRevision": 1,
+    "schemaVersion": "1.0.0",
+    "document": {
+      "schemaVersion": "1.0.0",
+      "title": "那些一起走过的日子",
+      "scenes": [
+        {
+          "sceneId": "scene-cover",
+          "type": "cover",
+          "safetyLevel": "normal",
+          "body": "翻开这本属于我们的回忆录",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-stats",
+          "type": "stats",
+          "safetyLevel": "normal",
+          "body": "两百个日夜，写满了彼此的惦记",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-diary",
+          "type": "diary_highlight",
+          "safetyLevel": "normal",
+          "body": "那些一起走过的日子",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-bet",
+          "type": "bet_highlight",
+          "safetyLevel": "normal",
+          "body": "小小的约定，大大的欢喜",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-image",
+          "type": "image",
+          "safetyLevel": "normal",
+          "body": "照片里的笑容一直都在",
+          "payload": {
+            "imageUrl": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+            "titleWord": "夏日海边"
+          }
+        },
+        {
+          "sceneId": "scene-milestone",
+          "type": "milestone",
+          "safetyLevel": "normal",
+          "body": "第一次一起看海的夏天",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-summary",
+          "type": "summary",
+          "safetyLevel": "normal",
+          "body": "往后的路，我们一起慢慢走",
+          "payload": {}
+        }
+      ],
+      "actions": [
+        {
+          "actionId": "action-show-card",
+          "type": "show_card",
+          "sceneId": "scene-cover",
+          "durationMs": 3000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-type-text",
+          "type": "type_text",
+          "sceneId": "scene-diary",
+          "durationMs": 1500,
+          "payload": {}
+        },
+        {
+          "actionId": "action-hold",
+          "type": "hold",
+          "sceneId": "scene-stats",
+          "durationMs": 1000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-transition",
+          "type": "transition",
+          "sceneId": "scene-milestone",
+          "durationMs": 800,
+          "payload": {}
+        },
+        {
+          "actionId": "action-focus-image",
+          "type": "focus_image",
+          "sceneId": "scene-image",
+          "durationMs": 2000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-play-tts",
+          "type": "play_tts",
+          "sceneId": "scene-summary",
+          "durationMs": 2500,
+          "payload": {}
+        }
+      ],
+      "mediaManifest": [
+        {
+          "mediaId": "media-image-1",
+          "kind": "image",
+          "objectKey": "memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "mime": "image/png",
+          "sceneId": "scene-image"
+        }
+      ]
+    }
+  }
+}

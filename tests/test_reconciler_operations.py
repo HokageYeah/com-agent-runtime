@@ -136,6 +136,24 @@ def test_runner_forever_uses_injected_300_second_interval() -> None:
     assert pauses == [300]
 
 
+def test_runner_forever_survives_single_cycle_failure() -> None:
+    """单轮对账异常（如 MySQL 1205 锁等待超时）只能跳过本轮，不能杀死常驻进程。"""
+    sessions = _sessions()
+    runner = ReconcilerRunner(sessions, "instance-a", sleep=lambda _seconds: None)
+    calls: list[int] = []
+
+    def flaky_run_once() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated lock wait timeout")
+
+    runner.run_once = flaky_run_once  # type: ignore[method-assign]
+
+    runner.run_forever(max_cycles=2)
+
+    assert calls == [1, 1]
+
+
 def test_runner_merges_memory_deletion_maintenance_under_the_same_lease() -> None:
     """删除补偿仅可在对账器持有 fencing lease 时执行，报告只汇总计数。"""
     sessions = _sessions()

@@ -295,6 +295,75 @@ def configured_model_gateway(
     return MemoirModelGatewayAdapter(session, gateway, node_routes)
 
 
+def configured_media_service(
+    runtime_settings: object, session: Session,
+) -> object | None:
+    """按部署配置装配 M6 媒体服务；总开关关闭或依赖缺失时返回 None。
+
+    返回 None 等价于媒体能力关闭：媒体节点按 CAPABILITY_DISABLED 跳过/降级，
+    旧版本行为零变化。装配失败只记受控日志，绝不把凭证或 URL 写进日志。
+    """
+    if not bool(getattr(runtime_settings, "MEMOIR_MEDIA_ENABLED", False)):
+        return None
+    try:
+        from app.services.memoir_media_service import (
+            MemoirMediaConfig,
+            MemoirMediaService,
+        )
+        from app.utils.aliyun.oss_client import AliyunOSSClient
+        from app.utils.volcano.cv_client import MockCVClient, VolcanoCVClient
+
+        provider_name = str(getattr(runtime_settings, "MEMOIR_MEDIA_PROVIDER", "mock"))
+        if provider_name == "volcano":
+            provider: object = VolcanoCVClient(
+                access_key=str(getattr(runtime_settings, "VOLCANO_CV_ACCESS_KEY", "")),
+                secret_key=str(getattr(runtime_settings, "VOLCANO_CV_SECRET_KEY", "")),
+                region=str(getattr(runtime_settings, "VOLCANO_CV_REGION", "cn-north-1")),
+                host=str(getattr(runtime_settings, "VOLCANO_CV_HOST", "visual.volcengineapi.com")),
+                timeout_seconds=float(getattr(runtime_settings, "MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS", 25.0)),
+                max_retries=int(getattr(runtime_settings, "MEMOIR_MEDIA_IMAGE_MAX_RETRIES", 1)),
+            )
+        else:
+            # mock provider：开发/测试同接口确定性输出，绝不触达计费 API。
+            provider = MockCVClient()
+        uploader = AliyunOSSClient(
+            str(getattr(runtime_settings, "ACCESS_KEY_ID", "")),
+            str(getattr(runtime_settings, "ACCESS_KEY_SECRET", "")),
+            str(getattr(runtime_settings, "BUCKET_NAME", "")),
+            str(getattr(runtime_settings, "REGION", "")),
+            str(getattr(runtime_settings, "ENDPOINT", "")),
+        )
+        config = MemoirMediaConfig.from_settings(runtime_settings)
+
+        def _load_photo(object_key: str) -> bytes:
+            """照片取回：私有桶短期预签名 GET + 受超时控制的单次下载。"""
+            from app.services.memory_s3_media_proxy import MemoryS3MediaProxy
+
+            proxy = MemoryS3MediaProxy.from_settings(runtime_settings)
+            if proxy is None:
+                raise RuntimeError("MEDIA_PHOTO_PROXY_UNCONFIGURED")
+            url = proxy.create_access_url(
+                object_key, expires_seconds=proxy.expires_seconds,
+            )
+            with httpx.Client(timeout=10.0, trust_env=False) as client:
+                response = client.get(url)
+            response.raise_for_status()
+            return response.content
+
+        photo_loader = _load_photo if config.photo_egress_allowed else None
+        return MemoirMediaService(
+            provider, uploader, config,
+            photo_loader=photo_loader, session=session,
+        )
+    except Exception as exc:
+        # 装配失败按能力关闭处理；只记异常类名，不记正文（可能含配置值）。
+        logging.warning(
+            "MemoirAgent 媒体服务装配失败按能力关闭 code=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
 def configured_executor(
     session: Session,
     *,
@@ -409,6 +478,9 @@ def configured_executor(
                     ToolCallAuditService(session),
                     model_gateway,
                     EvaluationService(session),
+                    # M6 媒体服务：总开关关闭/装配失败时为 None，媒体节点按
+                    # 能力关闭跳过，与 1.0.3 之前的行为完全一致。
+                    configured_media_service(runtime_settings, session),
                 ),
                 CheckpointStore(
                     session,

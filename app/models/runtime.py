@@ -334,6 +334,9 @@ class AgentModelUsage(Base, TimestampMixin):
     estimated_cost: Mapped[float | None] = mapped_column(nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+    # M6 媒体通道按张计量：每张成功生成的图片写一行 image_count=1
+    # （cost_unit=per_image）；LLM token 路径该列为 NULL，配额按 SUM 求和。
+    image_count: Mapped[int | None] = mapped_column(Integer)
     request_deadline_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
     )

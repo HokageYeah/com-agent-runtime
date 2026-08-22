@@ -315,6 +315,44 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 预期：五项全空时只输出 `MEDIA_DISABLED`；五项完整且格式合法时只输出 `MEDIA_CONFIG_OK`；半配置、非法桶名、非法 TTL 或生产 HTTP endpoint 应以固定配置错误失败。此命令不应输出 access key、secret、endpoint 或签名 URL。
 
+### 9.3 阿里云 OSS 公共读通道（回忆录生成图，M6 已实装）
+
+`app/utils/aliyun/oss_client.py` 公共客户端使用以下通用配置键（已进 `app/core/config.py`，M6/D2 起由 Worker 的 `configured_media_service` 装配，用于回忆录生成图上传，设计见 `头脑风暴/docs/AgentRuntime/plans/2026-08-20-回忆录媒体通道设计说明.md`）：
+
+| 字段 | 作用 | 要求 |
+|---|---|---|
+| `ACCESS_KEY_ID` / `ACCESS_KEY_SECRET` | 阿里云 AccessKey | 独立子账号，只经 secret manager 注入，不写入 Git/日志 |
+| `BUCKET_NAME` | 目标桶 | 桶保持私有；回忆录生成图走对象级公共读 ACL |
+| `REGION` / `ENDPOINT` | 桶区域与 endpoint | 生产必须 HTTPS |
+| `OSS_AUDIO_PREFIX` | 音频上传目录前缀（既有默认 `audio`） | 回忆录生成图统一用 `memoir/images/` 前缀（`MEMOIR_MEDIA_IMAGE_PREFIX`），由代码指定，不依赖该键 |
+
+与 §9.1/9.2 的 S3 私有媒体代理通道互不混用：S3 通道服务用户私密媒体（private 桶 + 短时签名 URL）；本通道只存 Agent 生成的配图（对象公共读 + 不可猜测 object_key + 公共读 URL 落库），二者凭据、桶与 ACL 策略相互独立。
+
+### 9.4 回忆录媒体生成开关（M6，默认全关）
+
+以下键已进 `app/core/config.py`；`MEMOIR_MEDIA_ENABLED=False` 时媒体服务不装配，1.0.3 的图片场景自动降级为文本卡，1.0.0-1.0.2 行为零变化。
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `MEMOIR_MEDIA_ENABLED` | `False` | 媒体生成总开关；关闭时图片场景降级文本卡发布 |
+| `MEMOIR_MEDIA_PROVIDER` | `mock` | 图像 Provider：`mock`（开发/测试，不触达计费 API）/ `volcano`（火山 CVProcess） |
+| `MEMOIR_MEDIA_IMAGE_PREFIX` | `memoir/images/` | 生成图 object key 强制前缀（D1 冻结契约，勿改） |
+| `MEMOIR_MEDIA_MAX_IMAGES_PER_RUN` | `8` | 单 Run 默认按张配额上限（run 的 model_policy.max_media_images 优先） |
+| `MEMOIR_MEDIA_URL_HOST_SUFFIXES` | `aliyuncs.com` | 媒体 URL 域名后缀白名单（逗号分隔） |
+| `MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS` | `25.0` | 单张单次请求超时（须显著小于 90s 节点租约） |
+| `MEMOIR_MEDIA_IMAGE_MAX_RETRIES` | `1` | 单张有限重试次数（仅网络错误/5xx） |
+| `MEMOIR_MEDIA_NODE_BUDGET_SECONDS` | `60.0` | 媒体节点整体时间预算（90s 租约内留安全余量） |
+| `MEMOIR_MEDIA_PHOTO_EGRESS_ENABLED` | `False` | 照片出域门禁：图生图需把用户照片字节发给图像 Provider，默认绝不外发 |
+| `MEMOIR_MEDIA_PROVIDER_RESIDENCY` | `private` | Provider 数据驻留声明；仅 `public` 且上一开关同开才允许图生图 |
+
+火山 CVProcess 凭证（仅 `MEMOIR_MEDIA_PROVIDER=volcano` 时需要；只经部署 env 注入，绝不写日志）：
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `VOLCANO_CV_ACCESS_KEY` / `VOLCANO_CV_SECRET_KEY` | 空 | 火山引擎 AK/SK；缺失时装配失败按能力关闭 |
+| `VOLCANO_CV_REGION` | `cn-north-1` | V4 签名 region |
+| `VOLCANO_CV_HOST` | `visual.volcengineapi.com` | CVProcess API host |
+
 ## 10. 模型路由与 Provider API Key
 
 ### 10.1 默认关闭与降级行为

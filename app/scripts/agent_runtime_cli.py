@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
+import hashlib
 import ipaddress
 import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -766,6 +770,413 @@ def _register(
     )
 
 
+@dataclass(frozen=True)
+class _ProcessRecord:
+    """本机进程的最小身份：PID、命令、cwd、启动时间和运行环境。"""
+
+    pid: int
+    command: str
+    cwd: Path | None
+    start_time: str | None = None
+    environment: str | None = None
+
+
+ProcessReader = Callable[[int], _ProcessRecord | None]
+ProcessLister = Callable[[], Sequence[_ProcessRecord]]
+ProcessStopper = Callable[[_ProcessRecord], bool]
+
+_RUNTIME_LOCK_WAIT_SECONDS = 30.0
+_RUNTIME_PROCESS_STOP_SECONDS = 10.0
+_RUNTIME_PROCESS_POLL_SECONDS = 0.1
+
+
+def _runtime_control_paths(project_root: Path) -> tuple[Path, Path]:
+    """为工程生成稳定但不落入 Git 的锁文件和状态文件路径。"""
+    root = str(project_root.resolve())
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:20]
+    base = Path(tempfile.gettempdir()) / f"agent-runtime-{digest}"
+    return base.with_suffix(".lock"), base.with_suffix(".state")
+
+
+def _process_cwd(pid: int) -> Path | None:
+    """读取进程 cwd；无法确认时返回 None，调用方必须按不安全处理。"""
+    proc_cwd = Path("/proc") / str(pid) / "cwd"
+    try:
+        if proc_cwd.exists() or proc_cwd.is_symlink():
+            return proc_cwd.resolve()
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ("lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("n") and len(line) > 1:
+            return Path(line[1:]).resolve()
+    return None
+
+
+def _process_environment(pid: int) -> str | None:
+    """只读取运行环境名，不保存或回显进程环境中的其他字段。"""
+    try:
+        result = subprocess.run(
+            ("ps", "eww", "-p", str(pid), "-o", "command="),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(
+        r"(?:^|\s)ENVIRONMENT=(development|test|production)(?:\s|$)",
+        result.stdout,
+    )
+    return match.group(1) if match else None
+
+
+def _parse_process_line(line: str) -> _ProcessRecord | None:
+    fields = line.strip().split(maxsplit=6)
+    if len(fields) < 7:
+        return None
+    try:
+        pid = int(fields[0])
+    except ValueError:
+        return None
+    return _ProcessRecord(
+        pid=pid,
+        start_time=" ".join(fields[1:6]),
+        command=fields[6],
+        cwd=None,
+    )
+
+
+def _list_process_records() -> tuple[_ProcessRecord, ...]:
+    """列出进程命令；这里只获取候选，cwd 延迟到命中后再读取。"""
+    try:
+        result = subprocess.run(
+            ("ps", "-ww", "-axo", "pid=,lstart=,command="),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ()
+    if result.returncode not in (0, 1):
+        return ()
+    return tuple(
+        record
+        for line in result.stdout.splitlines()
+        if (record := _parse_process_line(line)) is not None
+    )
+
+
+def _read_process_record(pid: int) -> _ProcessRecord | None:
+    """读取一个进程的完整身份，失败时绝不猜测其 cwd。"""
+    try:
+        result = subprocess.run(
+            ("ps", "-ww", "-p", str(pid), "-o", "pid=,lstart=,command="),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode not in (0, 1):
+        return None
+    records = tuple(
+        record
+        for line in result.stdout.splitlines()
+        if (record := _parse_process_line(line)) is not None
+        and record.pid == pid
+    )
+    if not records:
+        return None
+    return _record_with_cwd(records[0])
+
+
+def _record_with_cwd(record: _ProcessRecord) -> _ProcessRecord:
+    cwd = record.cwd if record.cwd is not None else _process_cwd(record.pid)
+    environment = record.environment
+    if environment is None and _is_worker_command(record.command):
+        environment = _process_environment(record.pid)
+    return _ProcessRecord(
+        pid=record.pid,
+        command=record.command,
+        cwd=cwd,
+        start_time=record.start_time,
+        environment=environment,
+    )
+
+
+def _same_process(expected: _ProcessRecord, actual: _ProcessRecord | None) -> bool:
+    """只有 PID、命令、cwd 和可用启动时间都一致才认为是同一进程。"""
+    if actual is None or expected.pid != actual.pid:
+        return False
+    if expected.command != actual.command:
+        return False
+    if expected.cwd is None or actual.cwd is None or expected.cwd != actual.cwd:
+        return False
+    if not expected.start_time or not actual.start_time:
+        return False
+    if expected.start_time != actual.start_time:
+        return False
+    return not (
+        expected.environment
+        and actual.environment
+        and expected.environment != actual.environment
+    )
+
+
+def _is_worker_command(command: str) -> bool:
+    try:
+        tokens = tuple(shlex.split(command))
+    except ValueError:
+        return False
+    target = ("-m", "app.worker", "--worker-id", "agent-runtime-worker")
+    return any(tokens[index : index + len(target)] == target for index in range(len(tokens)))
+
+
+def _is_supervisor_command(command: str) -> bool:
+    try:
+        tokens = tuple(shlex.split(command))
+    except ValueError:
+        return False
+    target = ("-m", "app.scripts.agent_runtime_cli", "start")
+    return any(tokens[index : index + len(target)] == target for index in range(len(tokens)))
+
+
+def _terminate_validated_process(
+    record: _ProcessRecord,
+    *,
+    process_reader: ProcessReader = _read_process_record,
+    process_killer: Callable[[int, int], None] = os.kill,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = _RUNTIME_PROCESS_STOP_SECONDS,
+) -> bool:
+    """对已校验身份的进程执行 TERM，超时后才执行 KILL。"""
+    current = process_reader(record.pid)
+    if current is None:
+        return True
+    if not _same_process(record, current):
+        return False
+    try:
+        process_killer(record.pid, signal.SIGTERM)
+    except PermissionError as err:
+        raise RuntimeError("RUNTIME_PROCESS_STOP_FORBIDDEN") from err
+    except ProcessLookupError:
+        return True
+    deadline = monotonic() + timeout_seconds
+    while True:
+        current = process_reader(record.pid)
+        if current is None:
+            return True
+        if not _same_process(record, current):
+            return False
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            break
+        sleep(min(_RUNTIME_PROCESS_POLL_SECONDS, remaining))
+    current = process_reader(record.pid)
+    if current is None:
+        return True
+    if not _same_process(record, current):
+        return False
+    try:
+        process_killer(record.pid, signal.SIGKILL)
+    except PermissionError as err:
+        raise RuntimeError("RUNTIME_PROCESS_STOP_FORBIDDEN") from err
+    except ProcessLookupError:
+        return True
+    kill_deadline = monotonic() + timeout_seconds
+    while monotonic() < kill_deadline:
+        current = process_reader(record.pid)
+        if current is None:
+            return True
+        if not _same_process(record, current):
+            return False
+        sleep(_RUNTIME_PROCESS_POLL_SECONDS)
+    raise RuntimeError("RUNTIME_PROCESS_STOP_TIMEOUT")
+
+
+def _read_runtime_state(state_path: Path) -> _ProcessRecord | None:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        pid = payload["pid"]
+        command = payload["command"]
+        cwd = payload["cwd"]
+        start_time = payload.get("start_time")
+        environment = payload.get("environment")
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+        if not isinstance(command, str) or not command:
+            return None
+        if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+            return None
+        if start_time is not None and not isinstance(start_time, str):
+            return None
+        if environment is not None and not isinstance(environment, str):
+            return None
+    except (KeyError, TypeError):
+        return None
+    return _ProcessRecord(pid, command, Path(cwd), start_time, environment)
+
+
+def _write_runtime_state(state_path: Path, record: _ProcessRecord) -> None:
+    """原子写入当前 supervisor 身份，避免并发 start 读到半截 JSON。"""
+    state_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_path.parent,
+            prefix=f".{state_path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            json.dump(
+                {
+                    "pid": record.pid,
+                    "command": record.command,
+                    "cwd": str(record.cwd),
+                    "start_time": record.start_time,
+                    "environment": record.environment,
+                },
+                temporary,
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+        temporary_path.chmod(0o600)
+        os.replace(temporary_path, state_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+
+
+def _clear_runtime_state(state_path: Path, owner_pid: int) -> None:
+    state = _read_runtime_state(state_path)
+    if state is None or state.pid == owner_pid:
+        try:
+            state_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _cleanup_previous_runtime_processes(
+    project_root: Path,
+    *,
+    environment: str,
+    state_path: Path | None = None,
+    process_reader: ProcessReader = _read_process_record,
+    process_lister: ProcessLister = _list_process_records,
+    process_stopper: ProcessStopper = _terminate_validated_process,
+) -> None:
+    """回收旧 supervisor 和无状态遗留 Worker，不匹配身份的进程一律跳过。"""
+    root = project_root.resolve()
+    if state_path is None:
+        _, state_path = _runtime_control_paths(root)
+    previous = _read_runtime_state(state_path)
+    protected_pids: set[int] = set()
+    if previous is not None:
+        # state 只允许声明当前工程的 supervisor；其他内容按不可信 stale state 处理。
+        protected_pids.add(previous.pid)
+        current = process_reader(previous.pid)
+        if (
+            previous.cwd != root
+            or not _is_supervisor_command(previous.command)
+            or current is None
+        ):
+            _clear_runtime_state(state_path, previous.pid)
+        elif _same_process(previous, current):
+            if not process_stopper(current):
+                raise RuntimeError("RUNTIME_PROCESS_IDENTITY_CHANGED")
+            _clear_runtime_state(state_path, previous.pid)
+        else:
+            # PID 已被其他命令复用，后续候选扫描也不能再触碰这个 PID。
+            _clear_runtime_state(state_path, previous.pid)
+    for listed in process_lister():
+        if (
+            listed.pid == os.getpid()
+            or listed.pid in protected_pids
+            or not _is_worker_command(listed.command)
+        ):
+            continue
+        candidate = _record_with_cwd(listed)
+        if candidate.cwd == root and candidate.environment == environment:
+            if not process_stopper(candidate):
+                raise RuntimeError("RUNTIME_PROCESS_IDENTITY_CHANGED")
+
+
+def _acquire_runtime_lock(
+    project_root: Path,
+    *,
+    lock_path: Path | None = None,
+    state_path: Path | None = None,
+    process_reader: ProcessReader = _read_process_record,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    timeout_seconds: float = _RUNTIME_LOCK_WAIT_SECONDS,
+):
+    """用工程级锁串行化 start；新 start 会请求旧 supervisor 退出后接管。"""
+    default_lock, default_state = _runtime_control_paths(project_root)
+    lock_path = lock_path or default_lock
+    state_path = state_path or default_state
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle = lock_path.open("a+")
+    lock_path.chmod(0o600)
+    deadline = monotonic() + timeout_seconds
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except BlockingIOError:
+                previous = _read_runtime_state(state_path)
+                if previous is not None:
+                    current = process_reader(previous.pid)
+                    if (
+                        current is not None
+                        and current.cwd == project_root.resolve()
+                        and _is_supervisor_command(current.command)
+                        and _same_process(previous, current)
+                    ):
+                        _terminate_validated_process(
+                            current,
+                            process_reader=process_reader,
+                            sleep=sleep,
+                            monotonic=monotonic,
+                        )
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("RUNTIME_START_LOCK_TIMEOUT") from None
+                sleep(min(_RUNTIME_PROCESS_POLL_SECONDS, remaining))
+    except BaseException:
+        handle.close()
+        raise
+
+
+def _release_runtime_lock(handle: object) -> None:
+    if not hasattr(handle, "fileno"):
+        return
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    handle.close()
+
+
 def _wait_until_ready(process: subprocess.Popen[bytes], base_url: str) -> None:
     deadline = time.monotonic() + 30
     urls = (
@@ -821,8 +1232,10 @@ def supervised_service_environment(environment: Mapping[str, str]) -> dict[str, 
 
 
 def _start(environment: str) -> None:
-    command_environment = supervised_service_environment(_prepare(environment))
-    api_command, launcher_command, worker_command, reconciler_command = build_service_commands()
+    normalized = _normalize_local_environment(environment)
+    command_environment = supervised_service_environment(_prepare(normalized))
+    lock_handle = _acquire_runtime_lock(PROJECT_ROOT)
+    _, state_path = _runtime_control_paths(PROJECT_ROOT)
     processes: list[subprocess.Popen[bytes]] = []
     stopping = False
 
@@ -833,6 +1246,25 @@ def _start(environment: str) -> None:
     previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
+        _cleanup_previous_runtime_processes(
+            PROJECT_ROOT,
+            environment=normalized,
+            state_path=state_path,
+        )
+        supervisor = _read_process_record(os.getpid())
+        if supervisor is None or supervisor.cwd != PROJECT_ROOT.resolve():
+            raise RuntimeError("RUNTIME_PROCESS_IDENTITY_UNAVAILABLE")
+        _write_runtime_state(
+            state_path,
+            _ProcessRecord(
+                pid=supervisor.pid,
+                command=supervisor.command,
+                cwd=supervisor.cwd,
+                start_time=supervisor.start_time,
+                environment=normalized,
+            ),
+        )
+        api_command, launcher_command, worker_command, reconciler_command = build_service_commands()
         api = start_service_process(
             api_command,
             project_root=PROJECT_ROOT,
@@ -868,9 +1300,17 @@ def _start(environment: str) -> None:
                 raise RuntimeError("RUNTIME_PROCESS_EXITED")
             time.sleep(0.5)
     finally:
-        _terminate_processes(processes)
-        signal.signal(signal.SIGINT, previous_sigint)
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        try:
+            _terminate_processes(processes)
+        finally:
+            try:
+                _clear_runtime_state(state_path, os.getpid())
+            finally:
+                try:
+                    _release_runtime_lock(lock_handle)
+                finally:
+                    signal.signal(signal.SIGINT, previous_sigint)
+                    signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _prompt_setup(environment: str) -> LocalSetup:

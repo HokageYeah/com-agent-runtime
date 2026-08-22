@@ -69,7 +69,7 @@ class AliyunOSSClient:
         self._oss_module: Any | None = None
 
     @classmethod
-    def from_settings(cls) -> "AliyunOSSClient":
+    def from_settings(cls) -> AliyunOSSClient:
         """从项目全局配置创建 OSS 客户端。"""
         return cls(
             settings.ACCESS_KEY_ID,
@@ -194,6 +194,50 @@ class AliyunOSSClient:
             presigned_url=presigned_url,
             public_url=self.public_url(object_key),
         )
+
+    def upload_public_bytes(self, data: bytes, object_key: str, mime: str) -> str:
+        """上传图片字节并设置对象级公共读 ACL，返回公共读 URL（桶保持私有）。
+
+        M6 回忆录媒体通道专用：桶 ACL 不变，仅对生成图片对象开启
+        public-read，播放端可直接以公共 URL 渲染。日志只记录 object_key、
+        字节数与状态码，不记录图片内容或访问 URL。
+        """
+        if not isinstance(data, bytes) or not data:
+            raise AliyunOSSClientError("OSS 待上传字节为空，无法上传图片", 400)
+        if not object_key:
+            raise AliyunOSSClientError("OSS 对象 Key 为空，无法上传图片", 400)
+
+        client, oss = self._ensure_client()
+        logger.bind(tag=TAG).info(
+            "准备上传图片字节到 OSS，bucket={}，object_key={}，size={}，mime={}",
+            self.bucket_name, object_key, len(data), mime,
+        )
+        try:
+            # 对象级 public-read ACL：桶仍私有，仅该对象可匿名只读。
+            result = client.put_object(oss.PutObjectRequest(
+                bucket=self.bucket_name,
+                key=object_key,
+                body=data,
+                acl="public-read",
+                content_type=mime,
+            ))
+        except Exception as exc:
+            raw_message = str(exc)
+            logger.bind(tag=TAG).exception("OSS 图片上传失败，object_key={}", object_key)
+            if "AccessDenied" in raw_message:
+                raise AliyunOSSClientError(
+                    "阿里云 OSS 图片上传被拒绝：请检查 oss:PutObject 权限与对象 ACL 授权。"
+                    f"原始错误摘要：{raw_message[:500]}",
+                    403,
+                ) from exc
+            raise AliyunOSSClientError(f"OSS 图片上传失败：{raw_message[:500]}", 502) from exc
+
+        if result.status_code not in (200, 204):
+            raise AliyunOSSClientError(f"OSS 图片上传失败，status_code={result.status_code}", 502)
+        logger.bind(tag=TAG).success(
+            "OSS 图片上传完成，object_key={}，status_code={}", object_key, result.status_code,
+        )
+        return self.public_url(object_key)
 
     def delete_object(self, object_key: str) -> bool:
         """删除 OSS 对象，失败时返回 False 并记录中文日志。"""

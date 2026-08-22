@@ -991,6 +991,26 @@ def test_reconciler_marks_expired_started_usage_as_outcome_unknown() -> None:
     assert usage.status == "outcome_unknown"
 
 
+def test_mark_started_commits_before_provider_http_call() -> None:
+    """mark_started 必须提交：usage 行锁不得横跨 Provider HTTP 调用窗口。
+
+    若只 flush 不 commit，activate/mark_started 的 UPDATE 留在未提交事务里，
+    行锁覆盖整个 HTTP 调用；模型响应超过 innodb_lock_wait_timeout（50 秒）
+    时，对账器的超期 UPDATE 会被阻塞至 MySQL 1205 并连带进程退出。
+    """
+    session, lease = _run_session()
+    usage_id = ModelUsageService(session).create_running(
+        _context(session, lease), _route(), "permit-send"
+    )
+
+    assert ModelUsageService(session).mark_started(usage_id)
+
+    # rollback 只能回滚未提交事务；行仍在且为 started，证明发送边界已提交。
+    session.rollback()
+    usage = session.scalar(select(AgentModelUsage).where(AgentModelUsage.usage_id == usage_id))
+    assert usage is not None and usage.status == "started"
+
+
 def test_late_usage_monotonically_settles_unknown_attempt_once() -> None:
     """迟到计量必须同时匹配 usage 与已冻结的 Provider 请求身份。"""
     session, lease = _run_session()

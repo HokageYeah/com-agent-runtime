@@ -164,7 +164,14 @@ class ReconcilerRunner:
         """按固定间隔周期运行；max_cycles 仅用于确定性的进程入口测试。"""
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception:
+                # 单轮失败（如 Worker 长模型调用持 usage 行锁时触发的 MySQL
+                # 1205 锁等待超时）只放弃本轮；会话与租约已在 run_once 的
+                # finally 中释放。常驻进程不能因单轮异常退出，否则 supervisor
+                # 会连带回收整个 Runtime 栈，把正在执行的 Run 一起杀掉。
+                logging.exception("reconciler_cycle_failed action=skip_and_continue")
             cycles += 1
             if max_cycles is None or cycles < max_cycles:
                 self._sleep(self._interval_seconds)

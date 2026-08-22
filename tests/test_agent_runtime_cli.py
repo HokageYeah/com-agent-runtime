@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -13,6 +14,12 @@ from app.scripts.agent_runtime_cli import (
     DatabaseBootstrapConfig,
     DatabaseBootstrapError,
     LocalSetup,
+    _cleanup_previous_runtime_processes,
+    _process_environment,
+    _ProcessRecord,
+    _start,
+    _terminate_validated_process,
+    _write_runtime_state,
     build_parser,
     build_service_commands,
     create_local_config,
@@ -491,3 +498,384 @@ def test_real_harness_always_removes_postgres_and_redis_before_returning(
         ),
     ]
     assert all("temporary-password" not in argument for command in commands for argument in command)
+
+
+def test_process_environment_extracts_only_the_controlled_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.subprocess.run",
+        lambda *args, **kwargs: CompletedProcess(
+            args,
+            0,
+            stdout="python -m app.worker ENVIRONMENT=development OTHER_VALUE=hidden\n",
+            stderr="",
+        ),
+    )
+
+    assert _process_environment(305) == "development"
+
+
+def test_cleanup_stops_only_same_project_and_environment_worker(tmp_path: Path) -> None:
+    target = _ProcessRecord(
+        101,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        tmp_path,
+        "start-target",
+        "development",
+    )
+    other_project = _ProcessRecord(
+        102,
+        target.command,
+        tmp_path / "other-project",
+        "start-other-project",
+        "development",
+    )
+    other_environment = _ProcessRecord(
+        103,
+        target.command,
+        tmp_path,
+        "start-other-environment",
+        "test",
+    )
+    stopped: list[int] = []
+
+    _cleanup_previous_runtime_processes(
+        tmp_path,
+        environment="development",
+        state_path=tmp_path / "worker.state",
+        process_reader=lambda _pid: None,
+        process_lister=lambda: (target, other_project, other_environment),
+        process_stopper=lambda record: stopped.append(record.pid) or True,
+    )
+
+    assert stopped == [101]
+
+
+def test_cleanup_reclaims_verified_previous_supervisor_and_worker(tmp_path: Path) -> None:
+    state_path = tmp_path / "worker.state"
+    supervisor = _ProcessRecord(
+        201,
+        "python -m app.scripts.agent_runtime_cli start development",
+        tmp_path,
+        "start-supervisor",
+        "development",
+    )
+    worker = _ProcessRecord(
+        202,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        tmp_path,
+        "start-worker",
+        "development",
+    )
+    _write_runtime_state(state_path, supervisor)
+    stopped: list[int] = []
+
+    _cleanup_previous_runtime_processes(
+        tmp_path,
+        environment="development",
+        state_path=state_path,
+        process_reader=lambda pid: supervisor if pid == supervisor.pid else None,
+        process_lister=lambda: (worker,),
+        process_stopper=lambda record: stopped.append(record.pid) or True,
+    )
+
+    assert stopped == [201, 202]
+    assert not state_path.exists()
+
+
+def test_cleanup_ignores_state_owned_by_another_project(tmp_path: Path) -> None:
+    state_path = tmp_path / "runtime.state"
+    foreign_root = tmp_path / "foreign-project"
+    supervisor = _ProcessRecord(
+        203,
+        "python -m app.scripts.agent_runtime_cli start development",
+        foreign_root,
+        "foreign-supervisor",
+        "development",
+    )
+    _write_runtime_state(state_path, supervisor)
+    stopped: list[int] = []
+
+    _cleanup_previous_runtime_processes(
+        tmp_path,
+        environment="development",
+        state_path=state_path,
+        process_reader=lambda _pid: supervisor,
+        process_lister=lambda: (),
+        process_stopper=lambda record: stopped.append(record.pid) or True,
+    )
+
+    assert stopped == []
+    assert not state_path.exists()
+
+
+def test_cleanup_never_reuses_a_stale_supervisor_pid_for_worker_cleanup(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runtime.state"
+    supervisor = _ProcessRecord(
+        204,
+        "python -m app.scripts.agent_runtime_cli start development",
+        tmp_path,
+        "old-supervisor",
+        "development",
+    )
+    replacement_worker = _ProcessRecord(
+        204,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        tmp_path,
+        "replacement-worker",
+        "development",
+    )
+    _write_runtime_state(state_path, supervisor)
+    stopped: list[int] = []
+
+    _cleanup_previous_runtime_processes(
+        tmp_path,
+        environment="development",
+        state_path=state_path,
+        process_reader=lambda _pid: replacement_worker,
+        process_lister=lambda: (replacement_worker,),
+        process_stopper=lambda record: stopped.append(record.pid) or True,
+    )
+
+    assert stopped == []
+    assert not state_path.exists()
+
+
+def test_terminate_process_escalates_only_after_term_timeout() -> None:
+    record = _ProcessRecord(
+        301,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        Path("/runtime"),
+        "start-worker",
+        "development",
+    )
+    alive = True
+    now = 0.0
+    signals: list[int] = []
+
+    def reader(_pid: int) -> _ProcessRecord | None:
+        return record if alive else None
+
+    def killer(_pid: int, received_signal: int) -> None:
+        nonlocal alive
+        signals.append(received_signal)
+        if received_signal == signal.SIGKILL:
+            alive = False
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    assert _terminate_validated_process(
+        record,
+        process_reader=reader,
+        process_killer=killer,
+        sleep=sleep,
+        monotonic=lambda: now,
+        timeout_seconds=0.2,
+    )
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_terminate_process_does_not_kill_a_reused_pid() -> None:
+    record = _ProcessRecord(
+        302,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        Path("/runtime"),
+        "start-worker",
+        "development",
+    )
+    replacement = _ProcessRecord(
+        302,
+        "python -m app.reconciler --interval-seconds 300",
+        Path("/runtime"),
+        "start-replacement",
+        "development",
+    )
+    reads = 0
+    signals: list[int] = []
+
+    def reader(_pid: int) -> _ProcessRecord:
+        nonlocal reads
+        reads += 1
+        return record if reads == 1 else replacement
+
+    def killer(_pid: int, received_signal: int) -> None:
+        signals.append(received_signal)
+
+    assert not _terminate_validated_process(
+        record,
+        process_reader=reader,
+        process_killer=killer,
+        timeout_seconds=0,
+    )
+    assert signals == [signal.SIGTERM]
+
+
+def test_start_cleans_previous_processes_before_spawning_services(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[object] = []
+    project_root = tmp_path.resolve()
+    lock_handle = Mock()
+    supervisor = _ProcessRecord(
+        304,
+        "python -m app.scripts.agent_runtime_cli start development",
+        project_root,
+        "start-supervisor",
+        "development",
+    )
+    commands = (("api",), ("launcher",), ("worker",), ("reconciler",))
+
+    class _ExitedProcess:
+        def poll(self) -> int:
+            return 1
+
+    monkeypatch.setattr("app.scripts.agent_runtime_cli.PROJECT_ROOT", project_root)
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._prepare",
+        lambda _environment: events.append("prepare") or {},
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._acquire_runtime_lock",
+        lambda _project_root: events.append("lock") or lock_handle,
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._runtime_control_paths",
+        lambda _project_root: (tmp_path / "runtime.lock", tmp_path / "runtime.state"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._cleanup_previous_runtime_processes",
+        lambda *args, **kwargs: events.append("cleanup"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._read_process_record",
+        lambda _pid: supervisor,
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._write_runtime_state",
+        lambda *args, **kwargs: events.append("state"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.build_service_commands",
+        lambda: commands,
+    )
+
+    def start_service(command: tuple[str, ...], **kwargs: object) -> _ExitedProcess:
+        del kwargs
+        events.append(("start", command))
+        return _ExitedProcess()
+
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.start_service_process",
+        start_service,
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._wait_until_ready",
+        lambda *args, **kwargs: events.append("ready"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._terminate_processes",
+        lambda _processes: events.append("terminate"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._clear_runtime_state",
+        lambda *args, **kwargs: events.append("clear"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._release_runtime_lock",
+        lambda _handle: events.append("release"),
+    )
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.signal.signal",
+        lambda received_signal, handler: events.append(("signal", received_signal))
+        or handler,
+    )
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_EXITED"):
+        _start("development")
+
+    cleanup_index = events.index("cleanup")
+    first_start_index = next(
+        index for index, event in enumerate(events) if isinstance(event, tuple) and event[0] == "start"
+    )
+    assert cleanup_index < first_start_index
+
+
+def test_terminate_process_fails_closed_when_term_is_forbidden() -> None:
+    record = _ProcessRecord(
+        303,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        Path("/runtime"),
+        "start-worker",
+        "development",
+    )
+    signals: list[int] = []
+
+    def killer(_pid: int, received_signal: int) -> None:
+        signals.append(received_signal)
+        raise PermissionError("permission denied")
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_STOP_FORBIDDEN"):
+        _terminate_validated_process(
+            record,
+            process_reader=lambda _pid: record,
+            process_killer=killer,
+        )
+
+    assert signals == [signal.SIGTERM]
+
+
+def test_cleanup_fails_closed_when_worker_stop_is_not_confirmed(tmp_path: Path) -> None:
+    worker = _ProcessRecord(
+        306,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        tmp_path,
+        "start-worker",
+        "development",
+    )
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_IDENTITY_CHANGED"):
+        _cleanup_previous_runtime_processes(
+            tmp_path,
+            environment="development",
+            state_path=tmp_path / "worker.state",
+            process_reader=lambda _pid: None,
+            process_lister=lambda: (worker,),
+            process_stopper=lambda _record: False,
+        )
+
+
+def test_terminate_process_raises_timeout_when_kill_does_not_stop() -> None:
+    record = _ProcessRecord(
+        307,
+        "python -m app.worker --worker-id agent-runtime-worker",
+        Path("/runtime"),
+        "start-worker",
+        "development",
+    )
+    now = 0.0
+    signals: list[int] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def killer(_pid: int, received_signal: int) -> None:
+        signals.append(received_signal)
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_STOP_TIMEOUT"):
+        _terminate_validated_process(
+            record,
+            process_reader=lambda _pid: record,
+            process_killer=killer,
+            sleep=sleep,
+            monotonic=lambda: now,
+            timeout_seconds=0.2,
+        )
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
