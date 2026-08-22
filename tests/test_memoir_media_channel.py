@@ -5,12 +5,15 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import importlib
 import importlib.util
 import json
 import logging
 import re
 import sys
+import time
 import types
 from pathlib import Path
 from urllib.parse import urlparse
@@ -136,17 +139,93 @@ def test_media_service_generates_six_key_manifest_and_payload() -> None:
     assert provider.text_prompts == ["我们在海边的傍晚散步，海风很轻。"]
 
 
-def test_media_service_degrades_failed_scene_to_summary_text_card() -> None:
+def test_media_service_degrades_failed_scene_to_summary_text_card(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """场景 2：单张失败只降级该场景，节点不抛异常、其余场景不受影响。"""
     provider = MockCVClient(text_image=b"not-an-image")  # 魔数嗅探失败 -> 降级
     service = MemoirMediaService(provider, FakeUploader(), _config())
-    manifest, scenes = service.generate(_run(), _scenes_with_one_image(), None)
+    with caplog.at_level(logging.INFO):
+        manifest, scenes = service.generate(_run(), _scenes_with_one_image(), None)
     assert manifest == []
     degraded = scenes[1]
     assert degraded["scene_type"] == "summary"
     assert degraded["body"] == "我们在海边的傍晚散步，海风很轻。"
     assert "payload" not in degraded and "title_word" not in degraded
     assert scenes[0]["scene_type"] == "summary"
+    assert "stage=image_validation" in caplog.text
+    assert "code=MEDIA_IMAGE_FORMAT_INVALID" in caplog.text
+
+
+def test_media_service_logs_safe_provider_failure_stage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Provider 异常仅记录固定阶段码，不泄露 prompt 或异常正文。"""
+    secret_prompt = "provider-private-prompt"
+    provider = MockCVClient(fail_prompts=frozenset({secret_prompt}))
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+
+    with caplog.at_level(logging.INFO):
+        manifest, scenes = service.generate(
+            _run(), _scenes_with_one_image(secret_prompt), None,
+        )
+
+    assert manifest == []
+    assert scenes[1]["scene_type"] == "summary"
+    assert "stage=provider" in caplog.text
+    assert "code=MEDIA_PROVIDER_FAILED" in caplog.text
+    assert secret_prompt not in caplog.text
+    assert "VOLCANO_CV_MOCK_FAILURE" not in caplog.text
+
+
+def test_media_service_logs_safe_oss_failure_stage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """OSS 异常仅记录固定阶段码，不泄露底层错误正文。"""
+    private_error = "oss-private-error"
+
+    class FailingUploader:
+        def upload_public_bytes(
+            self, data: bytes, object_key: str, mime: str,
+        ) -> str:
+            raise RuntimeError(private_error)
+
+    service = MemoirMediaService(
+        MockCVClient(text_image=PNG_BYTES), FailingUploader(), _config(),
+    )
+    with caplog.at_level(logging.INFO):
+        manifest, scenes = service.generate(_run(), _scenes_with_one_image(), None)
+
+    assert manifest == []
+    assert scenes[1]["scene_type"] == "summary"
+    assert "stage=oss_upload" in caplog.text
+    assert "code=MEDIA_OSS_UPLOAD_FAILED" in caplog.text
+    assert private_error not in caplog.text
+
+
+def test_media_service_logs_safe_url_failure_stage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """URL 合同异常仅记录固定阶段码，不泄露上传返回地址。"""
+    private_url = "https://private.example/memoir/images/private.png"
+
+    class InvalidUrlUploader:
+        def upload_public_bytes(
+            self, data: bytes, object_key: str, mime: str,
+        ) -> str:
+            return private_url
+
+    service = MemoirMediaService(
+        MockCVClient(text_image=PNG_BYTES), InvalidUrlUploader(), _config(),
+    )
+    with caplog.at_level(logging.INFO):
+        manifest, scenes = service.generate(_run(), _scenes_with_one_image(), None)
+
+    assert manifest == []
+    assert scenes[1]["scene_type"] == "summary"
+    assert "stage=url_validation" in caplog.text
+    assert "code=MEDIA_URL_VALIDATION_FAILED" in caplog.text
+    assert private_url not in caplog.text
 
 
 def test_media_service_all_failures_publish_text_only() -> None:
@@ -441,14 +520,21 @@ def test_is_safe_playback_rejects_url_mismatch_and_payload_violations() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 交付物 1：火山 CVProcess 签名与客户端（mock transport，零真实计费调用）
+# 交付物 1：火山视觉异步任务签名与客户端（mock transport，零真实计费调用）
 # ---------------------------------------------------------------------------
 
 def test_volcano_v4_authorization_deterministic_and_structured() -> None:
     kwargs = {
-        "method": "POST", "canonical_uri": "/", "canonical_query": "Action=CVProcess&Version=2022-08-31",
-        "host": "visual.volcengineapi.com", "payload": b'{"req_key":"general_v30"}',
-        "access_key": "AKTEST", "secret_key": "SKTEST", "region": "cn-north-1",
+        "method": "POST",
+        "canonical_uri": "/",
+        "canonical_query": (
+            "Action=CVSync2AsyncSubmitTask&Version=2022-08-31"
+        ),
+        "host": "visual.volcengineapi.com",
+        "payload": b'{"req_key":"high_aes_general_v30l_zt2i"}',
+        "access_key": "AKTEST",
+        "secret_key": "SKTEST",
+        "region": "cn-north-1",
         "x_date": "20260820T120000Z",
     }
     first = build_volcano_v4_authorization(**kwargs)
@@ -457,7 +543,7 @@ def test_volcano_v4_authorization_deterministic_and_structured() -> None:
     assert first == (
         "HMAC-SHA256 Credential=AKTEST/20260820/cn-north-1/cv/request, "
         "SignedHeaders=content-type;host;x-content-sha256;x-date, "
-        "Signature=663dd24c8bdad221a0b382b96277d4bfa69d26715d5ef6b5d13842eef2a450da"
+        "Signature=e05796fbdcef00f5782b4b984adb309ce231d8047193567a33b91f0f50e72d8a"
     )
     # 签名对 SK 敏感：密钥变化必须导致签名变化。
     changed = build_volcano_v4_authorization(**{**kwargs, "secret_key": "SKOTHER"})
@@ -468,19 +554,145 @@ def _cv_transport(handler) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
-def test_volcano_client_decodes_binary_data_base64() -> None:
+def test_volcano_client_uses_async_text_to_image_contract() -> None:
+    """通用 3.0 必须按官方合同先提交任务，再轮询结果。"""
     encoded = base64.b64encode(PNG_BYTES).decode("ascii")
+    actions: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        action = request.url.params["Action"]
+        actions.append(action)
         body = json.loads(request.content.decode("utf-8"))
-        assert body["req_key"] == "general_v30"
-        assert request.headers["Authorization"].startswith("HMAC-SHA256 Credential=AKTEST/")
-        return httpx.Response(200, json={"code": 10000, "data": {"binary_data_base64": [encoded]}})
+        assert request.url.params["Version"] == "2022-08-31"
+        assert request.headers["Authorization"].startswith(
+            "HMAC-SHA256 Credential=AKTEST/"
+        )
+        if action == "CVSync2AsyncSubmitTask":
+            assert body == {
+                "req_key": "high_aes_general_v30l_zt2i",
+                "prompt": "画面",
+            }
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-1"}},
+            )
+        assert action == "CVSync2AsyncGetResult"
+        assert body == {
+            "req_key": "high_aes_general_v30l_zt2i",
+            "task_id": "task-1",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "binary_data_base64": [encoded],
+                },
+            },
+        )
 
     client = VolcanoCVClient(
         access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
     )
     assert client.text_to_image("画面") == PNG_BYTES
+    assert actions == ["CVSync2AsyncSubmitTask", "CVSync2AsyncGetResult"]
+
+
+def test_volcano_client_uses_async_seededit_contract() -> None:
+    """SeedEdit 3.0 使用官方 req_key，并以单张 Base64 图片提交任务。"""
+    encoded_input = base64.b64encode(JPEG_BYTES).decode("ascii")
+    encoded_output = base64.b64encode(PNG_BYTES).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        action = request.url.params["Action"]
+        body = json.loads(request.content.decode("utf-8"))
+        if action == "CVSync2AsyncSubmitTask":
+            assert body == {
+                "req_key": "seededit_v3.0",
+                "prompt": "换成海边背景",
+                "binary_data_base64": [encoded_input],
+            }
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-2"}},
+            )
+        assert action == "CVSync2AsyncGetResult"
+        assert body == {"req_key": "seededit_v3.0", "task_id": "task-2"}
+        return httpx.Response(
+            200,
+            json={
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "binary_data_base64": [encoded_output],
+                },
+            },
+        )
+
+    client = VolcanoCVClient(
+        access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
+    )
+    assert client.image_to_image("换成海边背景", JPEG_BYTES) == PNG_BYTES
+
+
+def test_volcano_client_polls_until_task_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """排队与生成中状态继续查询，且不会把任务标识写入日志。"""
+    encoded = base64.b64encode(PNG_BYTES).decode("ascii")
+    query_results = iter(
+        [
+            {"status": "in_queue"},
+            {"status": "generating"},
+            {"status": "done", "binary_data_base64": [encoded]},
+        ]
+    )
+    query_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal query_count
+        if request.url.params["Action"] == "CVSync2AsyncSubmitTask":
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-private"}},
+            )
+        query_count += 1
+        return httpx.Response(
+            200,
+            json={"code": 10000, "data": next(query_results)},
+        )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("app.utils.volcano.cv_client.asyncio.sleep", no_sleep)
+    client = VolcanoCVClient(
+        access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
+    )
+    assert client.text_to_image("画面") == PNG_BYTES
+    assert query_count == 3
+
+
+@pytest.mark.parametrize("status", ["not_found", "expired"])
+def test_volcano_client_stops_on_terminal_task_status(status: str) -> None:
+    """任务丢失或过期是终态，必须立即失败而不是无限轮询。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["Action"] == "CVSync2AsyncSubmitTask":
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-private"}},
+            )
+        return httpx.Response(
+            200,
+            json={"code": 10000, "data": {"status": status}},
+        )
+
+    client = VolcanoCVClient(
+        access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
+    )
+    with pytest.raises(VolcanoCVError, match=status.upper()):
+        client.text_to_image("画面")
 
 
 def test_volcano_client_retries_only_network_and_5xx() -> None:
@@ -497,6 +709,41 @@ def test_volcano_client_retries_only_network_and_5xx() -> None:
     with pytest.raises(VolcanoCVError):
         client.text_to_image("画面")
     assert attempts["n"] == 2  # 1 次原始 + 1 次有限重试
+
+
+def test_volcano_client_enforces_total_request_deadline() -> None:
+    """单次慢响应必须在总期限内取消，不能依赖 HTTPX 分阶段超时。"""
+    delay_seconds = 0.5
+
+    def handler(request: httpx.Request):
+        async def delayed_response() -> httpx.Response:
+            await asyncio.sleep(delay_seconds)
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-private"}},
+            )
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            time.sleep(delay_seconds)
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-private"}},
+            )
+        return delayed_response()
+
+    client = VolcanoCVClient(
+        access_key="AKTEST",
+        secret_key="SKTEST",
+        timeout_seconds=0.02,
+        max_retries=0,
+        transport=_cv_transport(handler),
+    )
+    started = time.monotonic()
+    with pytest.raises(VolcanoCVError, match="VOLCANO_CV_TIMEOUT"):
+        client.text_to_image("prompt-private")
+    assert time.monotonic() - started < 0.25
 
 
 def test_volcano_client_transport_error_logs_controlled_code(
@@ -559,6 +806,40 @@ def test_volcano_client_http_4xx_does_not_retry(
     assert "response-secret" not in caplog.text
 
 
+def test_volcano_query_failure_does_not_log_task_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """查询失败日志只保留受控码，不泄漏异步任务标识或 prompt。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["Action"] == "CVSync2AsyncSubmitTask":
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-private"}},
+            )
+        return httpx.Response(
+            400,
+            json={
+                "code": 50200,
+                "message": "prompt-private task-private",
+                "request_id": "request-private",
+            },
+        )
+
+    client = VolcanoCVClient(
+        access_key="AKTEST",
+        secret_key="SKTEST",
+        max_retries=0,
+        transport=_cv_transport(handler),
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(VolcanoCVError):
+        client.text_to_image("prompt-private")
+    assert "action=CVSync2AsyncGetResult" in caplog.text
+    assert "business_code=50200" in caplog.text
+    assert "task-private" not in caplog.text
+    assert "prompt-private" not in caplog.text
+    assert "request-private" not in caplog.text
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_code"),
     [
@@ -615,6 +896,13 @@ def test_sniff_image_mime_whitelist() -> None:
 # 交付物 3：OSS 对象级公共读上传（假 SDK 模块，零真实桶写入）
 # ---------------------------------------------------------------------------
 
+def test_aliyun_oss_v2_runtime_dependency_is_installed() -> None:
+    """真实 OSS SDK 必须可导入且提供当前适配器依赖的顶层 API。"""
+    oss = importlib.import_module("alibabacloud_oss_v2")
+    assert callable(oss.Client)
+    assert callable(oss.PutObjectRequest)
+
+
 def test_upload_public_bytes_sets_public_read_acl(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -647,6 +935,72 @@ def test_upload_public_bytes_sets_public_read_acl(monkeypatch: pytest.MonkeyPatc
     assert captured["content_type"] == "image/png"
     assert captured["body"] == PNG_BYTES
     assert captured["key"] == "memoir/images/x.png"
+
+
+def test_upload_public_bytes_reports_block_public_access_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """公共 ACL 被 Bucket 策略拦截时给出固定诊断，不泄露 SDK 请求 URL。"""
+    leaked_url = (
+        "https://bucket.oss-cn-hangzhou.aliyuncs.com/"
+        "memoir/images/private.png?credential=secret"
+    )
+    log_records: list[tuple[str, tuple[object, ...]]] = []
+
+    class FakeLogger:
+        def bind(self, **_: object) -> FakeLogger:
+            return self
+
+        def info(self, message: str, *args: object) -> None:
+            log_records.append((message, args))
+
+        def warning(self, message: str, *args: object) -> None:
+            log_records.append((message, args))
+
+    class FakePutObjectRequest:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeClient:
+        def put_object(self, _request: FakePutObjectRequest) -> None:
+            raise RuntimeError(
+                "Http Status Code: 403; Error Code: AccessDenied; "
+                "Message: Put public object acl is not allowed.; "
+                f"EC: 0016-00000901; Request URL: {leaked_url}"
+            )
+
+    fake_module = types.SimpleNamespace(
+        credentials=types.SimpleNamespace(
+            StaticCredentialsProvider=lambda **_: None,
+        ),
+        config=types.SimpleNamespace(load_default=lambda: types.SimpleNamespace()),
+        Client=lambda _cfg: FakeClient(),
+        PutObjectRequest=FakePutObjectRequest,
+    )
+    monkeypatch.setitem(sys.modules, "alibabacloud_oss_v2", fake_module)
+    monkeypatch.setattr(
+        importlib.import_module("app.utils.aliyun.oss_client"),
+        "logger",
+        FakeLogger(),
+    )
+    client = AliyunOSSClient(
+        "AK", "SK", "bucket", "cn-hangzhou", "oss-cn-hangzhou.aliyuncs.com",
+    )
+
+    with pytest.raises(AliyunOSSClientError) as exc_info:
+        client.upload_public_bytes(
+            PNG_BYTES,
+            "memoir/images/private.png",
+            "image/png",
+        )
+
+    rendered_logs = repr(log_records)
+    assert exc_info.value.status_code == 403
+    assert "OSS_PUBLIC_ACL_BLOCKED" in str(exc_info.value)
+    assert "阻止公共访问" in str(exc_info.value)
+    assert leaked_url not in str(exc_info.value)
+    assert "OSS_PUBLIC_ACL_BLOCKED" in rendered_logs
+    assert leaked_url not in rendered_logs
 
 
 def test_upload_public_bytes_rejects_empty_payload() -> None:

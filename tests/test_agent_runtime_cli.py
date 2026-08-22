@@ -14,9 +14,14 @@ from app.scripts.agent_runtime_cli import (
     DatabaseBootstrapConfig,
     DatabaseBootstrapError,
     LocalSetup,
+    _acquire_runtime_lock,
     _cleanup_previous_runtime_processes,
-    _process_environment,
+    _is_managed_service_command,
+    _list_process_records,
     _ProcessRecord,
+    _read_process_record,
+    _read_runtime_state,
+    _same_process,
     _start,
     _terminate_validated_process,
     _write_runtime_state,
@@ -500,23 +505,25 @@ def test_real_harness_always_removes_postgres_and_redis_before_returning(
     assert all("temporary-password" not in argument for command in commands for argument in command)
 
 
-def test_process_environment_extracts_only_the_controlled_environment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "app.scripts.agent_runtime_cli.subprocess.run",
-        lambda *args, **kwargs: CompletedProcess(
-            args,
-            0,
-            stdout="python -m app.worker ENVIRONMENT=development OTHER_VALUE=hidden\n",
-            stderr="",
-        ),
+def test_managed_service_commands_cover_the_supervisor_and_all_children() -> None:
+    assert _is_managed_service_command("python run_app.py")
+    assert _is_managed_service_command(
+        "python -m app.scripts.agent_runtime_cli _launcher-loop"
     )
+    assert _is_managed_service_command(
+        "python -m app.worker --worker-id agent-runtime-worker"
+    )
+    assert _is_managed_service_command(
+        "python -m app.reconciler --interval-seconds 300"
+    )
+    assert _is_managed_service_command(
+        "python -m app.scripts.agent_runtime_cli start development"
+    )
+    assert not _is_managed_service_command("python -m app.worker --worker-id other")
+    assert not _is_managed_service_command("grep run_app.py unrelated.txt")
 
-    assert _process_environment(305) == "development"
 
-
-def test_cleanup_stops_only_same_project_and_environment_worker(tmp_path: Path) -> None:
+def test_cleanup_stops_all_same_project_managed_services(tmp_path: Path) -> None:
     target = _ProcessRecord(
         101,
         "python -m app.worker --worker-id agent-runtime-worker",
@@ -538,6 +545,19 @@ def test_cleanup_stops_only_same_project_and_environment_worker(tmp_path: Path) 
         "start-other-environment",
         "test",
     )
+    api = _ProcessRecord(104, "python run_app.py", tmp_path, "start-api")
+    launcher = _ProcessRecord(
+        105,
+        "python -m app.scripts.agent_runtime_cli _launcher-loop",
+        tmp_path,
+        "start-launcher",
+    )
+    reconciler = _ProcessRecord(
+        106,
+        "python -m app.reconciler --interval-seconds 300",
+        tmp_path,
+        "start-reconciler",
+    )
     stopped: list[int] = []
 
     _cleanup_previous_runtime_processes(
@@ -545,11 +565,18 @@ def test_cleanup_stops_only_same_project_and_environment_worker(tmp_path: Path) 
         environment="development",
         state_path=tmp_path / "worker.state",
         process_reader=lambda _pid: None,
-        process_lister=lambda: (target, other_project, other_environment),
+        process_lister=lambda: (
+            target,
+            other_project,
+            other_environment,
+            api,
+            launcher,
+            reconciler,
+        ),
         process_stopper=lambda record: stopped.append(record.pid) or True,
     )
 
-    assert stopped == [101]
+    assert stopped == [101, 103, 104, 105, 106]
 
 
 def test_cleanup_reclaims_verified_previous_supervisor_and_worker(tmp_path: Path) -> None:
@@ -644,6 +671,65 @@ def test_cleanup_never_reuses_a_stale_supervisor_pid_for_worker_cleanup(
     assert not state_path.exists()
 
 
+def test_cleanup_removes_invalid_runtime_state_without_signaling(tmp_path: Path) -> None:
+    state_path = tmp_path / "runtime.state"
+    state_path.write_text("{broken", encoding="utf-8")
+
+    _cleanup_previous_runtime_processes(
+        tmp_path,
+        environment="development",
+        state_path=state_path,
+        process_reader=lambda _pid: None,
+        process_lister=lambda: (),
+        process_stopper=lambda _record: pytest.fail("invalid state must not signal"),
+    )
+
+    assert _read_runtime_state(state_path) is None
+    assert not state_path.exists()
+
+
+def test_process_listing_failure_blocks_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.subprocess.run",
+        lambda *args, **kwargs: CompletedProcess(args, 2, stdout="", stderr="failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_INSPECTION_FAILED"):
+        _list_process_records()
+
+
+def test_process_read_failure_does_not_look_like_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli.subprocess.run",
+        lambda *args, **kwargs: CompletedProcess(args, 1, stdout="", stderr="failed"),
+    )
+    monkeypatch.setattr("app.scripts.agent_runtime_cli._process_exists", lambda _pid: True)
+
+    with pytest.raises(RuntimeError, match="RUNTIME_PROCESS_INSPECTION_FAILED"):
+        _read_process_record(309)
+
+
+def test_same_process_requires_environment_when_expected_environment_is_known() -> None:
+    expected = _ProcessRecord(
+        308,
+        "python -m app.scripts.agent_runtime_cli start development",
+        Path("/runtime"),
+        "start",
+        "development",
+    )
+    actual = _ProcessRecord(
+        308,
+        expected.command,
+        expected.cwd,
+        expected.start_time,
+        None,
+    )
+
+    assert not _same_process(expected, actual)
+
+
 def test_terminate_process_escalates_only_after_term_timeout() -> None:
     record = _ProcessRecord(
         301,
@@ -713,6 +799,49 @@ def test_terminate_process_does_not_kill_a_reused_pid() -> None:
         timeout_seconds=0,
     )
     assert signals == [signal.SIGTERM]
+
+
+def test_lock_requests_previous_supervisor_takeover_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "runtime.state"
+    supervisor = _ProcessRecord(
+        310,
+        "python -m app.scripts.agent_runtime_cli start development",
+        tmp_path,
+        "start-supervisor",
+        "development",
+    )
+    _write_runtime_state(state_path, supervisor)
+    lock_attempts = 0
+    stop_calls: list[int] = []
+
+    def flock(_fd: int, operation: int) -> None:
+        nonlocal lock_attempts
+        lock_attempts += 1
+        if lock_attempts == 1:
+            raise BlockingIOError
+
+    monkeypatch.setattr("app.scripts.agent_runtime_cli.fcntl.flock", flock)
+    monkeypatch.setattr(
+        "app.scripts.agent_runtime_cli._terminate_validated_process",
+        lambda record, **kwargs: stop_calls.append(record.pid) or True,
+    )
+
+    handle = _acquire_runtime_lock(
+        tmp_path,
+        lock_path=tmp_path / "runtime.lock",
+        state_path=state_path,
+        process_reader=lambda _pid: supervisor,
+        sleep=lambda _seconds: None,
+        monotonic=lambda: 0.0,
+        timeout_seconds=1.0,
+    )
+    handle.close()
+
+    assert lock_attempts == 2
+    assert stop_calls == [310]
 
 
 def test_start_cleans_previous_processes_before_spawning_services(
@@ -804,6 +933,7 @@ def test_start_cleans_previous_processes_before_spawning_services(
         index for index, event in enumerate(events) if isinstance(event, tuple) and event[0] == "start"
     )
     assert cleanup_index < first_start_index
+    assert events.index("lock") < events.index("prepare")
 
 
 def test_terminate_process_fails_closed_when_term_is_forbidden() -> None:

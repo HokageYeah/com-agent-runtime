@@ -1,4 +1,4 @@
-"""火山引擎 CVProcess 图像生成 Provider 适配器。
+"""火山引擎视觉智能异步图像生成 Provider 适配器。
 
 隐私铁律：prompt 文本、图片字节、临时 URL 都只在内存中流转，绝不写日志、
 不进 trace/checkpoint。日志只允许出现成败状态码与受控错误码。
@@ -8,26 +8,32 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import logging
 import time
+from collections.abc import Mapping
 from typing import Protocol
 
 import httpx
 
-# CVProcess 固定契约：文生图 general_v30 / 图生图 seededit-3.0（D1 冻结）。
-TEXT_TO_IMAGE_REQ_KEY = "general_v30"
-IMAGE_TO_IMAGE_REQ_KEY = "seededit-3.0"
-_API_ACTION = "CVProcess"
+# 火山视觉智能 3.0 固定合同：先提交异步任务，再按同一 req_key 查询结果。
+TEXT_TO_IMAGE_REQ_KEY = "high_aes_general_v30l_zt2i"
+IMAGE_TO_IMAGE_REQ_KEY = "seededit_v3.0"
+_SUBMIT_ACTION = "CVSync2AsyncSubmitTask"
+_GET_RESULT_ACTION = "CVSync2AsyncGetResult"
 _API_VERSION = "2022-08-31"
 _SERVICE = "cv"
+_PENDING_STATUSES = frozenset({"in_queue", "generating"})
+_FAILED_STATUSES = frozenset({"not_found", "expired"})
+_POLL_INTERVAL_SECONDS = 0.5
 
 
 class VolcanoCVError(ValueError):
-    """CVProcess 调用失败的安全错误；只携带受控错误码，不携带响应正文。"""
+    """火山视觉任务失败的安全错误；只携带受控码，不携带响应正文。"""
 
 
 def _safe_diagnostic_code(value: object) -> str:
@@ -142,139 +148,277 @@ class CVImageProvider(Protocol):
 
 
 class VolcanoCVClient:
-    """真实火山 CVProcess 客户端（开发期默认不被测试触达，测试用 Mock）。
+    """真实火山视觉智能异步客户端，向上仍提供同步图片 bytes 接口。
 
-    超时与有限重试：单次请求超时 timeout_seconds，仅对网络错误/5xx 重试
-    max_retries 次；4xx 业务失败不重试（重试也不会成功，只白烧钱）。
+    ``timeout_seconds`` 覆盖单张图片的提交、查询和网络重试总时长；仅网络错误
+    与 5xx 有限重试，4xx 和业务失败立即终止，避免重复无效请求。
     """
 
     def __init__(
-        self, *, access_key: str, secret_key: str,
-        region: str = "cn-north-1", host: str = "visual.volcengineapi.com",
-        timeout_seconds: float = 25.0, max_retries: int = 1,
-        transport: httpx.BaseTransport | None = None,
+        self,
+        *,
+        access_key: str,
+        secret_key: str,
+        region: str = "cn-north-1",
+        host: str = "visual.volcengineapi.com",
+        timeout_seconds: float = 25.0,
+        max_retries: int = 1,
+        transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not access_key or not secret_key:
             # 凭证缺失属于部署配置错误；只报受控码，不回显任何凭证信息。
             raise VolcanoCVError("VOLCANO_CV_CREDENTIAL_MISSING")
+        if timeout_seconds <= 0 or max_retries < 0:
+            raise VolcanoCVError("VOLCANO_CV_CONFIG_INVALID")
         self._ak, self._sk = access_key, secret_key
         self._region, self._host = region, host
         self._timeout, self._max_retries = timeout_seconds, max_retries
         # transport 仅测试注入 MockTransport 用；生产保持 None 走真实网络。
         self._transport = transport
 
-    def _client(self) -> httpx.Client:
-        return httpx.Client(
-            timeout=self._timeout, trust_env=False, transport=self._transport,
+    def _client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self._timeout,
+            trust_env=False,
+            transport=self._transport,
         )
 
-    def _post_cvprocess(self, body: dict[str, object]) -> dict[str, object]:
-        payload = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        canonical_query = f"Action={_API_ACTION}&Version={_API_VERSION}"
+    @staticmethod
+    def _remaining_seconds(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise VolcanoCVError("VOLCANO_CV_TIMEOUT")
+        return remaining
+
+    async def _sleep_with_deadline(self, delay: float, deadline: float) -> None:
+        await asyncio.sleep(min(delay, self._remaining_seconds(deadline)))
+
+    async def _signed_post(
+        self,
+        client: httpx.AsyncClient,
+        action: str,
+        body: Mapping[str, object],
+        timeout: float,
+    ) -> httpx.Response:
+        payload = json.dumps(
+            body,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        canonical_query = f"Action={action}&Version={_API_VERSION}"
         x_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         authorization = build_volcano_v4_authorization(
-            method="POST", canonical_uri="/", canonical_query=canonical_query,
-            host=self._host, payload=payload, access_key=self._ak,
-            secret_key=self._sk, region=self._region, x_date=x_date,
+            method="POST",
+            canonical_uri="/",
+            canonical_query=canonical_query,
+            host=self._host,
+            payload=payload,
+            access_key=self._ak,
+            secret_key=self._sk,
+            region=self._region,
+            x_date=x_date,
         )
-        last_error: Exception | None = None
+        request = client.post(
+            f"https://{self._host}/?{canonical_query}",
+            content=payload,
+            headers={
+                "Content-Type": "application/json",
+                "X-Date": x_date,
+                "X-Content-Sha256": _sha256_hex(payload),
+                "Authorization": authorization,
+            },
+            timeout=timeout,
+        )
+        # HTTPX 的标量 timeout 只约束各网络阶段；wait_for 才是整次请求墙钟上限。
+        return await asyncio.wait_for(request, timeout=timeout)
+
+    async def _post_action(
+        self,
+        client: httpx.AsyncClient,
+        action: str,
+        body: Mapping[str, object],
+        deadline: float,
+    ) -> dict[str, object]:
+        last_error = VolcanoCVError("VOLCANO_CV_REQUEST_FAILED")
         failure_status: int | None = None
         provider_code = "unavailable"
         business_code = "unavailable"
         request_id_present = False
-        with self._client() as client:
-            for attempt in range(self._max_retries + 1):
-                try:
-                    response = client.post(
-                        f"https://{self._host}/?{canonical_query}",
-                        content=payload,
-                        headers={
-                            "Content-Type": "application/json",
-                            "X-Date": x_date,
-                            "X-Content-Sha256": _sha256_hex(payload),
-                            "Authorization": authorization,
-                        },
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = await self._signed_post(
+                    client,
+                    action,
+                    body,
+                    min(self._timeout, self._remaining_seconds(deadline)),
+                )
+                failure_status = response.status_code
+                if response.status_code >= 500:
+                    provider_code, business_code, request_id_present = (
+                        _response_diagnostics(response)
                     )
-                    failure_status = response.status_code
-                    if response.status_code >= 500:
-                        last_error = VolcanoCVError("VOLCANO_CV_SERVER_UNAVAILABLE")
-                    elif response.status_code != 200:
-                        # 4xx 是签名、权限或参数错误；重复请求不会恢复，也可能重复计费。
-                        provider_code, business_code, request_id_present = (
-                            _response_diagnostics(response)
-                        )
+                    last_error = VolcanoCVError(
+                        "VOLCANO_CV_SERVER_UNAVAILABLE"
+                    )
+                elif response.status_code != 200:
+                    # 4xx 是签名、权限或参数错误；重复请求不会恢复。
+                    provider_code, business_code, request_id_present = (
+                        _response_diagnostics(response)
+                    )
+                    last_error = VolcanoCVError(
+                        _http_failure_code(response.status_code)
+                    )
+                    break
+                else:
+                    try:
+                        payload = response.json()
+                    except (TypeError, ValueError):
                         last_error = VolcanoCVError(
-                            _http_failure_code(response.status_code)
+                            "VOLCANO_CV_RESPONSE_INVALID"
                         )
                         break
-                    else:
-                        data = response.json()
-                        if not isinstance(data, dict):
-                            last_error = VolcanoCVError("VOLCANO_CV_RESPONSE_INVALID")
-                            break
-                        return data
-                except httpx.TimeoutException:
-                    # 超时异常可能携带 URL；统一压缩成受控码，禁止详情进入日志。
-                    last_error = VolcanoCVError("VOLCANO_CV_TIMEOUT")
-                except httpx.TransportError:
-                    # 传输异常可能携带 URL；统一压缩成受控码，禁止详情进入日志。
-                    last_error = VolcanoCVError("VOLCANO_CV_TRANSPORT_ERROR")
-                if attempt >= self._max_retries:
+                    if isinstance(payload, dict):
+                        return payload
+                    last_error = VolcanoCVError(
+                        "VOLCANO_CV_RESPONSE_INVALID"
+                    )
                     break
-                time.sleep(0.5 * (attempt + 1))
-        error_code = (
-            last_error.args[0]
-            if isinstance(last_error, VolcanoCVError) and last_error.args
-            else "VOLCANO_CV_REQUEST_FAILED"
-        )
+            except (TimeoutError, httpx.TimeoutException):
+                # 异常可能携带 URL；只保留受控码，禁止详情进入日志。
+                last_error = VolcanoCVError("VOLCANO_CV_TIMEOUT")
+            except httpx.TransportError:
+                last_error = VolcanoCVError("VOLCANO_CV_TRANSPORT_ERROR")
+            except VolcanoCVError as error:
+                last_error = error
+                break
+            if attempt >= self._max_retries:
+                break
+            try:
+                await self._sleep_with_deadline(0.5 * (attempt + 1), deadline)
+            except VolcanoCVError as error:
+                last_error = error
+                break
+        error_code = last_error.args[0] if last_error.args else "VOLCANO_CV_REQUEST_FAILED"
         logging.warning(
-            "火山 CVProcess 调用失败 status=%s code=%s provider_code=%s "
-            "business_code=%s request_id_present=%s",
+            "火山视觉任务调用失败 action=%s status=%s code=%s "
+            "provider_code=%s business_code=%s request_id_present=%s",
+            action,
             failure_status if failure_status is not None else "unavailable",
             error_code,
             provider_code,
             business_code,
             request_id_present,
         )
-        raise VolcanoCVError("VOLCANO_CV_REQUEST_FAILED")
+        raise last_error
 
-    def _generate(self, body: dict[str, object]) -> bytes:
-        data = self._post_cvprocess(body)
-        if data.get("code") not in (10000, 0):
-            raise VolcanoCVError("VOLCANO_CV_BUSINESS_FAILED")
-        result = data.get("data")
+    @staticmethod
+    def _require_business_success(
+        payload: dict[str, object],
+        action: str,
+    ) -> None:
+        code = payload.get("code")
+        if not isinstance(code, bool) and code in (10000, 0):
+            return
+        request_id_present = isinstance(payload.get("request_id"), str) and bool(
+            payload.get("request_id")
+        )
+        logging.warning(
+            "火山视觉任务业务失败 action=%s business_code=%s "
+            "request_id_present=%s",
+            action,
+            _safe_diagnostic_code(code),
+            request_id_present,
+        )
+        raise VolcanoCVError("VOLCANO_CV_BUSINESS_FAILED")
+
+    async def _submit_task(
+        self,
+        client: httpx.AsyncClient,
+        body: Mapping[str, object],
+        deadline: float,
+    ) -> str:
+        payload = await self._post_action(client, _SUBMIT_ACTION, body, deadline)
+        self._require_business_success(payload, _SUBMIT_ACTION)
+        result = payload.get("data")
         result = result if isinstance(result, dict) else {}
+        task_id = result.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise VolcanoCVError("VOLCANO_CV_TASK_ID_MISSING")
+        return task_id
+
+    @staticmethod
+    def _decode_image(result: dict[str, object]) -> bytes:
         binary_list = result.get("binary_data_base64")
-        if isinstance(binary_list, list) and binary_list:
-            first = binary_list[0]
-            if isinstance(first, str) and first:
-                return base64.b64decode(first)
-        # 临时 URL 只在 adapter 内部当日转存为 bytes，绝不向调用方或日志外泄。
-        urls = result.get("image_urls")
-        if isinstance(urls, list) and urls and isinstance(urls[0], str) and urls[0].startswith("https://"):
-            with self._client() as client:
-                download = client.get(urls[0])
-            if download.status_code == 200 and download.content:
-                return download.content
-        raise VolcanoCVError("VOLCANO_CV_EMPTY_RESULT")
+        first = binary_list[0] if isinstance(binary_list, list) and binary_list else None
+        if not isinstance(first, str) or not first:
+            raise VolcanoCVError("VOLCANO_CV_EMPTY_RESULT")
+        try:
+            image = base64.b64decode(first, validate=True)
+        except ValueError as error:
+            raise VolcanoCVError("VOLCANO_CV_RESPONSE_INVALID") from error
+        if not image:
+            raise VolcanoCVError("VOLCANO_CV_EMPTY_RESULT")
+        return image
+
+    async def _poll_task(
+        self,
+        client: httpx.AsyncClient,
+        req_key: str,
+        task_id: str,
+        deadline: float,
+    ) -> bytes:
+        query_body = {"req_key": req_key, "task_id": task_id}
+        while True:
+            payload = await self._post_action(
+                client,
+                _GET_RESULT_ACTION,
+                query_body,
+                deadline,
+            )
+            self._require_business_success(payload, _GET_RESULT_ACTION)
+            result = payload.get("data")
+            result = result if isinstance(result, dict) else {}
+            status = result.get("status")
+            if status == "done":
+                return self._decode_image(result)
+            if isinstance(status, str) and status in _FAILED_STATUSES:
+                raise VolcanoCVError(f"VOLCANO_CV_TASK_{status.upper()}")
+            if not isinstance(status, str) or status not in _PENDING_STATUSES:
+                raise VolcanoCVError("VOLCANO_CV_TASK_STATUS_INVALID")
+            await self._sleep_with_deadline(_POLL_INTERVAL_SECONDS, deadline)
+
+    async def _generate_async(self, body: Mapping[str, object]) -> bytes:
+        req_key = body.get("req_key")
+        if not isinstance(req_key, str) or not req_key:
+            raise VolcanoCVError("VOLCANO_CV_REQ_KEY_INVALID")
+        deadline = time.monotonic() + self._timeout
+        async with self._client() as client:
+            task_id = await self._submit_task(client, body, deadline)
+            return await self._poll_task(client, req_key, task_id, deadline)
+
+    def _generate(self, body: Mapping[str, object]) -> bytes:
+        return asyncio.run(self._generate_async(body))
 
     def text_to_image(self, prompt: str) -> bytes:
-        """文生图：req_key 冻结为 general_v30。"""
-        return self._generate({
-            "req_key": TEXT_TO_IMAGE_REQ_KEY,
-            "prompt": prompt,
-            "binary_data_base64": [],
-            "return_url": True,
-        })
+        """通用 3.0 文生图；提交体不伪造空参考图或 URL 返回参数。"""
+        return self._generate(
+            {
+                "req_key": TEXT_TO_IMAGE_REQ_KEY,
+                "prompt": prompt,
+            }
+        )
 
     def image_to_image(self, prompt: str, reference: bytes) -> bytes:
-        """图生图：req_key 冻结为 seededit-3.0，参考图走 binary_data_base64。"""
-        return self._generate({
-            "req_key": IMAGE_TO_IMAGE_REQ_KEY,
-            "prompt": prompt,
-            "binary_data_base64": [base64.b64encode(reference).decode("ascii")],
-            "return_url": True,
-        })
+        """SeedEdit 3.0 图生图；参考图只在请求内以单元素 Base64 数组传输。"""
+        return self._generate(
+            {
+                "req_key": IMAGE_TO_IMAGE_REQ_KEY,
+                "prompt": prompt,
+                "binary_data_base64": [
+                    base64.b64encode(reference).decode("ascii")
+                ],
+            }
+        )
 
 
 class MockCVClient:

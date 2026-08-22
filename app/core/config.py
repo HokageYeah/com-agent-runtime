@@ -323,7 +323,8 @@ class Settings(BaseSettings):
     MEMOIR_MEDIA_IMAGE_PREFIX: str = 'memoir/images/' # 生成图片对象 key 的强制前缀（D1 冻结契约）
     MEMOIR_MEDIA_MAX_IMAGES_PER_RUN: int = 8 # 单次 Run 最多生成图片张数（按张配额上限，未被 model_policy 覆盖时的默认值）
     MEMOIR_MEDIA_URL_HOST_SUFFIXES: str = 'aliyuncs.com' # 媒体 URL 域名后缀白名单（逗号分隔）
-    MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS: float = 25.0 # 单张图片单次请求超时（须显著小于 90s 节点租约）
+    # 单张图片提交、轮询与网络重试总超时，须显著小于 90s 节点租约。
+    MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS: float = 25.0
     MEMOIR_MEDIA_IMAGE_MAX_RETRIES: int = 1 # 单张图片有限重试次数
     MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 60.0 # 媒体节点整体时间预算（90s 租约内留出安全余量）
     # 照片出域门禁：图生图需要把用户照片字节发给图像 Provider；该门禁默认
@@ -332,7 +333,7 @@ class Settings(BaseSettings):
     # 图像 Provider 的数据驻留声明；仅当值为 public 时才允许照片出域，
     # 与上面门禁组成两个独立开关（都默认关闭/私有）。
     MEMOIR_MEDIA_PROVIDER_RESIDENCY: str = 'private'
-    # 火山引擎 CVProcess 图像 API 凭证；只经部署 env 注入，绝不写日志或响应。
+    # 火山视觉智能异步图像 API 凭证；只经部署 env 注入，绝不写日志或响应。
     VOLCANO_CV_ACCESS_KEY: str = ''
     VOLCANO_CV_SECRET_KEY: str = ''
     VOLCANO_CV_REGION: str = 'cn-north-1'

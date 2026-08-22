@@ -93,7 +93,7 @@ class AliyunOSSClient:
         if self._client is not None and self._oss_module is not None:
             return self._client, self._oss_module
 
-        import alibabacloud_oss_v2 as oss
+        import alibabacloud_oss_v2 as oss  # type: ignore[import-untyped]
 
         credentials_provider = oss.credentials.StaticCredentialsProvider(
             access_key_id=self.access_key_id,
@@ -223,14 +223,41 @@ class AliyunOSSClient:
             ))
         except Exception as exc:
             raw_message = str(exc)
-            logger.bind(tag=TAG).exception("OSS 图片上传失败，object_key={}", object_key)
-            if "AccessDenied" in raw_message:
+            if (
+                "0016-00000901" in raw_message
+                or "Put public object acl is not allowed" in raw_message
+            ):
+                # Bucket 阻止公共访问时，OSS 会拒绝对象级 public-read；
+                # 保留公共 URL 合同并给出固定诊断，不能静默改成不可访问的私有对象。
+                logger.bind(tag=TAG).warning(
+                    "OSS 图片公共读 ACL 被 Bucket 策略拒绝，object_key={}，code={}",
+                    object_key,
+                    "OSS_PUBLIC_ACL_BLOCKED",
+                )
                 raise AliyunOSSClientError(
-                    "阿里云 OSS 图片上传被拒绝：请检查 oss:PutObject 权限与对象 ACL 授权。"
-                    f"原始错误摘要：{raw_message[:500]}",
+                    "OSS_PUBLIC_ACL_BLOCKED：Bucket 已开启阻止公共访问；"
+                    "现有公共 URL 合同需关闭该设置，若保留该安全策略则需改用私有媒体访问合同。",
                     403,
                 ) from exc
-            raise AliyunOSSClientError(f"OSS 图片上传失败：{raw_message[:500]}", 502) from exc
+            if "AccessDenied" in raw_message:
+                logger.bind(tag=TAG).warning(
+                    "OSS 图片上传权限不足，object_key={}，code={}",
+                    object_key,
+                    "OSS_PUT_OBJECT_ACCESS_DENIED",
+                )
+                raise AliyunOSSClientError(
+                    "OSS_PUT_OBJECT_ACCESS_DENIED：请检查 oss:PutObject 权限与对象 ACL 授权。",
+                    403,
+                ) from exc
+            logger.bind(tag=TAG).warning(
+                "OSS 图片上传失败，object_key={}，code={}",
+                object_key,
+                "OSS_IMAGE_UPLOAD_FAILED",
+            )
+            raise AliyunOSSClientError(
+                "OSS_IMAGE_UPLOAD_FAILED：阿里云 OSS 图片上传失败。",
+                502,
+            ) from exc
 
         if result.status_code not in (200, 204):
             raise AliyunOSSClientError(f"OSS 图片上传失败，status_code={result.status_code}", 502)

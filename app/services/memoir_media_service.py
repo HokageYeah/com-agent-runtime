@@ -1,8 +1,8 @@
 """M6 回忆录媒体（图片）生成服务。
 
 职责：对 1.0.3+ 播放文档中的 image 场景逐张生成图片——
-1. 选择模式：素材含 images 且照片出域门禁开启 -> 图生图（seededit-3.0），
-   否则一律文生图（general_v30）；
+1. 选择模式：素材含 images 且照片出域门禁开启 -> 图生图（SeedEdit 3.0），
+   否则一律使用通用 3.0 文生图；
 2. 生成结果 bytes 上传 OSS `memoir/images/` 前缀（UUID 不可猜测 object_key，
    对象级公共读），产出 D1 冻结六键 media_manifest 条目；
 3. 单张失败/超预算/超配额 -> 该场景降级为 summary 文本卡，不重试节点、
@@ -208,6 +208,7 @@ class MemoirMediaService:
     ) -> dict[str, object] | None:
         """生成并上传一张图片；任何异常都吞掉并返回 None（该场景降级）。"""
         started = time.monotonic()
+        failure_stage, failure_code = "provider", "MEDIA_PROVIDER_FAILED"
         try:
             reference = self._reference_photo(scene_id, sanitized_material)
             # 图像 prompt 只使用已过安全审核口径的场景文案（≤80 字、无敏感标识）。
@@ -218,13 +219,22 @@ class MemoirMediaService:
             else:
                 data = self._provider.text_to_image(prompt)
                 mode, req_key = "txt2img", TEXT_TO_IMAGE_REQ_KEY
+
+            failure_stage = "image_validation"
+            failure_code = "MEDIA_IMAGE_FORMAT_INVALID"
             mime = sniff_image_mime(data)
             if mime is None:
-                raise ValueError("MEDIA_IMAGE_FORMAT_INVALID")
+                raise ValueError(failure_code)
             extension = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}[mime]
             # 不可猜测 object_key：前缀 + UUID4 + 按_mime 扩展名。
             object_key = f"{self.config.image_prefix}{uuid.uuid4()}.{extension}"
+
+            failure_stage = "oss_upload"
+            failure_code = "MEDIA_OSS_UPLOAD_FAILED"
             url = self._uploader.upload_public_bytes(data, object_key, mime)
+
+            failure_stage = "url_validation"
+            failure_code = "MEDIA_URL_VALIDATION_FAILED"
             self._require_contract_url(url)
             self._record_usage(run, req_key=req_key, succeeded=True)
             logging.info(
@@ -240,12 +250,13 @@ class MemoirMediaService:
                 "scene_id": scene_id,
             }
         except Exception:
-            # 隐私优先：不记录异常正文（可能含 URL/字节信息），只记受控元数据。
+            # 隐私优先：不记录异常正文（可能含 URL/字节信息），只记受控阶段码。
             self._record_usage(run, req_key=None, succeeded=False)
             logging.info(
-                "MemoirAgent 媒体单张失败降级 run_id=%s scene_id=%s elapsed_ms=%s code=%s",
-                getattr(run, "run_id", ""), scene_id,
-                int((time.monotonic() - started) * 1000), "MEDIA_GENERATION_FAILED",
+                "MemoirAgent 媒体单张失败降级 run_id=%s scene_id=%s "
+                "stage=%s elapsed_ms=%s code=%s",
+                getattr(run, "run_id", ""), scene_id, failure_stage,
+                int((time.monotonic() - started) * 1000), failure_code,
             )
             return None
 

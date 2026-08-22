@@ -823,24 +823,17 @@ def _process_cwd(pid: int) -> Path | None:
     return None
 
 
-def _process_environment(pid: int) -> str | None:
-    """只读取运行环境名，不保存或回显进程环境中的其他字段。"""
+def _process_exists(pid: int) -> bool:
+    """区分进程已退出与身份读取失败，避免检查失败时放行启动。"""
     try:
-        result = subprocess.run(
-            ("ps", "eww", "-p", str(pid), "-o", "command="),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError:
-        return None
-    if result.returncode != 0:
-        return None
-    match = re.search(
-        r"(?:^|\s)ENVIRONMENT=(development|test|production)(?:\s|$)",
-        result.stdout,
-    )
-    return match.group(1) if match else None
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED") from exc
+    return True
 
 
 def _parse_process_line(line: str) -> _ProcessRecord | None:
@@ -868,10 +861,10 @@ def _list_process_records() -> tuple[_ProcessRecord, ...]:
             text=True,
             check=False,
         )
-    except OSError:
-        return ()
-    if result.returncode not in (0, 1):
-        return ()
+    except OSError as exc:
+        raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED") from exc
+    if result.returncode != 0:
+        raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED")
     return tuple(
         record
         for line in result.stdout.splitlines()
@@ -880,7 +873,7 @@ def _list_process_records() -> tuple[_ProcessRecord, ...]:
 
 
 def _read_process_record(pid: int) -> _ProcessRecord | None:
-    """读取一个进程的完整身份，失败时绝不猜测其 cwd。"""
+    """读取一个进程的完整身份；无法确认时拒绝猜测其 cwd。"""
     try:
         result = subprocess.run(
             ("ps", "-ww", "-p", str(pid), "-o", "pid=,lstart=,command="),
@@ -888,10 +881,10 @@ def _read_process_record(pid: int) -> _ProcessRecord | None:
             text=True,
             check=False,
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED") from exc
     if result.returncode not in (0, 1):
-        return None
+        raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED")
     records = tuple(
         record
         for line in result.stdout.splitlines()
@@ -899,15 +892,19 @@ def _read_process_record(pid: int) -> _ProcessRecord | None:
         and record.pid == pid
     )
     if not records:
+        if _process_exists(pid):
+            raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED")
         return None
     return _record_with_cwd(records[0])
 
 
-def _record_with_cwd(record: _ProcessRecord) -> _ProcessRecord:
+def _record_with_cwd(record: _ProcessRecord) -> _ProcessRecord | None:
     cwd = record.cwd if record.cwd is not None else _process_cwd(record.pid)
-    environment = record.environment
-    if environment is None and _is_worker_command(record.command):
-        environment = _process_environment(record.pid)
+    if cwd is None:
+        if _process_exists(record.pid):
+            raise RuntimeError("RUNTIME_PROCESS_INSPECTION_FAILED")
+        return None
+    environment = record.environment or _supervisor_environment(record.command)
     return _ProcessRecord(
         pid=record.pid,
         command=record.command,
@@ -918,7 +915,7 @@ def _record_with_cwd(record: _ProcessRecord) -> _ProcessRecord:
 
 
 def _same_process(expected: _ProcessRecord, actual: _ProcessRecord | None) -> bool:
-    """只有 PID、命令、cwd 和可用启动时间都一致才认为是同一进程。"""
+    """只有 PID、命令、cwd、启动时间和可用环境都一致才认为是同一进程。"""
     if actual is None or expected.pid != actual.pid:
         return False
     if expected.command != actual.command:
@@ -929,29 +926,77 @@ def _same_process(expected: _ProcessRecord, actual: _ProcessRecord | None) -> bo
         return False
     if expected.start_time != actual.start_time:
         return False
-    return not (
-        expected.environment
-        and actual.environment
-        and expected.environment != actual.environment
-    )
+    if expected.environment is not None:
+        return actual.environment == expected.environment
+    return actual.environment is None
+
+
+def _command_tokens(command: str) -> tuple[str, ...] | None:
+    try:
+        return tuple(shlex.split(command))
+    except ValueError:
+        return None
+
+
+def _contains_command_tokens(command: str, target: tuple[str, ...]) -> bool:
+    tokens = _command_tokens(command)
+    if tokens is None:
+        return False
+    return any(tokens[index : index + len(target)] == target for index in range(len(tokens)))
+
+
+def _supervisor_environment(command: str) -> str | None:
+    tokens = _command_tokens(command)
+    if tokens is None:
+        return None
+    target = ("-m", "app.scripts.agent_runtime_cli", "start")
+    for index in range(len(tokens) - len(target) + 1):
+        if tokens[index : index + len(target)] == target:
+            environment_index = index + len(target)
+            if environment_index < len(tokens):
+                return _ENVIRONMENTS.get(tokens[environment_index])
+    return None
 
 
 def _is_worker_command(command: str) -> bool:
-    try:
-        tokens = tuple(shlex.split(command))
-    except ValueError:
-        return False
-    target = ("-m", "app.worker", "--worker-id", "agent-runtime-worker")
-    return any(tokens[index : index + len(target)] == target for index in range(len(tokens)))
+    return _contains_command_tokens(
+        command,
+        ("-m", "app.worker", "--worker-id", "agent-runtime-worker"),
+    )
 
 
 def _is_supervisor_command(command: str) -> bool:
-    try:
-        tokens = tuple(shlex.split(command))
-    except ValueError:
-        return False
-    target = ("-m", "app.scripts.agent_runtime_cli", "start")
-    return any(tokens[index : index + len(target)] == target for index in range(len(tokens)))
+    return _contains_command_tokens(
+        command,
+        ("-m", "app.scripts.agent_runtime_cli", "start"),
+    )
+
+
+def _is_python_script_command(command: str, script_name: str) -> bool:
+    tokens = _command_tokens(command)
+    return bool(
+        tokens
+        and len(tokens) == 2
+        and tokens[1] == script_name
+        and Path(tokens[0]).name.startswith("python")
+    )
+
+
+def _is_managed_service_command(command: str) -> bool:
+    """识别当前工程托管的全部服务，避免旧 supervisor 死亡后子进程残留。"""
+    return (
+        _is_python_script_command(command, "run_app.py")
+        or _contains_command_tokens(
+            command,
+            ("-m", "app.scripts.agent_runtime_cli", "_launcher-loop"),
+        )
+        or _is_worker_command(command)
+        or _contains_command_tokens(
+            command,
+            ("-m", "app.reconciler", "--interval-seconds", "300"),
+        )
+        or _is_supervisor_command(command)
+    )
 
 
 def _terminate_validated_process(
@@ -1092,7 +1137,10 @@ def _cleanup_previous_runtime_processes(
         _, state_path = _runtime_control_paths(root)
     previous = _read_runtime_state(state_path)
     protected_pids: set[int] = set()
-    if previous is not None:
+    if previous is None:
+        # 损坏或 schema 不完整的 state 不包含可验证身份，只能安全删除文件。
+        _clear_runtime_state(state_path, os.getpid())
+    else:
         # state 只允许声明当前工程的 supervisor；其他内容按不可信 stale state 处理。
         protected_pids.add(previous.pid)
         current = process_reader(previous.pid)
@@ -1113,11 +1161,11 @@ def _cleanup_previous_runtime_processes(
         if (
             listed.pid == os.getpid()
             or listed.pid in protected_pids
-            or not _is_worker_command(listed.command)
+            or not _is_managed_service_command(listed.command)
         ):
             continue
         candidate = _record_with_cwd(listed)
-        if candidate.cwd == root and candidate.environment == environment:
+        if candidate is not None and candidate.cwd == root:
             if not process_stopper(candidate):
                 raise RuntimeError("RUNTIME_PROCESS_IDENTITY_CHANGED")
 
@@ -1140,27 +1188,30 @@ def _acquire_runtime_lock(
     handle = lock_path.open("a+")
     lock_path.chmod(0o600)
     deadline = monotonic() + timeout_seconds
+    takeover_requested = False
     try:
         while True:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return handle
             except BlockingIOError:
-                previous = _read_runtime_state(state_path)
-                if previous is not None:
-                    current = process_reader(previous.pid)
-                    if (
-                        current is not None
-                        and current.cwd == project_root.resolve()
-                        and _is_supervisor_command(current.command)
-                        and _same_process(previous, current)
-                    ):
-                        _terminate_validated_process(
-                            current,
-                            process_reader=process_reader,
-                            sleep=sleep,
-                            monotonic=monotonic,
-                        )
+                if not takeover_requested:
+                    takeover_requested = True
+                    previous = _read_runtime_state(state_path)
+                    if previous is not None:
+                        current = process_reader(previous.pid)
+                        if (
+                            current is not None
+                            and current.cwd == project_root.resolve()
+                            and _is_supervisor_command(current.command)
+                            and _same_process(previous, current)
+                        ):
+                            _terminate_validated_process(
+                                current,
+                                process_reader=process_reader,
+                                sleep=sleep,
+                                monotonic=monotonic,
+                            )
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise RuntimeError("RUNTIME_START_LOCK_TIMEOUT") from None
@@ -1233,7 +1284,7 @@ def supervised_service_environment(environment: Mapping[str, str]) -> dict[str, 
 
 def _start(environment: str) -> None:
     normalized = _normalize_local_environment(environment)
-    command_environment = supervised_service_environment(_prepare(normalized))
+    # prepare 含数据库检查和迁移，必须在工程锁内执行，避免并发 start 同时迁移。
     lock_handle = _acquire_runtime_lock(PROJECT_ROOT)
     _, state_path = _runtime_control_paths(PROJECT_ROOT)
     processes: list[subprocess.Popen[bytes]] = []
@@ -1243,9 +1294,12 @@ def _start(environment: str) -> None:
         nonlocal stopping
         stopping = True
 
-    previous_sigint = signal.signal(signal.SIGINT, request_stop)
-    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
+        command_environment = supervised_service_environment(_prepare(normalized))
         _cleanup_previous_runtime_processes(
             PROJECT_ROOT,
             environment=normalized,
