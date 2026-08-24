@@ -1,12 +1,14 @@
 """M6 回忆录媒体（图片）生成服务。
 
-职责：对 1.0.3+ 播放文档中的 image 场景逐张生成图片——
+职责：逐张生成场景配图——1.0.3 仅 image 场景，1.0.4+ 每场景配图
+（illustrate_all_scenes=True，全部场景按 body 生成）——
 1. 选择模式：素材含 images 且照片出域门禁开启 -> 图生图（SeedEdit 3.0），
    否则一律使用通用 3.0 文生图；
 2. 生成结果 bytes 上传 OSS `memoir/images/` 前缀（UUID 不可猜测 object_key，
    对象级公共读），产出 D1 冻结六键 media_manifest 条目；
-3. 单张失败/超预算/超配额 -> 该场景降级为 summary 文本卡，不重试节点、
-   不回滚文案；全部失败 -> media_tasks=[]（发布纯文字 revision）；
+3. 单张失败/超预算/超配额 -> 该场景降级为纯文字卡（旧模式改 summary；
+   每场景配图模式保留原场景类型），不重试节点、不回滚文案；
+   全部失败 -> media_tasks=[]（发布纯文字 revision）；
 4. 按张计量：每张成功图片写一行 AgentModelUsage（image_count=1，
    cost_unit=per_image），不经过 LLM token 计量路径。
 
@@ -22,6 +24,7 @@ from collections.abc import Mapping
 from typing import Protocol
 from urllib.parse import urlparse
 
+from app.core.logging_uru import log_success
 from app.utils.volcano.cv_client import (
     IMAGE_TO_IMAGE_REQ_KEY,
     TEXT_TO_IMAGE_REQ_KEY,
@@ -39,6 +42,46 @@ MEDIA_IMAGE_MIME_TYPES: frozenset[str] = frozenset({
 })
 # 媒体 URL 的 OSS 域名后缀白名单（默认值，可被部署配置覆盖）。
 MEDIA_URL_HOST_SUFFIXES: tuple[str, ...] = ("aliyuncs.com",)
+
+# ---- 手绘水彩插画 prompt 模板（统一回忆录配图风格）----
+# 目标：生成日系手绘水彩绘本风插画而非写实图片，与 App 整体治愈风格一致。
+# 场景 body 填入 {场景描述} 占位符（用 replace 填充，避开 str.format 对
+# 模板中其他花括号/中文标号的解析陷阱）。
+# 隐私铁律：完整 prompt 只传入火山 Provider，绝不写日志/trace/checkpoint。
+_ILLUSTRATION_PROMPT_TEMPLATE = """请生成一张用于“情侣日记 App 回忆录”的手绘插画，场景内容：{场景描述}。
+整体采用精致、清透的日系手绘水彩绘本风，带细腻线稿、轻微彩铅质感、水彩晕染、纸张颗粒感。
+画面强调生活感、故事感、回忆感、治愈感，色彩低饱和、柔和、干净，以奶油白、米白、浅粉、浅棕、暖灰、灰蓝、柔和绿色为主，可融入少量樱花粉点缀。
+根据场景内容自然决定是否出现人物：可以是情侣、单人、多人，也可以无人；如果有人物，人物要自然清秀、轻微卡通化、五官柔和、动作生活化，通过互动或细节传达情绪。
+如果没有人物，就通过环境与物品讲故事，例如桌椅、窗台、餐具、花束、鞋子、雨伞、票据、行李、路灯、街道、展品、厨房用品等。
+构图自然，有前景、中景、背景层次，主体明确，环境细节丰富但不要喧宾夺主。
+光影自然柔和，保留空气感和轻微怀旧感。
+输出为纯图片，不要边框，不要文字，不要编号，不要 Logo，不要水印，不要 UI，不要海报排版。"""
+
+# 负面风格约束：火山该 req_key 无独立 negative_prompt 通道，直接拼接在
+# prompt 末尾，避免生成写实/3D/海报风图片。
+_ILLUSTRATION_PROMPT_NEGATIVE = (
+    "不要照片写实、不要3D、不要CG、不要塑料感、不要厚重油画、不要高对比动漫赛璐璐、"
+    "不要夸张二次元大眼、不要Q版大头、不要过度锐化、不要荧光色、不要霓虹色、"
+    "不要大面积纯黑、不要复杂装饰边框、不要贴纸风、不要海报字。"
+)
+
+# 场景 body 为空时的兜底画面描述（保持旧版口径不变）。
+_DEFAULT_SCENE_DESCRIPTION = "一段温暖的回忆画面"
+
+
+def build_illustration_prompt(scene_body: str) -> str:
+    """把场景文案套进手绘水彩模板，生成最终图像 prompt。
+
+    txt2img / img2img 两种模式共用同一构建函数，保证文生图与图生图
+    风格一致；测试侧也用它构造期望 prompt 与 MockCVClient fail_prompts
+    （fail_prompts 按 prompt 全文精确匹配，必须同源构建才不失效）。
+    """
+    description = scene_body.strip() or _DEFAULT_SCENE_DESCRIPTION
+    return (
+        _ILLUSTRATION_PROMPT_TEMPLATE.replace("{场景描述}", description)
+        + "\n\n"
+        + _ILLUSTRATION_PROMPT_NEGATIVE
+    )
 
 
 def sniff_image_mime(data: bytes) -> str | None:
@@ -132,37 +175,45 @@ class MemoirMediaService:
     def generate(
         self, run: object, scenes: list[dict[str, object]],
         sanitized_material: object,
+        *, illustrate_all_scenes: bool = False,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         """返回 (media_manifest 条目列表, 更新后的场景列表)。
 
         新列表为新对象（不改入参）；成功场景附加 payload={image_url, title_word?}，
         失败/超限场景降级为 summary 文本卡并去掉 title_word。
+        1.0.4+ 每场景配图（illustrate_all_scenes=True）：对全部场景按 body
+        生成配图，不再依赖模型规划 image 场景；单张失败时该场景原样保留为
+        纯文字卡（场景类型不变、顶层 title_word 剥离），封面/总结等结构稳定。
         """
         deadline = time.monotonic() + self.config.node_budget_seconds
         image_quota = self._image_quota_for(run)
         media_tasks: list[dict[str, object]] = []
         updated_scenes: list[dict[str, object]] = []
         delivered = self._images_delivered(run)
-        image_scenes = 0
+        candidate_scenes = 0
         for scene in scenes:
-            # 非 image 场景零改动原样透传（payload 契约：非 image 场景无 payload）。
-            if not (isinstance(scene, Mapping) and scene.get("scene_type") == "image"):
+            # 旧模式仅 image 场景是候选，非 image 场景零改动原样透传
+            # （payload 契约：非 image 场景无 payload）。
+            is_candidate = isinstance(scene, Mapping) and (
+                illustrate_all_scenes or scene.get("scene_type") == "image"
+            )
+            if not is_candidate:
                 updated_scenes.append(dict(scene))
                 continue
             scene_id = scene.get("scene_id")
             body = scene.get("body") if isinstance(scene.get("body"), str) else ""
-            image_scenes += 1
+            candidate_scenes += 1
             entry: dict[str, object] | None = None
             # scene_id 无效（非字符串/为空）时不生成也不记日志（值本身不可信），
             # entry 保持 None 走统一降级路径。
             scene_ok = isinstance(scene_id, str) and bool(scene_id)
             if scene_ok and delivered >= image_quota:
-                logging.info(
+                logging.warning(
                     "MemoirAgent 媒体配额已满降级 run_id=%s scene_id=%s code=%s",
                     getattr(run, "run_id", ""), scene_id, "MEDIA_IMAGE_QUOTA_EXCEEDED",
                 )
             elif scene_ok and time.monotonic() >= deadline:
-                logging.info(
+                logging.warning(
                     "MemoirAgent 媒体节点预算耗尽降级 run_id=%s scene_id=%s code=%s",
                     getattr(run, "run_id", ""), scene_id, "MEDIA_NODE_BUDGET_EXCEEDED",
                 )
@@ -171,22 +222,34 @@ class MemoirMediaService:
                 if entry is not None:
                     delivered += 1
                     media_tasks.append(entry)
-            updated_scenes.append(self._scene_after_media(scene, entry))
-        logging.info(
-            "MemoirAgent 媒体生成完成 run_id=%s image_scene=%s delivered=%s",
-            getattr(run, "run_id", ""), image_scenes, len(media_tasks),
+            updated_scenes.append(
+                self._scene_after_media(scene, entry, keep_type=illustrate_all_scenes)
+            )
+        log_success(
+            "MemoirAgent 媒体生成完成 run_id=%s illustrate_all=%s candidate=%s delivered=%s",
+            getattr(run, "run_id", ""), illustrate_all_scenes, candidate_scenes,
+            len(media_tasks),
         )
         return media_tasks, updated_scenes
 
     def _scene_after_media(
         self, scene: Mapping, entry: dict[str, object] | None,
+        *, keep_type: bool = False,
     ) -> dict[str, object]:
-        """按生成结果重写场景：成功挂 payload，失败降级 summary 文本卡。"""
+        """按生成结果重写场景：成功挂 payload，失败降级为纯文字卡。"""
         if entry is None:
-            # 降级：scene_type 改 summary、去掉 title_word，正文保留为文本卡文案。
+            # 降级：旧模式 scene_type 改 summary；每场景配图模式保留原类型
+            # （cover 失败仍是封面文字卡），仅 image 类型例外——发布契约要求
+            # image 场景必须带 payload，故统一降级 summary。
+            degraded_type = (
+                scene.get("scene_type")
+                if keep_type and scene.get("scene_type") != "image"
+                else "summary"
+            )
+            # 降级场景不携带顶层 title_word（发布边界不接受该顶层字段）。
             return {
                 "scene_id": scene.get("scene_id"),
-                "scene_type": "summary",
+                "scene_type": degraded_type,
                 "source_refs": list(scene.get("source_refs") or []),
                 **({"body": scene["body"]} if isinstance(scene.get("body"), str) else {}),
             }
@@ -194,10 +257,11 @@ class MemoirMediaService:
         title_word = scene.get("title_word")
         if isinstance(title_word, str) and title_word:
             payload["title_word"] = title_word
-        # payload 白名单仅 {image_url, title_word}；成功场景不携带顶层 title_word。
+        # payload 白名单仅 {image_url, title_word}；成功场景保留原场景类型
+        # （旧模式候选必为 image，此处等价），顶层 title_word 收进 payload。
         return {
             "scene_id": scene.get("scene_id"),
-            "scene_type": "image",
+            "scene_type": scene.get("scene_type"),
             "source_refs": list(scene.get("source_refs") or []),
             **({"body": scene["body"]} if isinstance(scene.get("body"), str) else {}),
             "payload": payload,
@@ -211,8 +275,9 @@ class MemoirMediaService:
         failure_stage, failure_code = "provider", "MEDIA_PROVIDER_FAILED"
         try:
             reference = self._reference_photo(scene_id, sanitized_material)
-            # 图像 prompt 只使用已过安全审核口径的场景文案（≤80 字、无敏感标识）。
-            prompt = body.strip() or "一段温暖的回忆画面"
+            # 图像 prompt 只使用已过安全审核口径的场景文案（1.0.4+ ≤140 字、
+            # 无敏感标识）套手绘水彩模板，统一插画风格；兜底画面在构建函数内。
+            prompt = build_illustration_prompt(body)
             if reference is not None:
                 data = self._provider.image_to_image(prompt, reference)
                 mode, req_key = "img2img", IMAGE_TO_IMAGE_REQ_KEY
@@ -237,7 +302,7 @@ class MemoirMediaService:
             failure_code = "MEDIA_URL_VALIDATION_FAILED"
             self._require_contract_url(url)
             self._record_usage(run, req_key=req_key, succeeded=True)
-            logging.info(
+            log_success(
                 "MemoirAgent 媒体单张完成 run_id=%s scene_id=%s mode=%s elapsed_ms=%s",
                 getattr(run, "run_id", ""), scene_id, mode, int((time.monotonic() - started) * 1000),
             )
@@ -252,7 +317,7 @@ class MemoirMediaService:
         except Exception:
             # 隐私优先：不记录异常正文（可能含 URL/字节信息），只记受控阶段码。
             self._record_usage(run, req_key=None, succeeded=False)
-            logging.info(
+            logging.warning(
                 "MemoirAgent 媒体单张失败降级 run_id=%s scene_id=%s "
                 "stage=%s elapsed_ms=%s code=%s",
                 getattr(run, "run_id", ""), scene_id, failure_stage,
@@ -285,7 +350,7 @@ class MemoirMediaService:
                         return self._photo_loader(object_key)
                     except Exception:
                         # 照片取回失败按无参考图处理，回退文生图，不中断节点。
-                        logging.info(
+                        logging.warning(
                             "MemoirAgent 参考照片取回失败回退文生图 scene_id=%s code=%s",
                             scene_id, "MEDIA_PHOTO_FETCH_FAILED",
                         )

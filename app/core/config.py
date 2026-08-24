@@ -326,7 +326,7 @@ class Settings(BaseSettings):
     # 单张图片提交、轮询与网络重试总超时，须显著小于 90s 节点租约。
     MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS: float = 25.0
     MEMOIR_MEDIA_IMAGE_MAX_RETRIES: int = 1 # 单张图片有限重试次数
-    MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 60.0 # 媒体节点整体时间预算（90s 租约内留出安全余量）
+    MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 75.0 # 媒体节点整体时间预算（90s 租约内留出安全余量；1.0.4 每场景配图最多 8 张、实测单张 ~7s，60s 不够）
     # 照片出域门禁：图生图需要把用户照片字节发给图像 Provider；该门禁默认
     # 关闭，关闭时即使素材含 images 也只走文生图，绝不外发照片。
     MEMOIR_MEDIA_PHOTO_EGRESS_ENABLED: bool = False

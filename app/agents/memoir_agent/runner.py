@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.logging_uru import log_success
 from app.models import AgentRun
 from app.runtime.context_manager import ContextManager
 from app.runtime.evaluator import MemoirPlaybackEvaluator
@@ -151,6 +152,8 @@ _SCENE_TYPES: tuple[str, ...] = (
 _MEDIA_SCENE_TYPES: tuple[str, ...] = _SCENE_TYPES + ("image",)
 # 媒体生成（image 场景）的最低 agent 版本；版本比较按三元组数值语义。
 _MEDIA_MIN_VERSION = "1.0.3"
+# 每场景配图（全场景 payload + title_word 放开 + body ≤140 字）的最低版本。
+_PER_SCENE_MEDIA_MIN_VERSION = "1.0.4"
 _ACTION_TYPES: tuple[str, ...] = ("show_card", "type_text", "hold", "transition")
 
 # 规则动作映射：动作是调度结构而非内容，按 scene_type 确定性推导动作类型
@@ -168,19 +171,33 @@ _SCENE_ACTION_RULES: dict[str, str] = {
 }
 
 
-def _media_version_enabled(agent_version: object) -> bool:
-    """版本门控：仅 1.0.3 及以上的 Run 允许生成 image 场景。
-
-    旧版本（或测试桩缺字段）返回 False，保证 1.0.0-1.0.2 行为零变化。
-    """
+def _version_at_least(agent_version: object, minimum: str) -> bool:
+    """三元组数值版本比较；非法版本（或测试桩缺字段）返回 False。"""
     if not isinstance(agent_version, str) or not agent_version:
         return False
     try:
         current = tuple(int(part) for part in agent_version.split(".")[:3])
     except ValueError:
         return False
-    minimum = tuple(int(part) for part in _MEDIA_MIN_VERSION.split("."))
-    return current >= minimum
+    return current >= tuple(int(part) for part in minimum.split("."))
+
+
+def _media_version_enabled(agent_version: object) -> bool:
+    """版本门控：仅 1.0.3 及以上的 Run 允许生成 image 场景。
+
+    旧版本（或测试桩缺字段）返回 False，保证 1.0.0-1.0.2 行为零变化。
+    """
+    return _version_at_least(agent_version, _MEDIA_MIN_VERSION)
+
+
+def _per_scene_media_enabled(agent_version: object) -> bool:
+    """版本门控：仅 1.0.4 及以上的 Run 启用"每场景配图"。
+
+    1.0.4 起媒体通道从"仅 image 场景配图"升级为"全部场景按 body 生成配图"：
+    任意场景类型可携带 payload={image_url, title_word?}，title_word 顶层字段
+    同步放开到任意场景；1.0.3- 行为零变化（payload 仍仅限 image 场景）。
+    """
+    return _version_at_least(agent_version, _PER_SCENE_MEDIA_MIN_VERSION)
 
 
 class MemoirNodeRunner:
@@ -227,6 +244,8 @@ class MemoirNodeRunner:
             if evaluation.decision == "pass" and self._is_safe_playback(
                 state.scenes, state.actions, media_tasks=state.media_tasks,
                 scene_types=_MEDIA_SCENE_TYPES if _media_version_enabled(getattr(run, "agent_version", "")) else _SCENE_TYPES,
+                # 1.0.4+ 每场景配图：任意场景可携带 payload、body 上限放宽到 140 字。
+                per_scene_media=_per_scene_media_enabled(getattr(run, "agent_version", "")),
             ):
                 decision = "passed"
             else:
@@ -250,7 +269,7 @@ class MemoirNodeRunner:
             # media_manifest 由媒体节点产出的六键条目直接构成（None 归一为空），
             # schema_version 维持 1.0.0 不升版（D1 冻结：媒体是增量，不是破坏性变更）。
             state.playback_document = {"schema_version": "1.0.0", "scenes": state.scenes, "actions": state.actions, "media_manifest": state.media_tasks if isinstance(state.media_tasks, list) else []}
-            logging.info("MemoirAgent 安全审核完成 run_id=%s decision=%s scene_count=%s", run.run_id, decision, len(state.scenes))
+            log_success("MemoirAgent 安全审核完成 run_id=%s decision=%s scene_count=%s", run.run_id, decision, len(state.scenes))
             return {"node_id": "safety_review", "safe": decision == "passed"}
         if node.get("node_id") == "plan_chapters":
             highlights = state.highlights if isinstance(state.highlights, dict) else {}
@@ -275,7 +294,7 @@ class MemoirNodeRunner:
                     "chapter_plan",
                     {"chapters": validated_chapters},
                 )
-                logging.info(
+                log_success(
                     "MemoirAgent 模型章节完成 run_id=%s chapter_count=%s",
                     run.run_id,
                     len(validated_chapters),
@@ -317,7 +336,7 @@ class MemoirNodeRunner:
                 )
             if validated_scenes is not None:
                 state.apply_tool_output("scenes", validated_scenes)
-                logging.info(
+                log_success(
                     "MemoirAgent 模型场景完成 run_id=%s scene_count=%s",
                     run.run_id,
                     len(validated_scenes),
@@ -344,7 +363,7 @@ class MemoirNodeRunner:
             # _SCENE_ACTION_RULES，不接模型，保证零幻觉调度。
             state.actions = self._rule_actions(scenes)
             state.fallback_flags.append("template_actions")
-            logging.info("MemoirAgent 规则动作完成 run_id=%s action_count=%s", run.run_id, len(state.actions))
+            log_success("MemoirAgent 规则动作完成 run_id=%s action_count=%s", run.run_id, len(state.actions))
             return {"node_id": "generate_actions", "fallback": True}
         if node.get("node_id") == "extract_highlights":
             # 原始 snapshot 不得在此节点回读，高光只可消费脱敏视图中的非敏感引用。
@@ -375,7 +394,7 @@ class MemoirNodeRunner:
                         "mode": "model",
                     },
                 )
-                logging.info(
+                log_success(
                     "MemoirAgent 模型高光完成 run_id=%s ref_count=%s",
                     run.run_id,
                     len(validated_highlights),
@@ -417,7 +436,7 @@ class MemoirNodeRunner:
                 diary_count = len(diaries) if isinstance(diaries, list) else 0
                 bet_count = len(bets) if isinstance(bets, list) else 0
             state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
-            logging.info("MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s", run.run_id, diary_count, bet_count)
+            log_success("MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s", run.run_id, diary_count, bet_count)
             return {"node_id": "compute_stats", "stats_ready": True}
         if node.get("node_id") == "sanitize_materials":
             # 原始快照只允许在该节点读取；下游仅能获得最小脱敏视图。
@@ -432,7 +451,7 @@ class MemoirNodeRunner:
                     "MATERIAL_INVALID",
                 )
             else:
-                logging.info(
+                log_success(
                     "MemoirAgent 素材脱敏完成 run_id=%s material_count=%s sensitive_count=%s",
                     run.run_id,
                     len(materials),
@@ -444,7 +463,10 @@ class MemoirNodeRunner:
             # 第一版的确定性无副作用跳过语义（不解析正文、不外发请求）。
             # 节点绝不抛异常：单张失败在服务内降级为文本卡，节点永远成功返回，
             # 保证 90s 租约内 publish 前同步完成且不回滚已生成的文案。
+            # 1.0.4+ 升级为每场景配图：不再要求模型规划 image 场景，媒体服务
+            # 对全部场景按 body 生成配图（illustrate_all_scenes=True）。
             agent_version = getattr(run, "agent_version", "")
+            per_scene = _per_scene_media_enabled(agent_version)
             scenes = state.scenes if isinstance(state.scenes, list) else []
             has_image = any(
                 isinstance(scene, dict) and scene.get("scene_type") == "image"
@@ -454,15 +476,17 @@ class MemoirNodeRunner:
                 # 能力关闭：旧版本 graph（无 image 场景）保持原样跳过、零行为变化；
                 # 1.0.3 关闭媒体部署时把 image 场景降级为 summary 文本卡——否则
                 # safety_review 会因 image 场景缺 manifest 条目整批回退基础卡。
+                # 1.0.4+ 场景可能携带顶层 title_word（无配图时没有 payload 可收），
+                # 发布边界不接受顶层 title_word，须一并剥离。
                 state.media_tasks = []
-                if has_image:
+                if has_image or per_scene:
                     state.scenes = [
                         dict(scene, scene_type="summary") if (
                             isinstance(scene, dict) and scene.get("scene_type") == "image"
                         ) else scene
                         for scene in scenes
                     ]
-                    # 降级时同步剥离 image 专属 title_word（summary 场景不携带）。
+                    # 降级时同步剥离顶层 title_word（无配图场景不携带标题词）。
                     for scene in state.scenes:
                         if isinstance(scene, dict):
                             scene.pop("title_word", None)
@@ -482,7 +506,7 @@ class MemoirNodeRunner:
                     "skipped": True,
                     "reason_code": "CAPABILITY_DISABLED",
                 }
-            if not has_image:
+            if not has_image and not per_scene:
                 state.media_tasks = []
                 logging.info(
                     "MemoirAgent 无图片场景跳过媒体生成 run_id=%s", run.run_id,
@@ -492,22 +516,24 @@ class MemoirNodeRunner:
             # 网关通道会拒绝；该字段由本节点受控生成，直接写入 state。
             media_tasks, updated_scenes = self._media_service.generate(
                 run, scenes, state.sanitized_material,
+                illustrate_all_scenes=per_scene,
             )
             state.media_tasks = media_tasks if isinstance(media_tasks, list) else []
             state.scenes = updated_scenes
-            # 图片场景可能被降级为 summary，动作需按新场景表重建（规则映射，
+            # 场景可能被降级为 summary，动作需按新场景表重建（规则映射，
             # 幂等无副作用），保证 safety_review 时 actions 与 scenes 一一对应。
             state.actions = self._rule_actions(state.scenes)
-            image_scene_count = sum(
+            # 交付目标：每场景配图模式下是全部场景，旧模式是 image 场景数；
+            # 交付数少于目标即发生了单张降级，打标供发布摘要观测。
+            target_count = len(scenes) if per_scene else sum(
                 1 for scene in scenes
                 if isinstance(scene, dict) and scene.get("scene_type") == "image"
             )
-            # 交付数少于图片场景数即发生了单张降级，打标供发布摘要观测。
-            if len(state.media_tasks) < image_scene_count:
+            if len(state.media_tasks) < target_count:
                 state.fallback_flags.append("media_degraded")
-            logging.info(
-                "MemoirAgent 媒体节点完成 run_id=%s image_scene=%s delivered=%s",
-                run.run_id, image_scene_count, len(state.media_tasks),
+            log_success(
+                "MemoirAgent 媒体节点完成 run_id=%s per_scene=%s target=%s delivered=%s",
+                run.run_id, per_scene, target_count, len(state.media_tasks),
             )
             return {
                 "node_id": "enqueue_media_tasks",
@@ -665,7 +691,7 @@ class MemoirNodeRunner:
                 ):
                     state.publish_result = None
                     raise RuntimeError("PUBLISH_OUTCOME_UNKNOWN")
-            logging.info("MemoirAgent 已发布作品 run_id=%s archive_id=%s", run.run_id, archive_id)
+            log_success("MemoirAgent 已发布作品 run_id=%s archive_id=%s", run.run_id, archive_id)
             return {"node_id": "publish_document", "published": True}
         if node.get("node_id") != "load_snapshot":
             raise ValueError("MEMOIR_NODE_NOT_IMPLEMENTED")
@@ -697,7 +723,7 @@ class MemoirNodeRunner:
             if exc.retryable:
                 raise RuntimeError("TOOL_RETRYABLE_FAILURE") from None
             raise RuntimeError(exc.error_code) from None
-        logging.info("MemoirAgent 已加载快照 run_id=%s archive_id=%s", run.run_id, archive_id)
+        log_success("MemoirAgent 已加载快照 run_id=%s archive_id=%s", run.run_id, archive_id)
         return {"node_id": "load_snapshot", "snapshot_loaded": True}
 
     @staticmethod
@@ -995,13 +1021,21 @@ class MemoirNodeRunner:
             if action_type == "type_text":
                 # 打字机停留时长随正文长度自适应：前端 xxt-text-type 冻结
                 # 75ms/字，先让全文打完（len*75）再留 1500ms 阅读停留；
-                # 夹在 [3000, 9000]，消除短正文下固定时长的尾部空等，
-                # 同时 80 字上限也不会超时截断。
+                # 上限 12000ms 对齐 1.0.4 的 140 字文案（140*75+1500=12000），
+                # 旧 80 字文案实际落在区间内不受影响。
                 body = scene.get("body")
                 body_len = len(body) if isinstance(body, str) else 0
-                duration_ms = max(3000, min(body_len * 75 + 1500, 9000))
+                duration_ms = max(3000, min(body_len * 75 + 1500, 12000))
             else:
-                duration_ms = 3000
+                # show_card：带配图（payload.image_url）的场景停留 5000ms 留出
+                # 看图时间；纯文字卡维持 3000ms。
+                payload = scene.get("payload")
+                has_image = (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("image_url"), str)
+                    and bool(payload.get("image_url"))
+                )
+                duration_ms = 5000 if has_image else 3000
             rule_actions.append({
                 "action_id": f"action-{index}",
                 "scene_id": scene["scene_id"],
@@ -1017,6 +1051,7 @@ class MemoirNodeRunner:
         *,
         media_tasks: object = None,
         scene_types: tuple[str, ...] = _SCENE_TYPES,
+        per_scene_media: bool = False,
     ) -> bool:
         """校验播放结构及动作引用；只允许当前模板链定义的安全字段组合。
 
@@ -1024,7 +1059,13 @@ class MemoirNodeRunner:
         六键条目、前缀+UUID object_key、https+域白名单 URL、mime 白名单、
         场景 1:1 引用、payload 白名单 {image_url, title_word}、
         image_url 与 manifest url 逐场景一致、非 image 场景不得携带 payload。
+        1.0.4 起（per_scene_media=True）契约放宽：任意场景可携带配图
+        payload（白名单不变、配对规则不变），body 上限 80 -> 140 字；
+        1.0.3- 调用不传该参数，行为零变化。
         """
+        # 1.0.4+ 每场景配图版本把场景文案上限放宽到 140 字（更细腻的叙事），
+        # 旧版本维持 80 字冻结口径。
+        max_body_chars = 140 if per_scene_media else 80
         if not isinstance(scenes, list) or not 3 <= len(scenes) <= 16:
             return False
         if not all(
@@ -1034,7 +1075,7 @@ class MemoirNodeRunner:
             and isinstance(scene.get("source_refs"), list)
             and all(isinstance(ref, str) for ref in scene["source_refs"])
             and ("body" not in scene or isinstance(scene["body"], str))
-            and (not isinstance(scene.get("body"), str) or len(scene["body"]) <= 80)
+            and (not isinstance(scene.get("body"), str) or len(scene["body"]) <= max_body_chars)
             and not MemoirGuardrails.violations(scene.get("body"))
             for scene in scenes
         ):
@@ -1069,8 +1110,25 @@ class MemoirNodeRunner:
                     not isinstance(title_word, str) or not title_word or len(title_word) > 6
                 ):
                     return False
+            elif per_scene_media:
+                # 1.0.4+ 每场景配图：非 image 场景也可携带配图 payload——白名单
+                # 仍仅 {image_url, title_word}，image_url 必须命中本场景 manifest
+                # 条目 url（配对规则不变）；无 payload/空 payload 的纯文字卡放行
+                # （单张生成失败的场景原样保留为文字卡）。
+                if isinstance(payload, dict) and payload:
+                    if set(payload) - {"image_url", "title_word"}:
+                        return False
+                    if payload.get("image_url") != url_by_scene.get(scene.get("scene_id")):
+                        return False
+                    title_word = payload.get("title_word")
+                    if title_word is not None and (
+                        not isinstance(title_word, str) or not title_word or len(title_word) > 6
+                    ):
+                        return False
+                elif payload not in (None, {}):
+                    return False
             elif payload not in (None, {}):
-                # 非 image 场景 payload 必须保持无/空（D1 冻结）。
+                # 非 image 场景 payload 必须保持无/空（D1 冻结，1.0.3-）。
                 return False
         return (
             isinstance(actions, list)
@@ -1290,10 +1348,13 @@ class MemoirNodeRunner:
                 **({"body": scene["body"]} if isinstance(scene.get("body"), str) else {}),
             }
             title_word = scene.get("title_word")
-            # title_word 仅 image 场景可携带（≤6 字）；其余场景出现即拒整批，
-            # 防止模型把标题词塞进非图片场景绕过 payload 白名单。
+            # title_word ≤6 字且非空；1.0.4+ 任意场景可携带（每场景配图的
+            # 标题词，发布前由媒体节点收进 payload），旧版本仅 image 场景
+            # 允许（M6 契约），其余场景出现即拒整批。
             if title_word is not None:
-                if scene["scene_type"] != "image" or not isinstance(title_word, str) or not title_word or len(title_word) > 6:
+                if not isinstance(title_word, str) or not title_word or len(title_word) > 6:
+                    return None
+                if scene["scene_type"] != "image" and not _per_scene_media_enabled(agent_version):
                     return None
                 entry["title_word"] = title_word
             validated.append(entry)

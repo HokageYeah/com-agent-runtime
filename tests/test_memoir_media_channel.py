@@ -37,6 +37,7 @@ from app.services.memoir_media_service import (
     MEDIA_MANIFEST_KEYS,
     MemoirMediaConfig,
     MemoirMediaService,
+    build_illustration_prompt,
     sniff_image_mime,
 )
 from app.utils.aliyun.oss_client import AliyunOSSClient, AliyunOSSClientError
@@ -146,7 +147,10 @@ def test_media_service_generates_six_key_manifest_and_payload() -> None:
     # 非 image 场景零改动且不携带 payload。
     assert scenes[0] == _text_scene("scene-1")
     assert "payload" not in scenes[0]
-    assert provider.text_prompts == ["我们在海边的傍晚散步，海风很轻。"]
+    # 期望 prompt 用同一构建函数生成（手绘水彩模板 + 负面词），保证与服务端同源。
+    assert provider.text_prompts == [
+        build_illustration_prompt("我们在海边的傍晚散步，海风很轻。")
+    ]
 
 
 def test_media_service_degrades_failed_scene_to_summary_text_card(
@@ -180,8 +184,8 @@ def test_media_service_generates_each_image_scene_as_unique_manifest() -> None:
     assert len({entry["object_key"] for entry in manifest}) == 2
     assert len({entry["url"] for entry in manifest}) == 2
     assert provider.text_prompts == [
-        "我们在海边的傍晚散步，海风很轻。",
-        "雨天我们共撑一把伞，踩着水花回家。",
+        build_illustration_prompt("我们在海边的傍晚散步，海风很轻。"),
+        build_illustration_prompt("雨天我们共撑一把伞，踩着水花回家。"),
     ]
     assert [object_key for object_key, _ in uploader.uploads] == [
         entry["object_key"] for entry in manifest
@@ -193,7 +197,8 @@ def test_media_service_generates_each_image_scene_as_unique_manifest() -> None:
 
 def test_media_service_isolates_one_image_failure_from_other_images() -> None:
     """第一张失败只降级第一场景，后续图片仍生成并进入 manifest。"""
-    failed_prompt = "我们在海边的傍晚散步，海风很轻。"
+    # fail_prompts 按 prompt 全文精确匹配，必须用同一构建函数生成完整 prompt。
+    failed_prompt = build_illustration_prompt("我们在海边的傍晚散步，海风很轻。")
     provider = MockCVClient(
         text_image=PNG_BYTES,
         fail_prompts=frozenset({failed_prompt}),
@@ -214,7 +219,9 @@ def test_media_service_logs_safe_provider_failure_stage(
 ) -> None:
     """Provider 异常仅记录固定阶段码，不泄露 prompt 或异常正文。"""
     secret_prompt = "provider-private-prompt"
-    provider = MockCVClient(fail_prompts=frozenset({secret_prompt}))
+    provider = MockCVClient(
+        fail_prompts=frozenset({build_illustration_prompt(secret_prompt)}),
+    )
     service = MemoirMediaService(provider, FakeUploader(), _config())
 
     with caplog.at_level(logging.INFO):
@@ -344,7 +351,9 @@ def test_media_service_img2img_only_when_both_gates_open() -> None:
         provider, FakeUploader(), _config(photo_egress_enabled=True, provider_residency="public"),
         photo_loader=photo_loader,
     ).generate(_run(), _scenes_with_one_image(), material)
-    assert provider.image_prompts == ["我们在海边的傍晚散步，海风很轻。"]
+    assert provider.image_prompts == [
+        build_illustration_prompt("我们在海边的傍晚散步，海风很轻。")
+    ]
     assert loaded == ["photos/diary-1/cover.jpg"]
     assert len(manifest) == 1
 
@@ -1256,3 +1265,229 @@ def test_sanitize_canonical_materials_carries_images_projection() -> None:
     assert materials[0]["images"] == [
         {"photo_id": "p1", "object_key": "photos/a.jpg", "mime": "image/jpeg"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# 1.0.4 每场景配图：服务层放宽 + runner 门控 + 安全审核新契约
+# ---------------------------------------------------------------------------
+
+def _per_scene_document() -> list[dict[str, object]]:
+    """1.0.4 六类型结构（无 image 场景）：cover 首位、summary 收尾、可带 title_word。"""
+    return [
+        {"scene_id": "scene-cover", "scene_type": "cover",
+         "source_refs": ["diary:diary-1"], "body": "那年夏天，我们的故事从海边开始。", "title_word": "我们的夏天"},
+        {"scene_id": "scene-stats", "scene_type": "stats",
+         "source_refs": ["diary:diary-1"], "body": "这一年我们打了十二个赌，赢下七个，笑输了五个。"},
+        {"scene_id": "scene-summary", "scene_type": "summary",
+         "source_refs": ["diary:diary-1"], "body": "温和的一段总结文案。"},
+    ]
+
+
+def test_per_scene_media_generates_for_all_scene_types() -> None:
+    """1.0.4：非 image 场景全部生成配图，类型保留，title_word 收进 payload。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+    manifest, scenes = service.generate(
+        _run("1.0.4"), _per_scene_document(), None, illustrate_all_scenes=True,
+    )
+
+    # 每个场景一条 manifest，scene_id 一一对应。
+    assert [entry["scene_id"] for entry in manifest] == [
+        "scene-cover", "scene-stats", "scene-summary",
+    ]
+    # 场景类型保留（cover 仍是 cover），payload 只含白名单两键。
+    assert [scene["scene_type"] for scene in scenes] == ["cover", "stats", "summary"]
+    for scene, entry in zip(scenes, manifest, strict=True):
+        assert scene["payload"]["image_url"] == entry["url"]
+        assert set(scene["payload"]) <= {"image_url", "title_word"}
+        assert "title_word" not in scene  # 顶层 title_word 必须收进 payload
+    assert scenes[0]["payload"]["title_word"] == "我们的夏天"
+    # 全部场景 body 都被送去生成（每场景配图核心语义）。
+    assert len(provider.text_prompts) == 3
+
+
+def test_per_scene_media_failure_keeps_scene_type_and_strips_title_word() -> None:
+    """1.0.4：单张生成失败 -> 场景保留原类型纯文字卡，顶层 title_word 剥离。"""
+    provider = MockCVClient(text_image=b"\x00\x01broken")
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+    manifest, scenes = service.generate(
+        _run("1.0.4"), _per_scene_document(), None, illustrate_all_scenes=True,
+    )
+
+    assert manifest == []
+    assert [scene["scene_type"] for scene in scenes] == ["cover", "stats", "summary"]
+    assert all("payload" not in scene for scene in scenes)
+    assert all("title_word" not in scene for scene in scenes)
+    assert scenes[0]["body"] == "那年夏天，我们的故事从海边开始。"
+
+
+def test_per_scene_media_quota_still_applies() -> None:
+    """1.0.4：配额仍是按张计数，超出配额的场景降级为原类型纯文字卡。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    service = MemoirMediaService(provider, FakeUploader(), _config(max_images_per_run=2))
+    manifest, scenes = service.generate(
+        _run("1.0.4"), _per_scene_document(), None, illustrate_all_scenes=True,
+    )
+
+    assert [entry["scene_id"] for entry in manifest] == ["scene-cover", "scene-stats"]
+    assert "payload" not in scenes[2]
+    assert scenes[2]["scene_type"] == "summary"
+
+
+def test_per_scene_media_old_mode_ignores_non_image_scenes() -> None:
+    """1.0.3 旧模式：illustrate_all_scenes 缺省时非 image 场景零改动透传。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+    manifest, scenes = service.generate(_run("1.0.3"), _per_scene_document(), None)
+
+    assert manifest == []
+    assert provider.text_prompts == []
+    assert scenes == _per_scene_document()  # 原样（含顶层 title_word，交给 1.0.3 校验拒绝）
+
+
+def test_media_node_per_scene_mode_generates_all_scenes() -> None:
+    """runner：1.0.4 无 image 场景也全量生成，发布文档每场景配图。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+    runner = MemoirNodeRunner(object(), media_service=service)
+    state = AgentState(
+        scenes=_per_scene_document(),
+        sanitized_material={"materials": [
+            {"source_ref": "diary:diary-1", "type": "diary", "sensitive": False, "text": "摘要"},
+        ]},
+    )
+
+    result = runner.run_node({"node_id": "enqueue_media_tasks"}, _run("1.0.4"), state)
+    assert result == {"node_id": "enqueue_media_tasks", "skipped": False, "delivered": 3}
+    runner.run_node({"node_id": "generate_actions"}, _run("1.0.4"), state)
+    safety = runner.run_node({"node_id": "safety_review"}, _run("1.0.4"), state)
+
+    assert safety == {"node_id": "safety_review", "safe": True}
+    document = state.playback_document
+    assert document is not None
+    assert [entry["scene_id"] for entry in document["media_manifest"]] == [
+        "scene-cover", "scene-stats", "scene-summary",
+    ]
+    assert [scene["payload"]["image_url"] for scene in document["scenes"]] == [
+        entry["url"] for entry in document["media_manifest"]
+    ]
+
+
+def test_media_node_disabled_degrades_all_scenes_for_per_scene_versions() -> None:
+    """runner：1.0.4 媒体服务未装配 -> 全场景降级纯文字卡并剥离 title_word。"""
+    runner = MemoirNodeRunner(object())
+    state = AgentState(scenes=_per_scene_document())
+    result = runner.run_node({"node_id": "enqueue_media_tasks"}, _run("1.0.4"), state)
+
+    assert result == {
+        "node_id": "enqueue_media_tasks", "skipped": True,
+        "reason_code": "CAPABILITY_DISABLED",
+    }
+    assert state.media_tasks == []
+    # 类型保留（封面仍是文字封面卡），顶层 title_word 剥离（发布边界不接受）。
+    assert [scene["scene_type"] for scene in state.scenes] == ["cover", "stats", "summary"]
+    assert all("title_word" not in scene and "payload" not in scene for scene in state.scenes)
+    assert len(state.actions) == len(state.scenes)
+    assert "media_disabled_degraded" in state.fallback_flags
+
+
+def test_valid_scenes_accepts_title_word_for_per_scene_versions() -> None:
+    """_valid_scenes：1.0.4 任意场景可带 title_word；1.0.3 仍仅 image 场景允许。"""
+    runner = MemoirNodeRunner(object())
+
+    def payload(scene_type: str, title_word: str | None) -> dict[str, object]:
+        return {"scenes": [
+            {"scene_id": "scene-cover", "scene_type": "cover",
+             "source_refs": ["diary:diary-1"], "body": "我们的故事。", **(
+                 {"title_word": title_word} if title_word is not None else {}
+             )},
+            {"scene_id": "scene-target", "scene_type": scene_type,
+             "source_refs": ["diary:diary-1"], "body": "温和的一段总结文案。"},
+            {"scene_id": "scene-summary", "scene_type": "summary",
+             "source_refs": ["diary:diary-1"], "body": "温和的一段总结文案。"},
+        ]}
+
+    refs = ["diary:diary-1"]
+    accepted = runner._valid_scenes(payload("summary", "收尾致谢"), refs, "1.0.4")
+    assert accepted is not None
+    assert accepted[0]["title_word"] == "收尾致谢"
+    # 1.0.3：非 image 场景携带 title_word 仍整批拒绝（旧行为零变化）。
+    assert runner._valid_scenes(payload("summary", "收尾致谢"), refs, "1.0.3") is None
+
+
+def test_is_safe_playback_per_scene_media_contract() -> None:
+    """_is_safe_playback：1.0.4 放宽 payload 与 140 字上限；配对规则不变。"""
+    url = "https://bucket.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+    entry = {
+        "media_id": "media-1", "kind": "image",
+        "object_key": "memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png",
+        "url": url, "mime": "image/png", "scene_id": "scene-2",
+    }
+    long_body = (
+        "夏天的傍晚我们在海边散步，晚风很轻，浪花一遍遍漫上沙滩，灯塔亮起来的时候，"
+        "你说明年的今天还要一起回来看日出，我们把这个约定写进日记，回家的路上买了两串糖葫芦，甜味留在了那一页。"
+    )
+    assert 80 < len(long_body) <= 140  # 1.0.4 放宽区间内、超出 1.0.3 的 80 字上限
+
+    def document(payload: dict[str, object] | None) -> list[dict[str, object]]:
+        return [
+            _text_scene("scene-1"),
+            {"scene_id": "scene-2", "scene_type": "summary",
+             "source_refs": ["diary:diary-1"], "body": long_body, **(
+                 {"payload": payload} if payload is not None else {}
+             )},
+            _text_scene("scene-3"),
+        ]
+
+    actions = MemoirNodeRunner._rule_actions(document(None))
+    # 非 image 场景携带与 manifest 配对的 payload + 140 字 body：通过。
+    assert MemoirNodeRunner._is_safe_playback(
+        document({"image_url": url, "title_word": "那年海边"}), actions,
+        media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+    )
+    # 无 payload 纯文字卡：放行（生成失败场景原样保留）。
+    assert MemoirNodeRunner._is_safe_playback(
+        document(None), actions,
+        media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+    )
+    # image_url 与 manifest 不一致：拒绝（配对规则不变）。
+    assert not MemoirNodeRunner._is_safe_playback(
+        document({"image_url": "https://other.oss-cn-hangzhou.aliyuncs.com/memoir/images/x.png"}),
+        actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+    )
+    # payload 混入白名单外字段：拒绝。
+    assert not MemoirNodeRunner._is_safe_playback(
+        document({"image_url": url, "caption": "私货"}),
+        actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+    )
+    # 1.0.3 旧口径：140 字 body 一律拒绝（per_scene_media 缺省零变化）。
+    assert not MemoirNodeRunner._is_safe_playback(
+        document(None), actions, media_tasks=[], scene_types=_MEDIA_SCENE_TYPES,
+    )
+
+
+def test_rule_actions_durations_for_image_and_text_cards() -> None:
+    """_rule_actions：带图 show_card 5000ms、纯文字 3000ms、打字机按时长上限 12000ms。"""
+    url = "https://bucket.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+    scenes = [
+        {"scene_id": "scene-img", "scene_type": "summary",
+         "source_refs": ["diary:diary-1"], "body": "短文案。",
+         "payload": {"image_url": url}},
+        {"scene_id": "scene-text", "scene_type": "summary",
+         "source_refs": ["diary:diary-1"], "body": "短文案。"},
+        {"scene_id": "scene-long", "scene_type": "diary_highlight",
+         "source_refs": ["diary:diary-1"], "body": "字" * 200},
+    ]
+    actions = MemoirNodeRunner._rule_actions(scenes)
+    by_scene = {action["scene_id"]: action for action in actions}
+    assert by_scene["scene-img"]["action_type"] == "show_card"
+    assert by_scene["scene-img"]["duration_ms"] == 5000
+    assert by_scene["scene-text"]["duration_ms"] == 3000
+    assert by_scene["scene-long"]["action_type"] == "type_text"
+    assert by_scene["scene-long"]["duration_ms"] == 12000  # 200*75+1500 超上限封顶
+
+
+def test_tool_wire_version_registers_1_0_4() -> None:
+    """wire 版本表：1.0.4 必须登记，否则 load_snapshot 无日志瞬时失败。"""
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.4"] == "1.1.0"
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.3"] == "1.1.0"

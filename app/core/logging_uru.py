@@ -24,6 +24,20 @@ LOG_FORMAT = (
     "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | " "{name}:{function}:{line} - {message}"
 )
 
+# stdlib logging 没有 SUCCESS 级别；注册 25 号级别名（与 loguru 内置 SUCCESS
+# 对齐），使经 InterceptHandler 桥接的 stdlib 日志能映射到 loguru SUCCESS，
+# 在控制台以绿色整行显示关键节点的成功里程碑。
+logging.addLevelName(25, "SUCCESS")
+
+
+def log_success(message: str, *args: object) -> None:
+    """以 SUCCESS 级别输出关键节点成功日志（控制台绿色整行，文件 sink 同步落盘）。
+
+    保持 stdlib `%s` 惰性格式化风格，与现有 logging.info/warning 调用方式一致，
+    避免迁移到 loguru `{}` 占位符时丢参数。
+    """
+    logging.log(25, message, *args)
+
 
 def resolve_log_level(configured_level: str, *, debug: bool) -> str:
     """解析当前运行应使用的日志级别。"""
@@ -100,6 +114,10 @@ def setup_logging() -> None:
     4. 运行日志与错误日志分目录落盘，方便排查
     """
     logger.remove()
+
+    # 关键节点分色方案：普通 INFO 整行不上色（素色），仅 SUCCESS（绿）、
+    # WARNING（黄）、ERROR（红）整行着色，控制台一眼定位关键任务节点。
+    logger.level("INFO", color="")
 
     logging_config = settings.logging
     application_config = settings.application

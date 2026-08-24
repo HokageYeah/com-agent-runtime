@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.core.logging_uru import log_success
 from app.models import AgentEvaluation
 from app.schemas.evaluation import EvaluationDecisionDTO
 
@@ -50,5 +50,9 @@ class EvaluationService:
         )
         self._session.add(record)
         self._session.flush()
-        logging.info("Runtime 评价已记录 run_id=%s decision=%s evaluator=%s", run_id, evaluation.decision, evaluator_type)
+        # 关键节点：评价落审计账本成功（绿色成功里程碑）。
+        log_success(
+            "Runtime 评价已记录 run_id=%s decision=%s evaluator=%s",
+            run_id, evaluation.decision, evaluator_type,
+        )
         return evaluation_id

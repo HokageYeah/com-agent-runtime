@@ -88,6 +88,7 @@ def _wire_idempotency_key(logical_key: str) -> str:
 # 1.0.1 起走 v1.1 完整错误合同；1.0.2 只改了 prompt manifest 的 guardrail
 # 策略（redacted_only），Tool 合同与 1.0.1 完全一致，沿用 v1.1.0。
 # 1.0.3（M6 媒体通道）只新增图节点与媒体生成，Tool 合同零变更，沿用 v1.1.0。
+# 1.0.4（每场景配图 + body ≤140 字）同为媒体与内容侧放宽，Tool 合同零变更。
 # 新版本包注册时若忘记在此登记，Worker 会在发包前以 TOOL_WIRE_VERSION_INVALID
 # 瞬时失败（无日志、无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
 _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
@@ -95,6 +96,7 @@ _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
     "1.0.1": "1.1.0",
     "1.0.2": "1.1.0",
     "1.0.3": "1.1.0",
+    "1.0.4": "1.1.0",
 }
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 

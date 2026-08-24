@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.logging_uru import log_success
 from app.models import AgentDefinition, AgentPlan, AgentRun, AgentStep
 from app.runtime.artifact import ArtifactError, ArtifactStore
 from app.runtime.checkpoint import CheckpointError, CheckpointStore
@@ -493,7 +494,9 @@ class WorkflowExecutor:
                 "step_changed",
                 [{"step": node_id, "status": node_status}],
             )
-        logging.info(
+        # 关键节点：整个静态计划执行完成（绿色成功里程碑；最终成败分级
+        # 由 lease_service.finish 按 Run 终态着色）。
+        log_success(
             "Workflow 静态计划执行完成 run_id=%s execution_attempt=%s steps=%s",
             run_id,
             lease_context.execution_attempt,

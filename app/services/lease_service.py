@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.core.logging_uru import log_success
 from app.models import AgentDefinition, AgentRun
 from app.runtime.interfaces import AgentRunResult, LeaseContext
 from app.services.admission_service import AdmissionService
@@ -161,7 +162,14 @@ class LeaseService:
         AdmissionService(self._session).transition_run(run, "claimed", "finished")
         OutboxService(self._session).append_callback(run, result.status)
         self._session.commit()
-        logging.info("Worker 终结 Run run_id=%s status=%s", run.run_id, run.status)
+        # 关键节点：Run 终态按结果分级显示——succeeded 绿、failed 红、
+        # partial/cancelled 黄，控制台一眼分辨本次 Run 的最终结局。
+        if run.status == "succeeded":
+            log_success("Worker 终结 Run run_id=%s status=%s", run.run_id, run.status)
+        elif run.status == "failed":
+            logging.error("Worker 终结 Run run_id=%s status=%s", run.run_id, run.status)
+        else:
+            logging.warning("Worker 终结 Run run_id=%s status=%s", run.run_id, run.status)
         return True
 
     def release_for_drain(self, run_id: str, context: LeaseContext) -> bool:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
+
+from app.core.logging_uru import log_success
 
 
 class AuthorizationError(ValueError):
@@ -41,7 +42,8 @@ class AuthorizationService:
         )
         self._require_allowed(client, "connector_ids", connector_id, "connector")
         self._require_allowed(client, "data_domains", data_domain, "data domain")
-        logging.info(
+        # 关键节点：授权通过（绿色成功里程碑）。
+        log_success(
             "Runtime 授权通过 agent_id=%s business_type=%s",
             agent_id,
             business_type,
