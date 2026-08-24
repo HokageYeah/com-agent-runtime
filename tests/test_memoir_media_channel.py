@@ -30,6 +30,7 @@ from app.agents.memoir_agent.runner import (
     MemoirNodeRunner,
     _media_version_enabled,
 )
+from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
 from app.services.memoir_media_service import (
@@ -105,6 +106,15 @@ def _scenes_with_one_image(body: str = "我们在海边的傍晚散步，海风�
     return [_text_scene("scene-1"), _image_scene("scene-2", body, "那年海边"), _text_scene("scene-3")]
 
 
+def _scenes_with_two_images() -> list[dict[str, object]]:
+    return [
+        _text_scene("scene-1"),
+        _image_scene("scene-2", "我们在海边的傍晚散步，海风很轻。", "那年海边"),
+        _image_scene("scene-3", "雨天我们共撑一把伞，踩着水花回家。", "雨中同行"),
+        _text_scene("scene-4"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 交付物 2/3：服务层生成、降级、配额、模式门控
 # ---------------------------------------------------------------------------
@@ -155,6 +165,48 @@ def test_media_service_degrades_failed_scene_to_summary_text_card(
     assert scenes[0]["scene_type"] == "summary"
     assert "stage=image_validation" in caplog.text
     assert "code=MEDIA_IMAGE_FORMAT_INVALID" in caplog.text
+
+
+def test_media_service_generates_each_image_scene_as_unique_manifest() -> None:
+    """多个合法 image 场景必须逐张生成，不能复用或覆盖上一张结果。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    uploader = FakeUploader()
+    service = MemoirMediaService(provider, uploader, _config())
+
+    manifest, scenes = service.generate(_run(), _scenes_with_two_images(), None)
+
+    assert [entry["scene_id"] for entry in manifest] == ["scene-2", "scene-3"]
+    assert len({entry["media_id"] for entry in manifest}) == 2
+    assert len({entry["object_key"] for entry in manifest}) == 2
+    assert len({entry["url"] for entry in manifest}) == 2
+    assert provider.text_prompts == [
+        "我们在海边的傍晚散步，海风很轻。",
+        "雨天我们共撑一把伞，踩着水花回家。",
+    ]
+    assert [object_key for object_key, _ in uploader.uploads] == [
+        entry["object_key"] for entry in manifest
+    ]
+    assert [scene["payload"]["image_url"] for scene in scenes[1:3]] == [
+        entry["url"] for entry in manifest
+    ]
+
+
+def test_media_service_isolates_one_image_failure_from_other_images() -> None:
+    """第一张失败只降级第一场景，后续图片仍生成并进入 manifest。"""
+    failed_prompt = "我们在海边的傍晚散步，海风很轻。"
+    provider = MockCVClient(
+        text_image=PNG_BYTES,
+        fail_prompts=frozenset({failed_prompt}),
+    )
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+
+    manifest, scenes = service.generate(_run(), _scenes_with_two_images(), None)
+
+    assert [entry["scene_id"] for entry in manifest] == ["scene-3"]
+    assert scenes[1]["scene_type"] == "summary"
+    assert "payload" not in scenes[1]
+    assert scenes[2]["scene_type"] == "image"
+    assert scenes[2]["payload"]["image_url"] == manifest[0]["url"]
 
 
 def test_media_service_logs_safe_provider_failure_stage(
@@ -378,6 +430,39 @@ def test_media_node_generates_then_safety_publishes_manifest() -> None:
     assert document["scenes"][1]["payload"]["image_url"] == document["media_manifest"][0]["url"]
 
 
+def test_media_node_safety_publishes_all_image_manifests() -> None:
+    """多图经过动作生成和安全审核后，完整进入 PlaybackDocument。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    service = MemoirMediaService(provider, FakeUploader(), _config())
+    runner = MemoirNodeRunner(object(), media_service=service)
+    state = AgentState(
+        scenes=_scenes_with_two_images(),
+        sanitized_material={
+            "materials": [{
+                "source_ref": "diary:diary-1",
+                "type": "diary",
+                "sensitive": False,
+                "text": "摘要",
+            }],
+        },
+    )
+
+    result = runner.run_node({"node_id": "enqueue_media_tasks"}, _run(), state)
+    assert result == {"node_id": "enqueue_media_tasks", "skipped": False, "delivered": 2}
+    runner.run_node({"node_id": "generate_actions"}, _run(), state)
+    safety = runner.run_node({"node_id": "safety_review"}, _run(), state)
+
+    assert safety == {"node_id": "safety_review", "safe": True}
+    document = state.playback_document
+    assert document is not None
+    assert [entry["scene_id"] for entry in document["media_manifest"]] == [
+        "scene-2", "scene-3",
+    ]
+    assert [scene["payload"]["image_url"] for scene in document["scenes"][1:3]] == [
+        entry["url"] for entry in document["media_manifest"]
+    ]
+
+
 def test_safety_review_falls_back_when_image_scene_lacks_manifest_entry() -> None:
     """image 场景缺 manifest 条目（缺 payload/url）必须安全回退基础卡。"""
     runner = MemoirNodeRunner(object())
@@ -435,6 +520,39 @@ def test_valid_scenes_accepts_image_only_for_media_versions() -> None:
     assert runner._valid_scenes(model_payload("image"), refs, "1.0.2") is None
     assert runner._valid_scenes(model_payload("summary", "标题"), refs, "1.0.3") is None
     assert runner._valid_scenes(model_payload("image", "超过六个字的标题词"), refs, "1.0.3") is None
+
+
+def test_valid_scenes_preserves_multiple_image_scenes_in_order() -> None:
+    """模型规划的多条 image 场景必须完整保留，不被压成单图。"""
+    runner = MemoirNodeRunner(object())
+    scenes = [
+        {
+            "scene_id": "scene-cover",
+            "scene_type": "cover",
+            "source_refs": ["diary:diary-1"],
+            "body": "我们的故事。",
+        },
+        _image_scene("scene-image-1", "海边散步，晚风吹过来。", "那年海边"),
+        _image_scene("scene-image-2", "雨天共撑一把伞回家。", "雨中同行"),
+        {
+            "scene_id": "scene-summary",
+            "scene_type": "summary",
+            "source_refs": ["diary:diary-1"],
+            "body": "温和的一段总结文案。",
+        },
+    ]
+
+    accepted = runner._valid_scenes(
+        {"scenes": scenes}, ["diary:diary-1"], "1.0.3",
+    )
+
+    assert accepted is not None
+    assert [scene["scene_id"] for scene in accepted] == [
+        "scene-cover", "scene-image-1", "scene-image-2", "scene-summary",
+    ]
+    assert [scene["title_word"] for scene in accepted[1:3]] == [
+        "那年海边", "雨中同行",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1088,10 +1206,33 @@ def test_prompt_1_0_3_declares_image_and_title_word_contract() -> None:
     )
     prompt = prompt_path.read_text(encoding="utf-8")
     assert "image：图片场景卡" in prompt
+    assert "整本回忆录规划一张独立的整体封面 image 场景" in prompt
+    assert "每个具有可靠具体画面信息的故事场景分别规划一张独立 image 场景" in prompt
+    assert "全文档 image 场景最多 6 个" in prompt
     assert "title_word" in prompt
     # JSON 契约逐字段声明（吸取 JSON_PARSE_FAILED 教训）。
     assert '"scene_id"' in prompt and '"scene_type"' in prompt
     assert '"source_refs"' in prompt and '"body"' in prompt and '"title_word"' in prompt
+
+
+def test_1_0_3_prompt_registry_loads_media_prompts() -> None:
+    """PromptRegistry 运行时真实解析 1.0.3 manifest：多图生成与修复 Prompt 必须可加载。
+
+    AgentPackageService 只校验 agent.yaml prompts 列表与节点 prompt_ref，不解析
+    prompts/manifest.yaml；manifest 任何字段笔误只会在真实 Run 的模型节点加载
+    Prompt 时爆炸（generate_scenes → scene-generate@v1、repair →
+    structured-output-repair@v1），故用真实包根做加载级回归。
+    """
+    registry = PromptRegistry(Path(__file__).parents[1] / "app" / "agents")
+    scene = registry.load("memoir_agent", "1.0.3", "scene-generate", "v1")
+    assert scene.model_policy == "emotional_writing"
+    assert scene.guardrail_policy == "redacted_only"
+    # 加载到的模板正文就是多图契约那份：整体封面 + 每场景一图 + 上限 6。
+    assert "整本回忆录规划一张独立的整体封面 image 场景" in scene.template
+    assert "全文档 image 场景最多 6 个" in scene.template
+    repair = registry.load("memoir_agent", "1.0.3", "structured-output-repair", "v1")
+    assert repair.owner_agent == "memoir_agent" and repair.status == "active"
+    assert repair.template.strip() != ""
 
 
 # ---------------------------------------------------------------------------
