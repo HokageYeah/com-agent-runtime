@@ -923,7 +923,7 @@ def test_worker_completes_template_memoir_workflow_and_publishes_document() -> N
     document = published[0][5]
     assert isinstance(document, dict)
     scenes = document["scenes"]
-    assert isinstance(scenes, list) and 3 <= len(scenes) <= 8
+    assert isinstance(scenes, list) and len(scenes) >= 3
     assert document["media_manifest"] == []
     assert "绝不能发布的私密日记正文" not in str(document)
     assert all("diary:diary-private" not in scene["source_refs"] for scene in scenes)

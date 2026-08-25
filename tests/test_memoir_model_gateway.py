@@ -103,6 +103,26 @@ def test_invalid_model_structure_uses_safe_scene_template() -> None:
     assert gateway.rejections == [("generate_scenes", ("UNKNOWN_SOURCE_REF", "SCENE_COUNT_INVALID"))]
 
 
+def test_model_scene_validation_keeps_more_than_eight_scenes() -> None:
+    """模型输出的场景数量不设固定上限，所有合法场景都进入播放文档。"""
+    data = {
+        "scenes": [
+            {
+                "scene_id": f"scene-{index}",
+                "scene_type": "summary",
+                "source_refs": [],
+                "body": f"场景 {index}",
+            }
+            for index in range(1, 10)
+        ]
+    }
+
+    scenes = MemoirNodeRunner(object())._valid_scenes(data, [], "1.0.4")
+
+    assert scenes is not None
+    assert len(scenes) == 9
+
+
 def test_duplicate_model_scene_ids_use_safe_scene_template() -> None:
     class ModelGateway:
         def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:

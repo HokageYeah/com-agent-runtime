@@ -49,7 +49,7 @@ class SemanticValidator:
         if not isinstance(source_refs, list) or any(not isinstance(ref, str) or ref not in refs for ref in source_refs):
             errors.append("UNKNOWN_SOURCE_REF")
         duration = value.get("duration_ms")
-        if duration is not None and (isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 30_000):
+        if duration is not None and (isinstance(duration, bool) or not isinstance(duration, int) or duration < 1):
             errors.append("INVALID_DURATION")
         self._validate_container(value, refs, errors)
         return SemanticValidationResult(
@@ -66,7 +66,7 @@ class SemanticValidator:
         scenes = value.get("scenes")
         actions = value.get("actions")
         if scenes is not None:
-            if not isinstance(scenes, list) or not 3 <= len(scenes) <= 8:
+            if not isinstance(scenes, list) or len(scenes) < 3:
                 errors.append("SCENE_COUNT_INVALID")
                 scenes = []
             scene_ids: set[str] = set()
@@ -104,7 +104,7 @@ class SemanticValidator:
                     if (
                         isinstance(action_duration, bool)
                         or not isinstance(action_duration, int)
-                        or not 1 <= action_duration <= 30_000
+                        or action_duration < 1
                     ):
                         errors.append("INVALID_DURATION")
                 if covered_scene_ids != scene_ids:

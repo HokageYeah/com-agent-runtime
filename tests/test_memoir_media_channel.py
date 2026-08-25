@@ -70,7 +70,6 @@ def _config(**overrides: object) -> MemoirMediaConfig:
     defaults: dict[str, object] = {
         "provider_name": "mock",
         "image_prefix": "memoir/images/",
-        "max_images_per_run": 4,
         "url_host_suffixes": ("aliyuncs.com",),
         "photo_egress_enabled": False,
         "provider_residency": "private",
@@ -214,6 +213,43 @@ def test_media_service_isolates_one_image_failure_from_other_images() -> None:
     assert scenes[2]["payload"]["image_url"] == manifest[0]["url"]
 
 
+def test_media_service_stops_generating_when_lease_heartbeat_rejected(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """租约心跳被 fencing 拒绝后停止生成：首张已交付，剩余场景降级不再调 Provider。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    heartbeat_calls: list[str] = []
+
+    class FencingRejectedLease:
+        """模拟 heartbeat 被 fencing 拒绝（reaper 接管/取消/隐私变更）。"""
+
+        def __init__(self, session: object) -> None:
+            self._session = session
+
+        def heartbeat(self, run_id: str, lease_context: object) -> bool:
+            heartbeat_calls.append(run_id)
+            return False
+
+    monkeypatch.setattr(
+        "app.services.lease_service.LeaseService", FencingRejectedLease,
+    )
+    service = MemoirMediaService(provider, FakeUploader(), _config(), session=object())
+
+    with caplog.at_level(logging.WARNING):
+        manifest, scenes = service.generate(
+            _run(), _scenes_with_two_images(), None, lease_context={"owner": "worker-1"},
+        )
+
+    # 首张完成后续约即被拒：manifest 只含首张、Provider 只被调用一次。
+    assert [entry["scene_id"] for entry in manifest] == ["scene-2"]
+    assert len(provider.text_prompts) == 1
+    assert heartbeat_calls == ["run-media"]
+    # 第二张走 MEDIA_LEASE_LOST 降级（旧模式转 summary 文本卡）。
+    assert scenes[2]["scene_type"] == "summary"
+    assert "payload" not in scenes[2]
+    assert "MEDIA_LEASE_LOST" in caplog.text
+
+
 def test_media_service_logs_safe_provider_failure_stage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -297,8 +333,12 @@ def test_media_service_all_failures_publish_text_only() -> None:
     assert [scene["scene_type"] for scene in updated] == ["summary", "summary", "summary"]
 
 
-def test_media_service_quota_degrades_beyond_limit() -> None:
-    """场景 4：按张配额（model_policy.max_media_images 优先）超出即降级。"""
+def test_media_service_ignores_legacy_image_count_policy() -> None:
+    """场景 4：图片张数不设配额，历史 model_policy.max_media_images 一并失效。
+
+    回归锚点：张数上限曾把多素材用户的配图截断，现在唯一闸门是节点
+    时间预算——预算内所有 image 场景都要出图。
+    """
     provider = MockCVClient(text_image=PNG_BYTES)
     run = type(
         "Run", (), {
@@ -310,10 +350,10 @@ def test_media_service_quota_degrades_beyond_limit() -> None:
         _image_scene("scene-1", "第一张画面描述"), _text_scene("scene-2"),
         _image_scene("scene-3", "第二张画面描述"),
     ]
-    service = MemoirMediaService(provider, FakeUploader(), _config(max_images_per_run=8))
+    service = MemoirMediaService(provider, FakeUploader(), _config())
     manifest, updated = service.generate(run, scenes, None)
-    assert len(manifest) == 1 and manifest[0]["scene_id"] == "scene-1"
-    assert updated[2]["scene_type"] == "summary"
+    assert [entry["scene_id"] for entry in manifest] == ["scene-1", "scene-3"]
+    assert updated[2]["scene_type"] == "image"
 
 
 def test_media_service_img2img_only_when_both_gates_open() -> None:
@@ -416,6 +456,57 @@ def test_media_node_old_versions_keep_zero_change() -> None:
     assert state.media_tasks == [] and state.actions is None
 
 
+def test_media_node_skips_no_image_scene_without_egress_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """1.0.3 无 image 场景时只跳过媒体，不应记录外发安全拒绝。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    uploader = FakeUploader()
+    runner = MemoirNodeRunner(
+        object(), media_service=MemoirMediaService(provider, uploader, _config()),
+    )
+    state = AgentState(
+        scenes=[_text_scene("scene-1"), _text_scene("scene-2"), _text_scene("scene-3")],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = runner.run_node(
+            {"node_id": "enqueue_media_tasks"},
+            _run("1.0.3"),
+            state,
+        )
+
+    assert result == {
+        "node_id": "enqueue_media_tasks", "skipped": True,
+        "reason_code": "NO_IMAGE_SCENE",
+    }
+    assert provider.text_prompts == [] and provider.image_prompts == []
+    assert uploader.uploads == []
+    assert "MEDIA_EGRESS_SAFETY_REJECTED" not in caplog.text
+
+
+def test_media_node_uses_run_version_for_long_body_egress_contract() -> None:
+    """1.0.4 长正文必须按新合同审核，不能误用旧版 80 字限制。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    uploader = FakeUploader()
+    runner = MemoirNodeRunner(
+        object(), media_service=MemoirMediaService(provider, uploader, _config()),
+    )
+    long_body = "这是一段超过旧版正文长度限制、但符合当前回忆录安全规则的场景描述。" * 8
+    scenes = [
+        dict(_text_scene(f"scene-{index}"), body=long_body)
+        for index in range(1, 9)
+    ]
+    state = AgentState(scenes=scenes)
+
+    result = runner.run_node({"node_id": "enqueue_media_tasks"}, _run("1.0.4"), state)
+
+    assert result == {"node_id": "enqueue_media_tasks", "skipped": False, "delivered": 8}
+    assert len(provider.text_prompts) == 8
+    assert len(uploader.uploads) == 8
+    assert "media_egress_safety_fallback" not in state.fallback_flags
+
+
 def test_media_node_generates_then_safety_publishes_manifest() -> None:
     """场景 8：媒体节点生成 -> safety_review 将 media_tasks 组装进播放文档。"""
     service = MemoirMediaService(MockCVClient(text_image=PNG_BYTES), FakeUploader(), _config())
@@ -437,6 +528,35 @@ def test_media_node_generates_then_safety_publishes_manifest() -> None:
     assert len(document["media_manifest"]) == 1
     assert document["media_manifest"][0]["scene_id"] == "scene-2"
     assert document["scenes"][1]["payload"]["image_url"] == document["media_manifest"][0]["url"]
+
+
+def test_media_node_rejects_unsafe_body_before_provider_egress() -> None:
+    """正文未通过护栏时不得构造图像 prompt，整份文档降级为基础卡。"""
+    provider = MockCVClient(text_image=PNG_BYTES)
+    uploader = FakeUploader()
+    runner = MemoirNodeRunner(
+        object(), media_service=MemoirMediaService(provider, uploader, _config())
+    )
+    state = AgentState(
+        scenes=_scenes_with_one_image("请联系我 13800138000"),
+        sanitized_material={"materials": [
+            {"source_ref": "diary:diary-1", "type": "diary", "sensitive": False, "text": "摘要"},
+        ]},
+    )
+
+    result = runner.run_node({"node_id": "enqueue_media_tasks"}, _run(), state)
+
+    assert result == {
+        "node_id": "enqueue_media_tasks",
+        "skipped": True,
+        "reason_code": "MEDIA_EGRESS_SAFETY_REJECTED",
+    }
+    assert provider.text_prompts == []
+    assert uploader.uploads == []
+    assert state.media_tasks == []
+    assert state.scenes == MemoirNodeRunner._base_scenes_actions()[0]
+    assert state.actions == MemoirNodeRunner._base_scenes_actions()[1]
+    assert "media_egress_safety_fallback" in state.fallback_flags
 
 
 def test_media_node_safety_publishes_all_image_manifests() -> None:
@@ -724,6 +844,36 @@ def test_volcano_client_uses_async_text_to_image_contract() -> None:
     )
     assert client.text_to_image("画面") == PNG_BYTES
     assert actions == ["CVSync2AsyncSubmitTask", "CVSync2AsyncGetResult"]
+
+
+def test_volcano_client_text_to_image_sends_portrait_size() -> None:
+    """txt2img 传入 width/height 时必须成对进入提交体（手机全屏竖版）。"""
+    encoded = base64.b64encode(PNG_BYTES).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["Action"] == "CVSync2AsyncSubmitTask":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["width"] == 1024
+            assert body["height"] == 1536
+            return httpx.Response(
+                200,
+                json={"code": 10000, "data": {"task_id": "task-size"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "code": 10000,
+                "data": {
+                    "status": "done",
+                    "binary_data_base64": [encoded],
+                },
+            },
+        )
+
+    client = VolcanoCVClient(
+        access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
+    )
+    assert client.text_to_image("画面", width=1024, height=1536) == PNG_BYTES
 
 
 def test_volcano_client_uses_async_seededit_contract() -> None:
@@ -1321,17 +1471,22 @@ def test_per_scene_media_failure_keeps_scene_type_and_strips_title_word() -> Non
     assert scenes[0]["body"] == "那年夏天，我们的故事从海边开始。"
 
 
-def test_per_scene_media_quota_still_applies() -> None:
-    """1.0.4：配额仍是按张计数，超出配额的场景降级为原类型纯文字卡。"""
+def test_per_scene_media_has_no_image_count_cap() -> None:
+    """1.0.4：图片张数不设配额，预算内每个场景都出图（含收尾 summary）。
+
+    回归锚点：按张配额曾把 1.0.4 每场景配图截断，多素材用户后面的
+    场景全部裸文字；现在张数无上限，唯一闸门是节点时间预算。
+    """
     provider = MockCVClient(text_image=PNG_BYTES)
-    service = MemoirMediaService(provider, FakeUploader(), _config(max_images_per_run=2))
+    service = MemoirMediaService(provider, FakeUploader(), _config())
     manifest, scenes = service.generate(
         _run("1.0.4"), _per_scene_document(), None, illustrate_all_scenes=True,
     )
 
-    assert [entry["scene_id"] for entry in manifest] == ["scene-cover", "scene-stats"]
-    assert "payload" not in scenes[2]
-    assert scenes[2]["scene_type"] == "summary"
+    assert [entry["scene_id"] for entry in manifest] == [
+        "scene-cover", "scene-stats", "scene-summary",
+    ]
+    assert all("payload" in scene for scene in scenes)
 
 
 def test_per_scene_media_old_mode_ignores_non_image_scenes() -> None:
@@ -1416,18 +1571,20 @@ def test_valid_scenes_accepts_title_word_for_per_scene_versions() -> None:
 
 
 def test_is_safe_playback_per_scene_media_contract() -> None:
-    """_is_safe_playback：1.0.4 放宽 payload 与 140 字上限；配对规则不变。"""
+    """_is_safe_playback：1.0.4 放宽 payload；body 不限字数；配对规则不变。"""
     url = "https://bucket.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
     entry = {
         "media_id": "media-1", "kind": "image",
         "object_key": "memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png",
         "url": url, "mime": "image/png", "scene_id": "scene-2",
     }
+    # 长文案回归锚点：body 已不限字数，300+ 字也必须过安全门，
+    # 旧口径 80/140 上限曾把真实素材长文案整批回退成兜底卡。
     long_body = (
         "夏天的傍晚我们在海边散步，晚风很轻，浪花一遍遍漫上沙滩，灯塔亮起来的时候，"
         "你说明年的今天还要一起回来看日出，我们把这个约定写进日记，回家的路上买了两串糖葫芦，甜味留在了那一页。"
-    )
-    assert 80 < len(long_body) <= 140  # 1.0.4 放宽区间内、超出 1.0.3 的 80 字上限
+    ) * 4
+    assert len(long_body) > 300
 
     def document(payload: dict[str, object] | None) -> list[dict[str, object]]:
         return [
@@ -1440,34 +1597,39 @@ def test_is_safe_playback_per_scene_media_contract() -> None:
         ]
 
     actions = MemoirNodeRunner._rule_actions(document(None))
-    # 非 image 场景携带与 manifest 配对的 payload + 140 字 body：通过。
+    # 1.0.4 非 image 场景携带与 manifest 配对的 payload + 超长 body：通过。
     assert MemoirNodeRunner._is_safe_playback(
         document({"image_url": url, "title_word": "那年海边"}), actions,
         media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+        agent_version="1.0.4",
     )
-    # 无 payload 纯文字卡：放行（生成失败场景原样保留）。
+    # 1.0.4 无 payload 纯文字卡：放行（生成失败场景原样保留）。
     assert MemoirNodeRunner._is_safe_playback(
         document(None), actions,
         media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+        agent_version="1.0.4",
+    )
+    # 旧版仍受冻结的 80 字合同约束，不能因直接调用安全门而绕过。
+    assert not MemoirNodeRunner._is_safe_playback(
+        document(None), actions, media_tasks=[], scene_types=_MEDIA_SCENE_TYPES,
+        agent_version="1.0.3",
     )
     # image_url 与 manifest 不一致：拒绝（配对规则不变）。
     assert not MemoirNodeRunner._is_safe_playback(
         document({"image_url": "https://other.oss-cn-hangzhou.aliyuncs.com/memoir/images/x.png"}),
         actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
+        agent_version="1.0.4",
     )
     # payload 混入白名单外字段：拒绝。
     assert not MemoirNodeRunner._is_safe_playback(
         document({"image_url": url, "caption": "私货"}),
         actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES, per_scene_media=True,
-    )
-    # 1.0.3 旧口径：140 字 body 一律拒绝（per_scene_media 缺省零变化）。
-    assert not MemoirNodeRunner._is_safe_playback(
-        document(None), actions, media_tasks=[], scene_types=_MEDIA_SCENE_TYPES,
+        agent_version="1.0.4",
     )
 
 
 def test_rule_actions_durations_for_image_and_text_cards() -> None:
-    """_rule_actions：带图 show_card 5000ms、纯文字 3000ms、打字机按时长上限 12000ms。"""
+    """_rule_actions：带图 show_card 5000ms、纯文字 3000ms、打字机随字数自适应不封顶。"""
     url = "https://bucket.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
     scenes = [
         {"scene_id": "scene-img", "scene_type": "summary",
@@ -1476,7 +1638,7 @@ def test_rule_actions_durations_for_image_and_text_cards() -> None:
         {"scene_id": "scene-text", "scene_type": "summary",
          "source_refs": ["diary:diary-1"], "body": "短文案。"},
         {"scene_id": "scene-long", "scene_type": "diary_highlight",
-         "source_refs": ["diary:diary-1"], "body": "字" * 200},
+         "source_refs": ["diary:diary-1"], "body": "字" * 400},
     ]
     actions = MemoirNodeRunner._rule_actions(scenes)
     by_scene = {action["scene_id"]: action for action in actions}
@@ -1484,7 +1646,29 @@ def test_rule_actions_durations_for_image_and_text_cards() -> None:
     assert by_scene["scene-img"]["duration_ms"] == 5000
     assert by_scene["scene-text"]["duration_ms"] == 3000
     assert by_scene["scene-long"]["action_type"] == "type_text"
-    assert by_scene["scene-long"]["duration_ms"] == 12000  # 200*75+1500 超上限封顶
+    # 前端 75ms/字打完再留 1500ms 阅读；不封顶，否则长文案打字会被截断。
+    assert by_scene["scene-long"]["duration_ms"] == 400 * 75 + 1500
+    assert by_scene["scene-long"]["duration_ms"] > 30_000
+
+
+def test_valid_scenes_scopes_unlimited_content_to_1_0_4() -> None:
+    """旧版保持 8 场景/80 字冻结合同；1.0.4 起仅保留最小三场景约束。"""
+    scenes = [
+        {
+            "scene_id": f"scene-{index}",
+            "scene_type": "summary",
+            "source_refs": [],
+            "body": "字" * 81,
+        }
+        for index in range(1, 10)
+    ]
+    runner = MemoirNodeRunner(object())
+
+    assert runner._valid_scenes({"scenes": scenes}, [], "1.0.3") is None
+    result = runner._valid_scenes({"scenes": scenes}, [], "1.0.4")
+
+    assert result is not None
+    assert len(result) == 9
 
 
 def test_tool_wire_version_registers_1_0_4() -> None:

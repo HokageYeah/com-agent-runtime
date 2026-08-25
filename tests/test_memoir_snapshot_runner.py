@@ -242,8 +242,8 @@ def test_safety_review_builds_complete_document_and_falls_back_for_invalid_actio
     assert invalid.playback_document["scenes"][0]["scene_id"] == "scene-1"
 
 
-def test_safety_review_replaces_overlong_or_too_many_scenes():
-    """发布审核拒绝超过 16 张或正文超过 80 字的场景。"""
+def test_safety_review_keeps_long_body_and_many_scenes_for_1_0_4():
+    """1.0.4 起发布审核只保留场景下限，长正文和多场景不得回退。"""
     scenes = [
         {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": [], "body": "x" * 81}
         for index in range(1, 18)
@@ -254,12 +254,39 @@ def test_safety_review_replaces_overlong_or_too_many_scenes():
     ]
     state = AgentState(scenes=scenes, actions=actions)
 
-    result = MemoirNodeRunner(object()).run_node({"node_id": "safety_review"}, type("Run", (), {"run_id": "r"})(), state)
+    result = MemoirNodeRunner(object()).run_node(
+        {"node_id": "safety_review"},
+        type("Run", (), {"run_id": "r", "agent_version": "1.0.4"})(),
+        state,
+    )
+
+    assert result == {"node_id": "safety_review", "safe": True}
+    assert state.playback_document["scenes"] == scenes
+    assert state.playback_document["actions"] == actions
+    assert state.playback_document["media_manifest"] == []
+
+
+def test_safety_review_falls_back_for_legacy_long_body_and_many_scenes():
+    """1.0.3 的恢复状态也必须执行冻结的 8 场景/80 字发布合同。"""
+    scenes = [
+        {"scene_id": f"scene-{index}", "scene_type": "summary", "source_refs": [], "body": "x" * 81}
+        for index in range(1, 10)
+    ]
+    actions = [
+        {"action_id": f"action-{index}", "scene_id": f"scene-{index}", "action_type": "show_card", "duration_ms": 3000}
+        for index in range(1, 10)
+    ]
+    state = AgentState(scenes=scenes, actions=actions)
+
+    result = MemoirNodeRunner(object()).run_node(
+        {"node_id": "safety_review"},
+        type("Run", (), {"run_id": "r", "agent_version": "1.0.3"})(),
+        state,
+    )
 
     assert result == {"node_id": "safety_review", "safe": False}
+    assert state.safety_report == {"decision": "fallback", "reason": "INVALID_PLAYBACK_STRUCTURE"}
     assert len(state.playback_document["scenes"]) == 3
-    assert all(scene["source_refs"] == [] for scene in state.playback_document["scenes"])
-    assert state.playback_document["media_manifest"] == []
 
 
 def test_safety_review_replaces_forbidden_emotional_wording_without_logging_body(caplog: object):

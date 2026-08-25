@@ -152,7 +152,7 @@ _SCENE_TYPES: tuple[str, ...] = (
 _MEDIA_SCENE_TYPES: tuple[str, ...] = _SCENE_TYPES + ("image",)
 # 媒体生成（image 场景）的最低 agent 版本；版本比较按三元组数值语义。
 _MEDIA_MIN_VERSION = "1.0.3"
-# 每场景配图（全场景 payload + title_word 放开 + body ≤140 字）的最低版本。
+# 每场景配图（全场景 payload + title_word 放开）的最低版本。
 _PER_SCENE_MEDIA_MIN_VERSION = "1.0.4"
 _ACTION_TYPES: tuple[str, ...] = ("show_card", "type_text", "hold", "transition")
 
@@ -236,6 +236,7 @@ class MemoirNodeRunner:
             trusted_refs = set(self._safe_material_refs(state.sanitized_material))
             if not isinstance(state.sanitized_material, Mapping):
                 trusted_refs = self._playback_source_refs(state.scenes)
+            agent_version = getattr(run, "agent_version", "")
             evaluation = self._playback_evaluator.evaluate(
                 state.scenes, state.actions,
                 trusted_source_refs=trusted_refs,
@@ -243,9 +244,10 @@ class MemoirNodeRunner:
             )
             if evaluation.decision == "pass" and self._is_safe_playback(
                 state.scenes, state.actions, media_tasks=state.media_tasks,
-                scene_types=_MEDIA_SCENE_TYPES if _media_version_enabled(getattr(run, "agent_version", "")) else _SCENE_TYPES,
-                # 1.0.4+ 每场景配图：任意场景可携带 payload、body 上限放宽到 140 字。
-                per_scene_media=_per_scene_media_enabled(getattr(run, "agent_version", "")),
+                scene_types=_MEDIA_SCENE_TYPES if _media_version_enabled(agent_version) else _SCENE_TYPES,
+                # 1.0.4+ 每场景配图：任意场景可携带配图 payload。
+                per_scene_media=_per_scene_media_enabled(agent_version),
+                agent_version=agent_version,
             ):
                 decision = "passed"
             else:
@@ -512,11 +514,52 @@ class MemoirNodeRunner:
                     "MemoirAgent 无图片场景跳过媒体生成 run_id=%s", run.run_id,
                 )
                 return {"node_id": "enqueue_media_tasks", "skipped": True, "reason_code": "NO_IMAGE_SCENE"}
+            # 媒体节点在最终 safety_review 之前运行，正文会成为外部图像 Provider 的
+            # prompt。因此先用同一份确定性内容/引用/动作审核做外发闸门；此时尚无
+            # manifest，media_pending 只放宽待生成图片的配对校验，绝不放宽正文安全。
+            candidate_actions = (
+                state.actions
+                if isinstance(state.actions, list)
+                else self._rule_actions(scenes)
+            )
+            trusted_refs = set(self._safe_material_refs(state.sanitized_material))
+            if not isinstance(state.sanitized_material, Mapping):
+                trusted_refs = self._playback_source_refs(scenes)
+            evaluation = self._playback_evaluator.evaluate(
+                scenes,
+                candidate_actions,
+                trusted_source_refs=trusted_refs,
+                enabled_capabilities=set(),
+            )
+            if evaluation.decision != "pass" or not self._is_safe_playback(
+                scenes,
+                candidate_actions,
+                scene_types=_MEDIA_SCENE_TYPES,
+                per_scene_media=per_scene,
+                media_pending=True,
+                agent_version=agent_version,
+            ):
+                state.scenes, state.actions = self._base_scenes_actions()
+                state.media_tasks = []
+                state.fallback_flags.append("media_egress_safety_fallback")
+                logging.warning(
+                    "MemoirAgent 媒体外发前安全审核拒绝 run_id=%s code=%s",
+                    run.run_id,
+                    "MEDIA_EGRESS_SAFETY_REJECTED",
+                )
+                return {
+                    "node_id": "enqueue_media_tasks",
+                    "skipped": True,
+                    "reason_code": "MEDIA_EGRESS_SAFETY_REJECTED",
+                }
             # 直赋值而非 apply_tool_output：manifest 条目含敏感键集合中的 url，
             # 网关通道会拒绝；该字段由本节点受控生成，直接写入 state。
             media_tasks, updated_scenes = self._media_service.generate(
                 run, scenes, state.sanitized_material,
                 illustrate_all_scenes=per_scene,
+                # Executor 每节点前绑定的租约上下文传给媒体服务逐张续约：
+                # 8 张竖版图串行可超 90s 单节点租约，不续约会撞 reaper 接管。
+                lease_context=self._lease_context,
             )
             state.media_tasks = media_tasks if isinstance(media_tasks, list) else []
             state.scenes = updated_scenes
@@ -1021,11 +1064,10 @@ class MemoirNodeRunner:
             if action_type == "type_text":
                 # 打字机停留时长随正文长度自适应：前端 xxt-text-type 冻结
                 # 75ms/字，先让全文打完（len*75）再留 1500ms 阅读停留；
-                # 上限 12000ms 对齐 1.0.4 的 140 字文案（140*75+1500=12000），
-                # 旧 80 字文案实际落在区间内不受影响。
+                # 不设上限——body 已不限字数，cap 会让长文案打字被截断。
                 body = scene.get("body")
                 body_len = len(body) if isinstance(body, str) else 0
-                duration_ms = max(3000, min(body_len * 75 + 1500, 12000))
+                duration_ms = max(3000, body_len * 75 + 1500)
             else:
                 # show_card：带配图（payload.image_url）的场景停留 5000ms 留出
                 # 看图时间；纯文字卡维持 3000ms。
@@ -1045,6 +1087,18 @@ class MemoirNodeRunner:
         return rule_actions
 
     @staticmethod
+    def _scene_content_contract_valid(scenes: list[object], agent_version: object) -> bool:
+        """按 Agent 版本校验冻结的场景数量与正文长度合同。"""
+        if _per_scene_media_enabled(agent_version):
+            return True
+        return len(scenes) <= 8 and all(
+            not isinstance(scene, Mapping)
+            or not isinstance(scene.get("body"), str)
+            or len(scene["body"]) <= 80
+            for scene in scenes
+        )
+
+    @staticmethod
     def _is_safe_playback(
         scenes: object,
         actions: object,
@@ -1052,6 +1106,8 @@ class MemoirNodeRunner:
         media_tasks: object = None,
         scene_types: tuple[str, ...] = _SCENE_TYPES,
         per_scene_media: bool = False,
+        media_pending: bool = False,
+        agent_version: object = "",
     ) -> bool:
         """校验播放结构及动作引用；只允许当前模板链定义的安全字段组合。
 
@@ -1060,13 +1116,16 @@ class MemoirNodeRunner:
         场景 1:1 引用、payload 白名单 {image_url, title_word}、
         image_url 与 manifest url 逐场景一致、非 image 场景不得携带 payload。
         1.0.4 起（per_scene_media=True）契约放宽：任意场景可携带配图
-        payload（白名单不变、配对规则不变），body 上限 80 -> 140 字；
-        1.0.3- 调用不传该参数，行为零变化。
+        payload（白名单不变、配对规则不变）。
+        1.0.4+ 场景数量只保下限（>=3）、body 不限长度：素材量随用户数据增长
+        （最少日记 7 + 赌约 7），设上限会把真实数据误杀成全盘兜底；1.0.3-
+        仍执行冻结的最多 8 场景、每场最多 80 字合同，防止恢复状态绕过生成入口。
         """
-        # 1.0.4+ 每场景配图版本把场景文案上限放宽到 140 字（更细腻的叙事），
-        # 旧版本维持 80 字冻结口径。
-        max_body_chars = 140 if per_scene_media else 80
-        if not isinstance(scenes, list) or not 3 <= len(scenes) <= 16:
+        if (
+            not isinstance(scenes, list)
+            or len(scenes) < 3
+            or not MemoirNodeRunner._scene_content_contract_valid(scenes, agent_version)
+        ):
             return False
         if not all(
             isinstance(scene, dict)
@@ -1075,7 +1134,6 @@ class MemoirNodeRunner:
             and isinstance(scene.get("source_refs"), list)
             and all(isinstance(ref, str) for ref in scene["source_refs"])
             and ("body" not in scene or isinstance(scene["body"], str))
-            and (not isinstance(scene.get("body"), str) or len(scene["body"]) <= max_body_chars)
             and not MemoirGuardrails.violations(scene.get("body"))
             for scene in scenes
         ):
@@ -1085,6 +1143,8 @@ class MemoirNodeRunner:
             return False
         # ---- M6 媒体契约校验（media_tasks 为 None 视为空清单，兼容旧调用方）----
         manifest = media_tasks if isinstance(media_tasks, list) else []
+        if media_pending and manifest:
+            return False
         if not MemoirNodeRunner._media_manifest_valid(manifest, scene_ids):
             return False
         url_by_scene = {
@@ -1095,6 +1155,10 @@ class MemoirNodeRunner:
         for scene in scenes:
             payload = scene.get("payload")
             if scene.get("scene_type") == "image":
+                if media_pending:
+                    if payload not in (None, {}):
+                        return False
+                    continue
                 # image 场景必须有 manifest 条目，payload 白名单仅两键且
                 # image_url 必须与该场景 manifest 条目 url 完全一致。
                 if scene.get("scene_id") not in url_by_scene:
@@ -1111,6 +1175,10 @@ class MemoirNodeRunner:
                 ):
                     return False
             elif per_scene_media:
+                if media_pending:
+                    if payload not in (None, {}):
+                        return False
+                    continue
                 # 1.0.4+ 每场景配图：非 image 场景也可携带配图 payload——白名单
                 # 仍仅 {image_url, title_word}，image_url 必须命中本场景 manifest
                 # 条目 url（配对规则不变）；无 payload/空 payload 的纯文字卡放行
@@ -1139,7 +1207,7 @@ class MemoirNodeRunner:
                 and action.get("scene_id") in scene_ids
                 and action.get("action_type") in _ACTION_TYPES
                 and isinstance(action.get("duration_ms"), int)
-                and 1 <= action["duration_ms"] <= 30000
+                and action["duration_ms"] >= 1
                 for action in actions
             )
             and {action["scene_id"] for action in actions if isinstance(action, dict)} == scene_ids
@@ -1330,9 +1398,13 @@ class MemoirNodeRunner:
         if not isinstance(output, _ScenePlanOutput):
             return None
         scenes = output.model_dump()["scenes"]
-        if not 3 <= len(scenes) <= 8:
+        if len(scenes) < 3:
             return None
-        # 版本门控：旧版本只认六场景；1.0.3+ 额外放行 image（M6 媒体通道）。
+        # 1.0.4+ 的产品合同不设场景数和正文字数上限；旧包的提示词已冻结为
+        # 至多 8 张、每张至多 80 字，生成入口与最终发布审核共用同一版本合同。
+        if not self._scene_content_contract_valid(scenes, agent_version):
+            return None
+        # 版本门控：旧版仅识别六类非媒体场景；1.0.3+ 额外放行 image（M6 媒体通道）。
         allowed_types = _MEDIA_SCENE_TYPES if _media_version_enabled(agent_version) else _SCENE_TYPES
         if not all(isinstance(scene, Mapping) and isinstance(scene.get("scene_id"), str) and scene.get("scene_type") in allowed_types and isinstance(scene.get("source_refs"), list) and all(isinstance(ref, str) and ref in allowed_refs for ref in scene["source_refs"]) for scene in scenes):
             return None

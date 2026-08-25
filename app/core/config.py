@@ -321,12 +321,16 @@ class Settings(BaseSettings):
     MEMOIR_MEDIA_ENABLED: bool = False # 媒体生成总开关
     MEMOIR_MEDIA_PROVIDER: str = 'mock' # 图像 provider：mock（开发/测试）| volcano（真实计费 API）
     MEMOIR_MEDIA_IMAGE_PREFIX: str = 'memoir/images/' # 生成图片对象 key 的强制前缀（D1 冻结契约）
-    MEMOIR_MEDIA_MAX_IMAGES_PER_RUN: int = 8 # 单次 Run 最多生成图片张数（按张配额上限，未被 model_policy 覆盖时的默认值）
     MEMOIR_MEDIA_URL_HOST_SUFFIXES: str = 'aliyuncs.com' # 媒体 URL 域名后缀白名单（逗号分隔）
     # 单张图片提交、轮询与网络重试总超时，须显著小于 90s 节点租约。
     MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS: float = 25.0
     MEMOIR_MEDIA_IMAGE_MAX_RETRIES: int = 1 # 单张图片有限重试次数
-    MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 75.0 # 媒体节点整体时间预算（90s 租约内留出安全余量；1.0.4 每场景配图最多 8 张、实测单张 ~7s，60s 不够）
+    # 媒体节点整体时间预算：图片张数不设配额（场景数随用户素材增长，
+    # 最少日记 7 + 赌约 7，每场景一张配图），本预算是唯一闸门——耗尽后
+    # 剩余场景优雅降级为文字卡。媒体服务每张完成后 heartbeat 续约，
+    # 节点可安全跨 90s 租约窗。竖版图实测单张 9-18s，900s 可覆盖约
+    # 50-90 张，远超正常素材量。
+    MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 900.0
     # 照片出域门禁：图生图需要把用户照片字节发给图像 Provider；该门禁默认
     # 关闭，关闭时即使素材含 images 也只走文生图，绝不外发照片。
     MEMOIR_MEDIA_PHOTO_EGRESS_ENABLED: bool = False

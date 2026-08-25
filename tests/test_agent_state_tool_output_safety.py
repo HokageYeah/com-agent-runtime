@@ -86,6 +86,29 @@ def test_semantic_validator_rejects_nested_runtime_control_field() -> None:
     assert result.error_codes == ("FORBIDDEN_CONTROL_FIELD",)
 
 
+def test_semantic_validator_allows_long_playback_without_scene_or_duration_caps() -> None:
+    """回忆录仅保留最小三场景约束，长正文生成的 31.5 秒动作必须通过。"""
+    scenes = [
+        {"scene_id": f"scene-{index}", "source_refs": []}
+        for index in range(1, 10)
+    ]
+    actions = [
+        {
+            "scene_id": scene["scene_id"],
+            "action_type": "show_card",
+            "duration_ms": 31_500,
+        }
+        for scene in scenes
+    ]
+
+    result = SemanticValidator().validate(
+        {"source_refs": [], "scenes": scenes, "actions": actions},
+        trusted_refs=set(),
+    )
+
+    assert result.valid is True
+
+
 def test_gateway_apply_result_rejects_schema_mismatch_without_state_mutation() -> None:
     """缺少 manifest 要求字段的工具结果不能进入 AgentState。"""
     manifest = ToolManifest(
@@ -132,6 +155,40 @@ class _AlwaysWritableLease:
     def can_write(self, run_id: str, context: LeaseContext) -> bool:
         """允许进入 schema 和状态安全检查。"""
         return True
+
+
+def test_gateway_apply_result_does_not_trust_manifest_name_for_digest_exception() -> None:
+    """Package manifest 不能伪装固定发布路由而放行含敏感序列的摘要。"""
+    digest = "123456789012345678" + "a" * 46
+    manifest = ToolManifest(
+        name="memory.publish_playback_document", version="1.0.0",
+        connector_id="couple_diary_backend", method="POST",
+        relative_path="/api/v1/internal/agent-tools/memory.publish_playback_document",
+        input_from="playback_document", output_to="publish_result",
+        side_effect=True, cancellation_behavior="query_after_commit",
+        output_schema={
+            "type": "object",
+            "required": ["revision", "content_digest"],
+            "properties": {
+                "revision": {"type": "integer"},
+                "content_digest": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    )
+    state = AgentState()
+
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
+        ToolGateway.apply_result(
+            manifest,
+            {"revision": 1, "content_digest": digest},
+            state,
+            "run-1",
+            _lease_context(),
+            _AlwaysWritableLease(),
+        )
+
+    assert state.publish_result is None
 
 
 def test_gateway_apply_result_rejects_invalid_lease_without_state_mutation() -> None:

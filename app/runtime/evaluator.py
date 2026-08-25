@@ -28,13 +28,18 @@ class MemoirPlaybackEvaluator:
         trusted_source_refs: set[str],
         enabled_capabilities: set[str],
     ) -> EvaluationDecisionDTO:
-        """评价候选文档；只基于冻结引用集合与显式能力开关，不做外部读取。"""
+        """评价候选文档；只基于冻结引用集合与显式能力开关，不做外部读取。
+
+        场景数量只保下限（>=3）：素材量随用户数据增长（最少日记 7 + 赌约
+        7），不设上限，避免真实数据被数量门误杀成兜底。body 不再校验
+        长度（素材丰富时文案自然变长），只校验类型并过情感护栏。
+        """
         scene_items = scenes if isinstance(scenes, list) else []
         action_items = actions if isinstance(actions, list) else []
         reasons: list[str] = []
         ref_count = 0
         scene_ids: set[str] = set()
-        if not 3 <= len(scene_items) <= 16:
+        if len(scene_items) < 3:
             reasons.append("SCENE_COUNT_INVALID")
         for scene in scene_items:
             if not isinstance(scene, Mapping):
@@ -54,7 +59,7 @@ class MemoirPlaybackEvaluator:
             if scene.get("safety_level", "normal") not in self._SAFETY_LEVELS:
                 reasons.append("SCENE_SAFETY_LEVEL_INVALID")
             body = scene.get("body")
-            if body is not None and (not isinstance(body, str) or len(body) > 80):
+            if body is not None and not isinstance(body, str):
                 reasons.append("SCENE_BODY_INVALID")
             reasons.extend(MemoirGuardrails.violations(body))
         action_ids: set[str] = set()

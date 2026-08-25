@@ -142,7 +142,9 @@ def build_volcano_v4_authorization(
 class CVImageProvider(Protocol):
     """图像 Provider 最小接口：入参 prompt/参考图字节，出参统一为图片 bytes。"""
 
-    def text_to_image(self, prompt: str) -> bytes: ...
+    def text_to_image(
+        self, prompt: str, *, width: int | None = None, height: int | None = None,
+    ) -> bytes: ...
 
     def image_to_image(self, prompt: str, reference: bytes) -> bytes: ...
 
@@ -399,14 +401,22 @@ class VolcanoCVClient:
     def _generate(self, body: Mapping[str, object]) -> bytes:
         return asyncio.run(self._generate_async(body))
 
-    def text_to_image(self, prompt: str) -> bytes:
-        """通用 3.0 文生图；提交体不伪造空参考图或 URL 返回参数。"""
-        return self._generate(
-            {
-                "req_key": TEXT_TO_IMAGE_REQ_KEY,
-                "prompt": prompt,
-            }
-        )
+    def text_to_image(
+        self, prompt: str, *, width: int | None = None, height: int | None = None,
+    ) -> bytes:
+        """通用 3.0 文生图；提交体不伪造空参考图或 URL 返回参数。
+
+        可选 width/height 控制输出尺寸（手机全屏竖版）；官方约束
+        width×height < 2048×2048。两者成对传入才生效，避免单边歧义。
+        """
+        body: dict[str, object] = {
+            "req_key": TEXT_TO_IMAGE_REQ_KEY,
+            "prompt": prompt,
+        }
+        if width is not None and height is not None:
+            body["width"] = width
+            body["height"] = height
+        return self._generate(body)
 
     def image_to_image(self, prompt: str, reference: bytes) -> bytes:
         """SeedEdit 3.0 图生图；参考图只在请求内以单元素 Base64 数组传输。"""
@@ -438,7 +448,10 @@ class MockCVClient:
         self.text_prompts: list[str] = []
         self.image_prompts: list[str] = []
 
-    def text_to_image(self, prompt: str) -> bytes:
+    def text_to_image(
+        self, prompt: str, *, width: int | None = None, height: int | None = None,
+    ) -> bytes:
+        # 尺寸参数与真实客户端保持同签名；Mock 只记录 prompt 供测试断言。
         self.text_prompts.append(prompt)
         if prompt in self._fail_prompts:
             raise VolcanoCVError("VOLCANO_CV_MOCK_FAILURE")

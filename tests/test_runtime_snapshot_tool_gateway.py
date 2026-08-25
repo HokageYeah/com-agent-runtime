@@ -631,6 +631,89 @@ def test_generic_call_rejects_sensitive_tool_output_without_logging_payload(capl
     assert "13800138000" not in caplog.text
 
 
+def test_generic_call_accepts_sha256_content_digest() -> None:
+    """仅原子发布工具可返回含数字的 SHA-256 完整性摘要。"""
+    digest = "123456789012345678" + "a" * 46
+    gateway = ToolGateway(
+        {"couple_diary_backend": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json={"output": {"revision": 1, "content_digest": digest}}
+            )
+        )),
+    )
+    manifest = ToolManifest(
+        name="memory.publish_playback_document", version="1.0.0",
+        connector_id="couple_diary_backend", method="POST",
+        relative_path="/api/v1/internal/agent-tools/memory.publish_playback_document",
+        input_from="playback_document", output_to="publish_result",
+        side_effect=True, cancellation_behavior="query_after_commit",
+    )
+
+    assert gateway.call(manifest, {
+        "archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2,
+        "playback_document": {"schema_version": "1.0.0", "scenes": [], "actions": [], "media_manifest": []},
+        "tool_context": _tool_context("a", "r"),
+    }, idempotency_key="publish-digest") == {"revision": 1, "content_digest": digest}
+
+
+def test_get_publish_result_accepts_sha256_content_digest() -> None:
+    """发布查询与发布写入共享受控的 revision/content_digest 返回合同。"""
+    digest = "123456789012345678" + "a" * 46
+    gateway = _make_default_gateway(
+        lambda _: httpx.Response(200, json={"output": {"revision": 1, "content_digest": digest}})
+    )
+
+    assert gateway.get_publish_result("c", "a", "s", "r", 2, "publish-digest") == {
+        "revision": 1,
+        "content_digest": digest,
+    }
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"content_digest": "123456789012345678" + "a" * 46},
+        {"revision": 1, "note": "123456789012345678" + "a" * 46},
+        {"revision": True, "content_digest": "123456789012345678" + "a" * 46},
+        {"revision": 1, "content_digest": "123456789012345678" + "a" * 45},
+        {"revision": 1, "content_digest": "123456789012345678" + "a" * 47},
+        {"revision": 1, "content_digest": "123456789012345678A" + "a" * 45},
+        {"revision": 1, "content_digest": "123456789012345678g" + "a" * 45},
+        {"revision": 1, "content_digest": " 123456789012345678" + "a" * 46},
+        {"revision": 1, "content_digest": 123, "note": "123456789012345678" + "a" * 46},
+        {"revision": 1, "content_digest": "safe", "nested": {"content_digest": "123456789012345678" + "a" * 46}},
+        {"revision": 1, "content_digest": "a" * 64, "phone": "13800138000"},
+    ],
+)
+def test_publish_result_digest_exception_requires_exact_trusted_shape(output: dict[str, object]) -> None:
+    """摘要豁免只能用于固定工具的顶层两字段结果，不能跳过其它值的递归扫描。"""
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
+        ToolGateway._validate_output(output, tool_name="memory.get_publish_result")
+
+
+def test_generic_call_rejects_sha256_shaped_digest_from_non_publish_tool() -> None:
+    """同名字段不绑定发布工具时，不能绕过敏感标识符扫描。"""
+    digest = "123456789012345678" + "a" * 46
+    gateway = ToolGateway(
+        {"couple_diary_backend": BusinessConnector("http://business.local", "agent-runtime", "dev", "secret")},
+        httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"output": {"content_digest": digest}})
+        )),
+    )
+    manifest = ToolManifest(
+        name="memory.get_snapshot", version="1.0.0", connector_id="couple_diary_backend",
+        method="POST", relative_path="/api/v1/internal/agent-tools/memory.get_snapshot",
+        input_from="input", output_to="snapshot",
+    )
+
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
+        gateway.call(manifest, {
+            "archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2,
+            "tool_context": _tool_context("a", "r"),
+        })
+
+
 def test_disabled_tts_contract_is_rejected_before_network() -> None:
     """预留 TTS 契约即使被误调用，也必须在任何 DNS/HTTP 前拒绝。"""
 

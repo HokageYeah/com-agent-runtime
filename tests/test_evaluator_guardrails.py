@@ -52,6 +52,24 @@ def test_evaluator_enforces_scene_action_domain_order_and_closed_media_capabilit
     }
 
 
+def test_evaluator_body_length_is_not_limited() -> None:
+    """body 不再校验字数上限：素材丰富时文案自然变长（一般 120-300 字，
+    更长也合法），只有类型错误或触发情感护栏才判 SCENE_BODY_INVALID。
+
+    回归锚点：300 字长文案必须 pass——此前 80/140 字上限曾把真实素材
+    生成的长文案全部判死，导致整个文档回退成兜底基础卡。
+    """
+    scenes, actions = _playback()
+    scenes[0]["body"] = "温" * 300  # 超过旧口径 80/140 上限的长文案
+
+    decision = MemoirPlaybackEvaluator().evaluate(
+        scenes, actions, trusted_source_refs={"diary:d-1"}, enabled_capabilities=set(),
+    )
+
+    assert decision.decision == "pass"
+    assert decision.reasons == ()
+
+
 def test_evaluation_service_persists_only_safe_evaluation_summary() -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)

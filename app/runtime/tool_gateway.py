@@ -88,7 +88,7 @@ def _wire_idempotency_key(logical_key: str) -> str:
 # 1.0.1 起走 v1.1 完整错误合同；1.0.2 只改了 prompt manifest 的 guardrail
 # 策略（redacted_only），Tool 合同与 1.0.1 完全一致，沿用 v1.1.0。
 # 1.0.3（M6 媒体通道）只新增图节点与媒体生成，Tool 合同零变更，沿用 v1.1.0。
-# 1.0.4（每场景配图 + body ≤140 字）同为媒体与内容侧放宽，Tool 合同零变更。
+# 1.0.4（每场景配图 + body 不设字数上限）同为媒体与内容侧放宽，Tool 合同零变更。
 # 新版本包注册时若忘记在此登记，Worker 会在发包前以 TOOL_WIRE_VERSION_INVALID
 # 瞬时失败（无日志、无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
 _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
@@ -287,6 +287,7 @@ class ToolGateway:
         ToolGateway._validate_output_schema(manifest.output_schema, output)
         if not isinstance(output, dict):
             raise ValueError("TOOL_OUTPUT_SCHEMA_INVALID")
+        # apply_result 的 manifest 来自 Package 声明，不能用其名称授予固定路由的摘要豁免。
         ToolGateway._validate_output(output)
         state.apply_tool_output(manifest.output_to or "", output)
         logging.info("工具结果安全写入 run_id=%s tool=%s target=%s", run_id, manifest.name, manifest.output_to)
@@ -585,7 +586,7 @@ class ToolGateway:
             )
             raise ValueError("TOOL_OUTPUT_SCHEMA_VERSION_INVALID")
         logging.info("HTTP Business Tool 成功 tool=%s connector=%s", tool_name, connector_id)
-        self._validate_output(output)
+        self._validate_output(output, tool_name=tool_name)
         return output
 
     def _effective_timeout(self, fixed_timeout: float) -> float:
@@ -809,8 +810,34 @@ class ToolGateway:
         return context
 
     @staticmethod
-    def _validate_output(output: dict[str, Any]) -> None:
+    def _is_trusted_publish_result_output(
+        output: dict[str, Any], tool_name: str | None,
+    ) -> bool:
+        """仅固定发布路由的精确完整性摘要响应可跳过敏感标识符扫描。"""
+        if tool_name not in {
+            "memory.publish_playback_document",
+            "memory.get_publish_result",
+        } or set(output) != {"revision", "content_digest"}:
+            return False
+        revision, content_digest = output["revision"], output["content_digest"]
+        return (
+            isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and isinstance(content_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", content_digest) is not None
+        )
+
+    @staticmethod
+    def _validate_output(
+        output: dict[str, Any], *, tool_name: str | None = None,
+    ) -> None:
         """执行最小 JSON 输出与敏感标识符校验，防止污染 AgentState。"""
+        # content_digest 是 SHA-256 完整性摘要，可能偶然命中身份证规则。只允许
+        # Gateway 固定发布路由返回 revision/content_digest 的精确两字段形状整体豁免；
+        # 任意嵌套、额外字段、错误类型或伪造 Package manifest 均继续递归扫描。
+        if ToolGateway._is_trusted_publish_result_output(output, tool_name):
+            return
+
         def walk(value: Any) -> None:
             if isinstance(value, str):
                 if _TOOL_OUTPUT_SENSITIVE.search(value):

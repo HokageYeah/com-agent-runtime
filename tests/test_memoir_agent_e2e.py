@@ -180,13 +180,8 @@ def test_memoir_mvp_e2e_publishes_only_complete_revision_then_projects_callback(
     published = MemoryPlayerService(session).get_published_playback(archive.archive_id)
     assert published.document.revision == 1
     assert published.document.document_json["media_manifest"] == []
-    # 模型输出的正常作品必须在 MVP 3～8 张范围内；最终发布硬上限仍由校验器守住。
-    assert 3 <= len(published.scenes) <= 8
-    assert all(
-        not isinstance(scene.payload_json.get("body"), str)
-        or len(scene.payload_json["body"]) <= 80
-        for scene in published.scenes
-    )
+    # 发布端只保留最小场景下限；正文与场景数量都不能因历史上限被截断。
+    assert len(published.scenes) >= 3
     allowed_refs = {
         *(f"diary:{source_id}" for source_id in source_manifest["diary_ids"]),
         # R2 后 Runtime 经 legacy reader 单向归一化为 completed_bet 前缀；

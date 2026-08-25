@@ -1,7 +1,7 @@
 agent_id: memoir_agent
 # Agent Package 版本 1.0.4（每场景配图 + 文案放宽）：在 1.0.3 媒体通道基础上把
 # 配图从"仅 image 场景"升级为"全部场景按 body 生成"——scene-generate 不再规划
-# image 场景（六类型结构），每个场景 body 都要求具体画面感并 ≤140 字（原 80 字）；
+# 所有场景 body 都要求具体画面感，不设字数上限；
 # title_word 放开到任意场景（发布前由媒体节点收进 payload）；cover 必须首位、
 # summary 必须收尾。媒体总开关关闭时全部场景降级为纯文字卡（含剥离顶层
 # title_word），结构不破坏。payload 契约为放宽而非破坏：白名单两键、

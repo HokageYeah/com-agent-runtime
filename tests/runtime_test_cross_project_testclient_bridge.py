@@ -295,9 +295,9 @@ def test_historical_1_0_0_cross_repo_single_persistent_chain(monkeypatch: Any) -
             session.close()
 
 
-# 跨仓 fixture 冻结的媒体测试域（业务端 settings 默认白名单已含此域）；
-# object_key 采用 Runtime 生成端真实形状（memoir/images/ + UUID，不可猜测）。
-_MEDIA_URL = "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+# 跨仓测试使用业务端测试环境已配置的 Runtime OSS 域名；不绕过发布层
+# URL 白名单。object_key 采用 Runtime 生成端真实形状（memoir/images/ + UUID）。
+_MEDIA_URL = "https://com-agent-runtime.oss-cn-beijing.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
 
 
 def _media_document() -> dict[str, Any]:
