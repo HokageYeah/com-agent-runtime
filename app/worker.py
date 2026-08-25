@@ -335,25 +335,9 @@ def configured_media_service(
         )
         config = MemoirMediaConfig.from_settings(runtime_settings)
 
-        def _load_photo(object_key: str) -> bytes:
-            """照片取回：私有桶短期预签名 GET + 受超时控制的单次下载。"""
-            from app.services.memory_s3_media_proxy import MemoryS3MediaProxy
-
-            proxy = MemoryS3MediaProxy.from_settings(runtime_settings)
-            if proxy is None:
-                raise RuntimeError("MEDIA_PHOTO_PROXY_UNCONFIGURED")
-            url = proxy.create_access_url(
-                object_key, expires_seconds=proxy.expires_seconds,
-            )
-            with httpx.Client(timeout=10.0, trust_env=False) as client:
-                response = client.get(url)
-            response.raise_for_status()
-            return response.content
-
-        photo_loader = _load_photo if config.photo_egress_allowed else None
         return MemoirMediaService(
             provider, uploader, config,
-            photo_loader=photo_loader, session=session,
+            session=session,
         )
     except Exception as exc:
         # 装配失败按能力关闭处理；只记异常类名，不记正文（可能含配置值）。

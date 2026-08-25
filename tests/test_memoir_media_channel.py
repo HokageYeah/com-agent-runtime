@@ -34,6 +34,8 @@ from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
 from app.services.memoir_media_service import (
+    MEDIA_IMAGE_HEIGHT,
+    MEDIA_IMAGE_WIDTH,
     MEDIA_MANIFEST_KEYS,
     MemoirMediaConfig,
     MemoirMediaService,
@@ -71,8 +73,6 @@ def _config(**overrides: object) -> MemoirMediaConfig:
         "provider_name": "mock",
         "image_prefix": "memoir/images/",
         "url_host_suffixes": ("aliyuncs.com",),
-        "photo_egress_enabled": False,
-        "provider_residency": "private",
         "node_budget_seconds": 30.0,
     }
     defaults.update(overrides)
@@ -119,6 +119,21 @@ def _scenes_with_two_images() -> list[dict[str, object]]:
 # 交付物 2/3：服务层生成、降级、配额、模式门控
 # ---------------------------------------------------------------------------
 
+def test_illustration_prompt_uses_full_bleed_editorial_contract() -> None:
+    """插画提示词必须锁定满幅竖版叙事，不得退回留白海报。"""
+    prompt = build_illustration_prompt("雨夜里我们共撑一把伞，踩着水花回家。")
+
+    assert "雨夜里我们共撑一把伞，踩着水花回家。" in prompt
+    assert "9:16 竖版成片插画" in prompt
+    assert "前景、主体中景、背景远景" in prompt
+    assert "全画面铺满" in prompt
+    assert "不要大面积留白" in prompt
+    assert "不要海报式留白布局" in prompt
+    assert "不要出现任何文字" in prompt
+    assert "不要App界面" in prompt
+    assert "一段温暖的回忆画面" in build_illustration_prompt("   ")
+
+
 def test_media_service_generates_six_key_manifest_and_payload() -> None:
     """场景 1：门禁开启时 image 场景生成六键 manifest + 两键 payload。"""
     provider = MockCVClient(text_image=PNG_BYTES)
@@ -150,6 +165,7 @@ def test_media_service_generates_six_key_manifest_and_payload() -> None:
     assert provider.text_prompts == [
         build_illustration_prompt("我们在海边的傍晚散步，海风很轻。")
     ]
+    assert provider.text_dimensions == [(MEDIA_IMAGE_WIDTH, MEDIA_IMAGE_HEIGHT)]
 
 
 def test_media_service_degrades_failed_scene_to_summary_text_card(
@@ -356,45 +372,24 @@ def test_media_service_ignores_legacy_image_count_policy() -> None:
     assert updated[2]["scene_type"] == "image"
 
 
-def test_media_service_img2img_only_when_both_gates_open() -> None:
-    """场景 5：照片出域门禁（开关 + public 驻留）双开才图生图，否则文生图。"""
+def test_media_service_ignores_reference_photos() -> None:
+    """回忆录插画服务不接收照片加载器，只用文本提示词生成。"""
     material = {"materials": [{
         "source_ref": "diary:diary-1", "type": "diary", "sensitive": False,
         "text": "素材摘要",
         "images": [{"photo_id": "p1", "object_key": "photos/diary-1/cover.jpg", "mime": "image/jpeg"}],
     }]}
-    loaded: list[str] = []
-
-    def photo_loader(object_key: str) -> bytes:
-        loaded.append(object_key)
-        return JPEG_BYTES
-
-    # 门禁关闭（默认）：即使素材含 images、loader 可用，也绝不外发照片。
-    provider = MockCVClient(image_image=PNG_BYTES)
-    MemoirMediaService(
-        provider, FakeUploader(), _config(),
-        photo_loader=photo_loader,
-    ).generate(_run(), _scenes_with_one_image(), material)
-    assert provider.image_prompts == [] and loaded == []
-
-    # 只开 egress 开关、驻留仍 private：依旧 fail-closed 文生图。
-    provider = MockCVClient(image_image=PNG_BYTES)
-    MemoirMediaService(
-        provider, FakeUploader(), _config(photo_egress_enabled=True),
-        photo_loader=photo_loader,
-    ).generate(_run(), _scenes_with_one_image(), material)
-    assert provider.image_prompts == [] and loaded == []
-
-    # 双开：走图生图并消费参考照片。
-    provider = MockCVClient(image_image=PNG_BYTES)
+    provider = MockCVClient(text_image=PNG_BYTES)
     manifest, _ = MemoirMediaService(
-        provider, FakeUploader(), _config(photo_egress_enabled=True, provider_residency="public"),
-        photo_loader=photo_loader,
+        provider,
+        FakeUploader(),
+        _config(),
     ).generate(_run(), _scenes_with_one_image(), material)
-    assert provider.image_prompts == [
+
+    assert provider.image_prompts == []
+    assert provider.text_prompts == [
         build_illustration_prompt("我们在海边的傍晚散步，海风很轻。")
     ]
-    assert loaded == ["photos/diary-1/cover.jpg"]
     assert len(manifest) == 1
 
 
@@ -846,15 +841,16 @@ def test_volcano_client_uses_async_text_to_image_contract() -> None:
     assert actions == ["CVSync2AsyncSubmitTask", "CVSync2AsyncGetResult"]
 
 
-def test_volcano_client_text_to_image_sends_portrait_size() -> None:
-    """txt2img 传入 width/height 时必须成对进入提交体（手机全屏竖版）。"""
+def test_volcano_client_text_to_image_sends_fullscreen_portrait_size() -> None:
+    """回忆录文生图必须发送固定 9:16 竖版尺寸，避免播放器裁切。"""
     encoded = base64.b64encode(PNG_BYTES).decode("ascii")
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.params["Action"] == "CVSync2AsyncSubmitTask":
             body = json.loads(request.content.decode("utf-8"))
-            assert body["width"] == 1024
-            assert body["height"] == 1536
+            assert body["width"] == 936
+            assert body["height"] == 1664
+            assert "binary_data_base64" not in body
             return httpx.Response(
                 200,
                 json={"code": 10000, "data": {"task_id": "task-size"}},
@@ -873,7 +869,12 @@ def test_volcano_client_text_to_image_sends_portrait_size() -> None:
     client = VolcanoCVClient(
         access_key="AKTEST", secret_key="SKTEST", transport=_cv_transport(handler),
     )
-    assert client.text_to_image("画面", width=1024, height=1536) == PNG_BYTES
+    assert MEDIA_IMAGE_WIDTH == 936
+    assert MEDIA_IMAGE_HEIGHT == 1664
+    assert MEDIA_IMAGE_WIDTH * 16 == MEDIA_IMAGE_HEIGHT * 9
+    assert client.text_to_image(
+        "画面", width=MEDIA_IMAGE_WIDTH, height=MEDIA_IMAGE_HEIGHT,
+    ) == PNG_BYTES
 
 
 def test_volcano_client_uses_async_seededit_contract() -> None:

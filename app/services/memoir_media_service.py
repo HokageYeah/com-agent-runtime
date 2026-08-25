@@ -2,11 +2,10 @@
 
 职责：逐张生成场景配图——1.0.3 仅 image 场景，1.0.4+ 每场景配图
 （illustrate_all_scenes=True，全部场景按 body 生成）——
-1. 选择模式：素材含 images 且照片出域门禁开启 -> 图生图（SeedEdit 3.0），
-   否则一律使用通用 3.0 文生图；
+1. 一律使用通用 3.0 文生图；素材照片和参考图不读取、不出域；
 2. 生成结果 bytes 上传 OSS `memoir/images/` 前缀（UUID 不可猜测 object_key，
    对象级公共读），产出 D1 冻结六键 media_manifest 条目；
-3. 单张失败/超预算/超配额 -> 该场景降级为纯文字卡（旧模式改 summary；
+3. 单张失败或超节点预算 -> 该场景降级为纯文字卡（旧模式改 summary；
    每场景配图模式保留原场景类型），不重试节点、不回滚文案；
    全部失败 -> media_tasks=[]（发布纯文字 revision）；
 4. 按张计量：每张成功图片写一行 AgentModelUsage（image_count=1，
@@ -25,10 +24,7 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 from app.core.logging_uru import log_success
-from app.utils.volcano.cv_client import (
-    IMAGE_TO_IMAGE_REQ_KEY,
-    TEXT_TO_IMAGE_REQ_KEY,
-)
+from app.utils.volcano.cv_client import TEXT_TO_IMAGE_REQ_KEY
 
 # ---- D1 冻结 wire 契约常量（Runtime 侧唯一口径，runner 校验复用）----
 # media_manifest 条目键集精确六键（snake_case）。
@@ -44,10 +40,9 @@ MEDIA_IMAGE_MIME_TYPES: frozenset[str] = frozenset({
 MEDIA_URL_HOST_SUFFIXES: tuple[str, ...] = ("aliyuncs.com",)
 
 # ---- 手绘水彩插画 prompt 模板（统一回忆录配图风格）----
-# 目标风格（按用户确认的目标效果图校准）：透明水彩真手绘质感——湿画法
-# 晕染、颜色渗化、纸纹颗粒、大量留白；人物为半写实水彩动漫风、正常
-# 头身比（明确排除 Q 版/绘本卡通）；前景锐利、背景湿晕虚化；主体选择性
-# 饱和、背景去色。竖版像素由下方 MEDIA_IMAGE_WIDTH/HEIGHT 的 API 参数保证。
+# 视觉合同固定为满幅 9:16 竖版叙事插画：前、中、远景共同承载场景，避免
+# 模型把“水彩纸”“呼吸感”等字面要求误解成留白海报。竖版像素由下方
+# MEDIA_IMAGE_WIDTH/HEIGHT 的 API 参数保证。
 # 两条实测教训（写模板必须遵守，否则模型会照做坏结果）：
 # 1. 模板禁止出现 App 名/品牌等字样——模型会把 prompt 里的文字原样
 #    画进图片（曾把“情侣日记”画成顶部 Logo 和标题）；
@@ -56,29 +51,33 @@ MEDIA_URL_HOST_SUFFIXES: tuple[str, ...] = ("aliyuncs.com",)
 # 场景 body 填入 {场景描述} 占位符（用 replace 填充，避开 str.format 对
 # 模板中其他花括号/中文标号的解析陷阱）。
 # 隐私铁律：完整 prompt 只传入火山 Provider，绝不写日志/trace/checkpoint。
-_ILLUSTRATION_PROMPT_TEMPLATE = """创作一幅传统透明水彩手绘插画，画面内容：{场景描述}。
-整体采用透明水彩手绘技法：湿润颜料在纸上自然晕染，颜色相互渗化，边缘柔和扩散，保留水迹边界与粗纹水彩纸的纸纹颗粒，大量留白透气，
-呈现手绘真水彩的通透质感，而不是数字扁平插画。
-画面为竖幅构图，高明显大于宽，主体位置自然，上下保留呼吸空间，
-前景主体清晰、笔触肯定，中远景用湿画法晕染虚化，形成近实远虚的空气层次。
+_ILLUSTRATION_PROMPT_TEMPLATE = """创作一幅暖调日系叙事水彩手绘插画，画面内容：{场景描述}。
+输出为 9:16 竖版成片插画，画面从边缘到边缘全画面铺满，是一张完整画面，
+不是海报、拼贴、相框或卡片；主体自然延展到环境中，不在上下或四周预留空白。
+采用电影分镜般的生活叙事构图：清晰安排前景、主体中景、背景远景，
+让人物、环境和与回忆有关的生活物件共同讲述场景；前景可出现贴近视线的物件，
+中景承载人物互动或关键事件，远景补足地点、天气、光线与空间纵深。
+构图有明确视觉重心与自然的不对称平衡，画面细节丰富但不杂乱，
+使用门窗、桌椅、餐具、花束、雨伞、行李箱、路灯、街道、橱窗、厨房用品等
+与场景相符的物件充实空间，不重复或虚构与场景无关的内容。
+整体采用透明水彩与细腻手绘线稿：湿润颜料自然晕染、颜色轻微渗化、
+保留细腻纸纹与真实笔触；主体和关键细节清楚，远景柔和虚化，形成空气透视，
+呈现通透明亮的手绘质感，不是数字扁平插画。
+色彩以暖金、茶棕、珊瑚粉、柔和橄榄绿和灰蓝为主，局部使用鲜明但克制的色彩，
+让自然光影和生活细节营造温暖、治愈、有回忆感的氛围，不用大片奶油白或纯色背景。
 根据画面内容自然决定是否出现人物：可以是情侣、单人、多人，也可以无人；
-如果有人物，画成半写实水彩动漫人物：正常成年人头身比（约六至七头身）、
-五官清秀自然，发丝与衣物带干笔触纹理（毛衣的绒感、布料的褶皱），
-动作生活化，通过互动或细节传达情绪。
-如果没有人物，就通过环境与物品讲故事，例如桌椅、窗台、餐具、花束、
-鞋子、雨伞、行李箱、路灯、街道、橱窗、厨房用品等。
-色彩采用选择性饱和：主体与关键细节保持鲜明通透的水彩色，
-背景与四周逐渐淡化、去饱和，融入奶油白、米白、浅粉、浅棕、
-暖灰、灰蓝的柔和底色，画面温暖、治愈、有回忆感。
-光影自然柔和，保留空气感和轻微怀旧感。
-整幅画就是画在一张水彩纸上的完整画面：除水彩画本身外，
+如果有人物，画成半写实水彩动漫风的普通成年人，约六至七头身，
+五官自然不具可识别性，发丝、衣物和动作带有生活化细节，通过互动传达情绪。
+如果没有人物，就通过环境、物品、光线和使用痕迹传达正在发生的生活故事。
 画面任何位置都不要出现文字（包括汉字、字母、数字、招牌、路牌、标签），
 不要 Logo，不要水印，不要印章，不要签名，不要边框，不要 UI。"""
 
 # 负面风格约束：火山该 req_key 无独立 negative_prompt 通道，直接拼接在
-# prompt 末尾。按实测翻车点排序：反文字/反手机样机（最顽固）在前，
-# 反 Q 版/反扁平绘本卡通次之，再反写实与横幅构图兜底竖版。
+# prompt 末尾。前半段排除留白海报、文字与手机样机，后半段排除不符合作品
+# 视觉合同的卡通、3D 和横幅形态。
 _ILLUSTRATION_PROMPT_NEGATIVE = (
+    "不要大面积留白、不要海报式留白布局、不要居中孤立的小主体、"
+    "不要空旷纯色背景、不要拼贴、不要卡片式排版；"
     "画面中不要出现任何文字、汉字、字母、数字、招牌、路牌、标签、菜单、"
     "不要Logo、不要水印、不要印章、不要签名、不要标题；"
     "不要手机、不要手机屏幕、不要手机边框、不要刘海屏、不要设备样机、"
@@ -90,11 +89,11 @@ _ILLUSTRATION_PROMPT_NEGATIVE = (
     "不要横幅构图、不要正方形画面。"
 )
 
-# 手机全屏竖版展示尺寸：txt2img 走火山通用 3.0 官方可选 width/height 参数
-# （约束 width×height < 2048×2048；1024×1536 属官方推荐的 ~1.3K 档竖版）。
-# img2img（SeedEdit）输出尺寸跟随参考图，不传尺寸参数。
-MEDIA_IMAGE_WIDTH = 1024
-MEDIA_IMAGE_HEIGHT = 1536
+# 手机全屏竖版展示尺寸：txt2img 走火山通用 3.0 官方 width/height 参数。
+# 936×1664 为 9:16 比例，且两边均在官方 512–2048 范围内，保持约 1.3K
+# 档竖向细节；回忆录链路不走 img2img，因此尺寸合同对每张图一致。
+MEDIA_IMAGE_WIDTH = 936
+MEDIA_IMAGE_HEIGHT = 1664
 
 # 场景 body 为空时的兜底画面描述（保持旧版口径不变）。
 _DEFAULT_SCENE_DESCRIPTION = "一段温暖的回忆画面"
@@ -103,8 +102,7 @@ _DEFAULT_SCENE_DESCRIPTION = "一段温暖的回忆画面"
 def build_illustration_prompt(scene_body: str) -> str:
     """把场景文案套进手绘水彩模板，生成最终图像 prompt。
 
-    txt2img / img2img 两种模式共用同一构建函数，保证文生图与图生图
-    风格一致；测试侧也用它构造期望 prompt 与 MockCVClient fail_prompts
+    回忆录媒体链路只使用文生图；测试侧也用它构造期望 prompt 与 MockCVClient fail_prompts
     （fail_prompts 按 prompt 全文精确匹配，必须同源构建才不失效）。
     """
     description = scene_body.strip() or _DEFAULT_SCENE_DESCRIPTION
@@ -132,12 +130,6 @@ class MediaObjectUploader(Protocol):
     def upload_public_bytes(self, data: bytes, object_key: str, mime: str) -> str: ...
 
 
-class PhotoLoader(Protocol):
-    """业务私有桶照片取回最小接口：object_key -> bytes。"""
-
-    def __call__(self, object_key: str) -> bytes: ...
-
-
 class MemoirMediaConfig:
     """媒体通道部署配置快照；从 Settings 收口，节点内不再散读。"""
 
@@ -146,15 +138,11 @@ class MemoirMediaConfig:
         provider_name: str,
         image_prefix: str,
         url_host_suffixes: tuple[str, ...],
-        photo_egress_enabled: bool,
-        provider_residency: str,
         node_budget_seconds: float,
     ) -> None:
         self.provider_name = provider_name
         self.image_prefix = image_prefix if image_prefix.endswith("/") else f"{image_prefix}/"
         self.url_host_suffixes = url_host_suffixes or MEDIA_URL_HOST_SUFFIXES
-        self.photo_egress_enabled = photo_egress_enabled
-        self.provider_residency = provider_residency
         self.node_budget_seconds = float(node_budget_seconds)
 
     @classmethod
@@ -167,18 +155,8 @@ class MemoirMediaConfig:
             provider_name=str(getattr(settings, "MEMOIR_MEDIA_PROVIDER", "mock") or "mock"),
             image_prefix=str(getattr(settings, "MEMOIR_MEDIA_IMAGE_PREFIX", MEDIA_IMAGE_PREFIX)),
             url_host_suffixes=suffixes,
-            photo_egress_enabled=bool(getattr(settings, "MEMOIR_MEDIA_PHOTO_EGRESS_ENABLED", False)),
-            provider_residency=str(getattr(settings, "MEMOIR_MEDIA_PROVIDER_RESIDENCY", "private")),
             node_budget_seconds=float(getattr(settings, "MEMOIR_MEDIA_NODE_BUDGET_SECONDS", 60.0)),
         )
-
-    @property
-    def photo_egress_allowed(self) -> bool:
-        """照片出域门禁：门禁开关开启且 Provider 数据驻留为 public 才放行。
-
-        两个独立开关默认都关闭/私有——任一不满足即 fail-closed 走文生图。
-        """
-        return self.photo_egress_enabled and self.provider_residency == "public"
 
 
 class MemoirMediaService:
@@ -190,14 +168,11 @@ class MemoirMediaService:
         uploader: MediaObjectUploader,
         config: MemoirMediaConfig,
         *,
-        photo_loader: PhotoLoader | None = None,
         session: object | None = None,
     ) -> None:
         self._provider = provider
         self._uploader = uploader
         self.config = config
-        # photo_loader 为 None 时（未配置私有桶代理）永远走文生图。
-        self._photo_loader = photo_loader
         self._session = session
 
     def generate(
@@ -253,7 +228,7 @@ class MemoirMediaService:
                     getattr(run, "run_id", ""), scene_id, "MEDIA_LEASE_LOST",
                 )
             elif scene_ok:
-                entry = self._generate_one(run, scene_id, body, sanitized_material)
+                entry = self._generate_one(run, scene_id, body)
                 if entry is not None:
                     media_tasks.append(entry)
                 # 每张完成后立即续约：单张竖版图 9-18s，90s 租约最多撑 5-6 张，
@@ -324,26 +299,19 @@ class MemoirMediaService:
         }
 
     def _generate_one(
-        self, run: object, scene_id: str, body: str, sanitized_material: object,
+        self, run: object, scene_id: str, body: str,
     ) -> dict[str, object] | None:
         """生成并上传一张图片；任何异常都吞掉并返回 None（该场景降级）。"""
         started = time.monotonic()
         failure_stage, failure_code = "provider", "MEDIA_PROVIDER_FAILED"
         try:
-            reference = self._reference_photo(scene_id, sanitized_material)
-            # 图像 prompt 只使用已过安全审核口径的场景文案（1.0.4+ 不设字数上限、
-            # 无敏感标识）套手绘水彩模板，统一插画风格；兜底画面在构建函数内。
+            # 回忆录视觉合同只允许提示词驱动：不读取素材照片、不发送参考图，
+            # 确保每个场景都使用统一的 9:16 画幅和同一套水彩构图约束。
             prompt = build_illustration_prompt(body)
-            if reference is not None:
-                data = self._provider.image_to_image(prompt, reference)
-                mode, req_key = "img2img", IMAGE_TO_IMAGE_REQ_KEY
-            else:
-                # txt2img 显式传竖版尺寸，保证手机全屏展示；img2img 输出
-                # 尺寸跟随参考图，不走尺寸参数。
-                data = self._provider.text_to_image(
-                    prompt, width=MEDIA_IMAGE_WIDTH, height=MEDIA_IMAGE_HEIGHT,
-                )
-                mode, req_key = "txt2img", TEXT_TO_IMAGE_REQ_KEY
+            data = self._provider.text_to_image(
+                prompt, width=MEDIA_IMAGE_WIDTH, height=MEDIA_IMAGE_HEIGHT,
+            )
+            mode, req_key = "txt2img", TEXT_TO_IMAGE_REQ_KEY
 
             failure_stage = "image_validation"
             failure_code = "MEDIA_IMAGE_FORMAT_INVALID"
@@ -384,38 +352,6 @@ class MemoirMediaService:
                 int((time.monotonic() - started) * 1000), failure_code,
             )
             return None
-
-    def _reference_photo(self, scene_id: str, sanitized_material: object) -> bytes | None:
-        """按 image 场景的素材引用解析参考照片字节；门禁未开直接返回 None。
-
-        只消费 sanitize_materials 投影出的 images 元数据
-        （{photo_id, object_key, mime}），绝不回读原始快照。
-        """
-        if not self.config.photo_egress_allowed or self._photo_loader is None:
-            return None
-        if not isinstance(sanitized_material, Mapping):
-            return None
-        materials = sanitized_material.get("materials")
-        if not isinstance(materials, list):
-            return None
-        for item in materials:
-            if not isinstance(item, Mapping) or not isinstance(item.get("images"), list):
-                continue
-            for image in item["images"]:
-                if not isinstance(image, Mapping):
-                    continue
-                object_key = image.get("object_key")
-                if isinstance(object_key, str) and object_key:
-                    try:
-                        return self._photo_loader(object_key)
-                    except Exception:
-                        # 照片取回失败按无参考图处理，回退文生图，不中断节点。
-                        logging.warning(
-                            "MemoirAgent 参考照片取回失败回退文生图 scene_id=%s code=%s",
-                            scene_id, "MEDIA_PHOTO_FETCH_FAILED",
-                        )
-                        return None
-        return None
 
     def _require_contract_url(self, url: str) -> None:
         """上传返回 URL 必须满足 D1 契约：https + 域后缀白名单 + 前缀路径。"""

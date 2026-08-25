@@ -446,13 +446,14 @@ class MockCVClient:
         self._text_image, self._image_image = text_image, image_image
         self._fail_prompts = set(fail_prompts)
         self.text_prompts: list[str] = []
+        self.text_dimensions: list[tuple[int | None, int | None]] = []
         self.image_prompts: list[str] = []
 
     def text_to_image(
         self, prompt: str, *, width: int | None = None, height: int | None = None,
     ) -> bytes:
-        # 尺寸参数与真实客户端保持同签名；Mock 只记录 prompt 供测试断言。
         self.text_prompts.append(prompt)
+        self.text_dimensions.append((width, height))
         if prompt in self._fail_prompts:
             raise VolcanoCVError("VOLCANO_CV_MOCK_FAILURE")
         return self._text_image

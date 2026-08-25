@@ -331,12 +331,6 @@ class Settings(BaseSettings):
     # 节点可安全跨 90s 租约窗。竖版图实测单张 9-18s，900s 可覆盖约
     # 50-90 张，远超正常素材量。
     MEMOIR_MEDIA_NODE_BUDGET_SECONDS: float = 900.0
-    # 照片出域门禁：图生图需要把用户照片字节发给图像 Provider；该门禁默认
-    # 关闭，关闭时即使素材含 images 也只走文生图，绝不外发照片。
-    MEMOIR_MEDIA_PHOTO_EGRESS_ENABLED: bool = False
-    # 图像 Provider 的数据驻留声明；仅当值为 public 时才允许照片出域，
-    # 与上面门禁组成两个独立开关（都默认关闭/私有）。
-    MEMOIR_MEDIA_PROVIDER_RESIDENCY: str = 'private'
     # 火山视觉智能异步图像 API 凭证；只经部署 env 注入，绝不写日志或响应。
     VOLCANO_CV_ACCESS_KEY: str = ''
     VOLCANO_CV_SECRET_KEY: str = ''
