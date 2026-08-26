@@ -1,11 +1,13 @@
 # 04-MemoirAgent 业务工作流
 
+> **2026-08-26 当前实现校准：** 本文最初描述 `memoir_agent@1.0.0` 的设计。当前已有 `1.0.0-1.0.4` 五个不可变包；旧包保留创建 Run 时冻结的行为，新 Run 不应根据磁盘“最新目录”静默换版。`1.0.4` 至少生成 3 个场景，不再设场景总数和 `body` 字数上限。媒体节点已位于安全审核和原子发布之前；它在 Runtime 内逐场景串行文生图，不创建业务异步 MediaTask，不读取用户照片。精确契约以 AgentPackage、`app/contracts/`、契约 fixture 和自动化测试为准。
+
 ## 一、定位
 
 `MemoirAgent` 是运行在公共 Agent Runtime 上的回忆录业务 Agent。它不直接拥有模型 provider、工具执行器、上下文管理、观测和重试逻辑，而是复用公共 Runtime：
 
 ```text
-MemoirAgent = LangGraph workflow + LangChain components + Provider Adapter / LiteLLM ModelGateway + ToolGateway
+MemoirAgent = LangGraph workflow + LangChain components + ModelGateway / Provider Adapter + ToolGateway
 ```
 
 `MemoirAgent` 的目标是把 `MemorySnapshot` 转换为可播放的回忆作品：
@@ -16,8 +18,9 @@ MemorySnapshot
   -> MemoirChapterPlan
   -> MemoryScene[]
   -> MemoryAction[]
-  -> MediaTask[]
+  -> optional media_manifest[]
   -> SafetyReport
+  -> atomic PlaybackDocument publish
 ```
 
 ## 二、Agent 输入输出
@@ -28,24 +31,23 @@ MemorySnapshot
 {
   "archive_id": "archive_123",
   "snapshot_id": "snapshot_456",
-  "owner_user_id": "user_789",
-  "space_id": "space_1",
-  "relationship_segment_no": 2,
   "generation_epoch": 1,
   "locale": "zh-CN"
 }
 ```
+
+调用方只提交作品定位字段；`owner_user_id`、`space_id`、关系段和素材正文不进入创建 Run 的输入。Runtime 在执行 `memory.get_snapshot` 时由 Business Tool 根据当前调用者、授权版本、Archive、Snapshot 和 epoch 二次鉴权后返回脱敏快照，避免把业务身份事实复制进 Runtime。
 
 ### 2.2 输出
 
 ```json
 {
   "playback_document": {
-    "document_schema_version": "1.0.0",
+    "schema_version": "1.0.0",
     "scenes": [],
-    "actions": []
+    "actions": [],
+    "media_manifest": []
   },
-  "media_tasks": [],
   "safety_report": {
     "level": "pass",
     "replaced_scene_ids": [],
@@ -59,7 +61,7 @@ MemorySnapshot
 }
 ```
 
-Runtime 只把输出的 schema version、内容摘要、hash 和业务写回引用记录为 `AgentArtifact`。完整 `MemoryScene`、`MemoryAction`、`MemoryMediaAsset` 通过业务工具写入情侣日记；Runtime 不默认长期保存第二份回忆录正文。
+上述是工作流的逻辑产物，不是创建 Run API 直接返回的完整正文。Runtime 只把 schema version、安全摘要、digest 和业务写回引用记录为 `AgentArtifact`；完整 `scenes/actions/media_manifest` 只通过 `memory.publish_playback_document` 在情侣日记后端一个事务中发布，Runtime 不长期保存第二份可播放正文。
 
 ## 三、LangGraph 状态定义
 
@@ -94,9 +96,9 @@ START
   -> plan_chapters
   -> generate_scenes
   -> generate_actions
+  -> enqueue_media_tasks（能力开关启用时生成图片）
   -> safety_review
   -> publish_playback_document
-  -> enqueue_media_tasks（能力开关启用时）
   -> END
 ```
 
@@ -115,9 +117,10 @@ generate_actions failed
   -> default_actions
   -> safety_review
 
-enqueue_media_tasks enqueue failed
-  -> mark_partial
-  -> END
+enqueue_media_tasks single image failed / budget exhausted
+  -> degrade affected scenes to text cards
+  -> safety_review
+  -> publish text-capable PlaybackDocument
 ```
 
 ## 五、节点设计
@@ -182,7 +185,7 @@ memory.get_snapshot
 
 - LangChain `PromptTemplate`
 - Pydantic / JSON Schema output parser
-- Provider Adapter / LiteLLM ModelGateway
+- 自研 ModelGateway / 版本化 Provider Adapter
 
 目标：从素材里挑选适合做卡片的片段。
 
@@ -215,11 +218,11 @@ parser 通过后，确定性节点校验每个 highlight 的 `material_id`、own
 ]
 ```
 
-章节数量：
+章节数量由 AgentPackage 版本合同决定，不是 Runtime 全局常量：
 
-- 素材少：3 到 4 章。
-- 普通素材：6 到 10 章。
-- 素材多：最多 16 章。
+- `1.0.0-1.0.3`：3-8 个场景，保留旧 Run 的冻结行为。
+- `1.0.4`：至少 3 个场景，不设总数上限；实际长度由素材数量和模型结构化输出决定。
+- 场景数不封顶不等于资源无限；模型成本、Run deadline、媒体节点墙钟预算和 lease/fencing 仍然生效。
 
 ### 5.6 generate_scenes
 
@@ -227,7 +230,7 @@ parser 通过后，确定性节点校验每个 highlight 的 `material_id`、own
 
 输出 `MemoryScene[]`。约束：
 
-- 每张卡主体文案不超过 80 字。
+- `1.0.0-1.0.3` 每张卡 `body` 不超过 80 字；`1.0.4` 不设 `body` 字数上限。
 - 不评价谁对谁错。
 - 不使用强引导词。
 - 不暗示复合。
@@ -288,7 +291,7 @@ transition 500ms
 - 是否出现刺激性分手词。
 - 是否暗示复合或责备。
 - 是否编造事件。
-- 是否超出卡片长度。
+- 是否符合当前 AgentPackage 的场景数和正文长度合同。
 - 是否存在空作品。
 - 是否出现未知 material/source 引用，或把素材中的指令传播成工具、URL、权限和系统配置字段。
 
@@ -317,24 +320,21 @@ memory.publish_playback_document
 - `run_id` 必须等于 archive 当前 `active_run_id`，epoch 必须等于 archive 当前值；删除、重新生成或新 run 产生的旧请求返回 `GENERATION_SUPERSEDED`，不得发布。
 - 相同逻辑操作重试返回原 revision，不重复插入卡片。
 - 保存前再次校验素材引用属于当前 snapshot。
-- Runtime 只有在发布工具成功后才能进入 `succeeded/partial` 终态并发送对应 callback。
+- Runtime 只有在发布工具成功后才能将本次内容生成视为成功；成功 callback 不能代替发布事务或伪造 `published_revision`。
 
 ### 5.10 enqueue_media_tasks
 
-类型：业务工具节点。
+类型：Runtime 内部媒体副作用节点；节点名为了兼容没有改名，当前实现并不“入队”，也不调用 `memory.enqueue_tts` 或 `memory.enqueue_cover_generation`。
 
-调用：
+当 `MEMOIR_MEDIA_ENABLED=false` 时，节点以 `skipped(capability_disabled)` 正常结束，随后发布纯文字作品。开启后：
 
-```text
-memory.enqueue_tts
-memory.enqueue_cover_generation
-```
+1. 仅用场景 `body` 与固定风格指令组成文生图 prompt，不读取 Snapshot 中的用户照片。
+2. 按场景串行调用图像 Provider，成功图片上传 OSS，生成冻结六键 `media_manifest` 条目。
+3. 每张完成后续约 lease；整个节点受 `MEMOIR_MEDIA_NODE_BUDGET_SECONDS` 墙钟预算限制。
+4. 单图失败只把当前场景降级为文字卡；预算耗尽或 lease/fencing 失效时，剩余场景降级。
+5. 完成后将场景、动作和 manifest 一起交给 `safety_review`，通过后由 `memory.publish_playback_document` 一次原子发布。
 
-第一版只预留媒体节点和工具契约，默认关闭 TTS、封面和视频；二期再启用 TTS，封面和视频继续按产品节奏开放。
-
-与实施路线图的交付边界保持一致：MVP 默认关闭媒体能力时，该节点以 `skipped(capability_disabled)` 正常结束。二期启用后，Runtime 携带 `document_id + generation_epoch` 幂等创建业务媒体任务：入队失败可将本次 AgentRun 标为 `partial`；入队成功后 AgentRun 正常 `succeeded`。媒体 worker 随后的生成失败只更新对应 MediaTask；业务后端只用当前 published document 的任务聚合 `enhancement_status`，不回写已结束的 AgentRun。
-
-媒体失败不回滚 `published_revision`。详情页继续播放文本作品，并根据派生 `generation_status` 展示 `partial`。
+图片生成处于发布前同步路径，因此会增加 Run 耗时。“图片失败不影响文字发布”是指失败会降级而不是让 Run 进入 `partial`，不代表图片生成与发布并行。TTS、音乐和视频仍是后续独立能力。
 
 ## 六、Prompt 与 Parser
 

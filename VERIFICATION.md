@@ -1,6 +1,6 @@
 # AgentRuntime 验证流程
 
-> **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** 本文件涉及的回忆录业务路由（用户 `/api/v1/memory/*`、本地 `/api/v1/internal/agent-tools/memory.*`、业务回调 `/api/v1/internal/agent-callbacks/memory`、`memory_status_api`、`memory_callbacks_api` 以及 `app.memory_runtime_launcher` legacy 启动器）均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留作为迁移证据，不删除、不重写。R1 已在 `app/api/api.py` 落地环境门禁：`production` 仅注册 `/api/v1/runtime/*` provider，不再暴露业务路由；`development` / `test` 仍按现状注册以便审计与跨仓联调。原有验证步骤不变，新增 R1 路由表测试 `tests/test_runtime_route_gating.py` 作为门禁回归证据。
+> **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** 本文件涉及的回忆录业务路由（用户 `/api/v1/memory/*`、本地 `/api/v1/internal/agent-tools/memory.*`、业务回调 `/api/v1/internal/agent-callbacks/memory`、`memory_status_api`、`memory_callbacks_api` 以及 `app.memory_runtime_launcher` legacy 启动器）均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留作为迁移证据，不删除、不重写。R1 已在 `app/api/api.py` 落地环境门禁：`production` 注册 `/api/v1/runtime/*` 公共 provider 并保留模板工程的 `demo/diary` 示例，但不注册上述回忆录业务路由；`development` / `test` 仍按现状注册以便审计与跨仓联调。原有验证步骤不变，R1 路由表测试 `tests/test_runtime_route_gating.py` 作为门禁回归证据。
 
 ## 安全前提
 
@@ -33,7 +33,7 @@ poetry run python --version
 poetry run alembic heads
 ```
 
-预期：Python 和 Poetry 命令成功，Alembic 只输出 `20260729_1000 (head)`。本地启动需要可连接的 MySQL 服务和 Redis；脚本不会自动创建数据库账号或复用生产实例。development/test 的 Runtime 专库缺失时可由 `DB_AUTO_CREATE=true` 自动创建。
+预期：Python 和 Poetry 命令成功，Alembic 只输出 `20260820_0900 (head)`。本地启动需要可连接的 MySQL 服务和 Redis；脚本不会自动创建数据库账号或复用生产实例。development/test 的 Runtime 专库缺失时可由 `DB_AUTO_CREATE=true` 自动创建。
 
 首次本地测试可以在 MySQL 客户端内创建隔离库和最小权限账号：
 
@@ -66,10 +66,10 @@ Redis 使用独立 DB 或 namespace。连接检查只应返回 `PONG`，不要�
 | `DB host` | 是 | 应用在宿主机运行时填 `127.0.0.1`；应用在 Docker 内运行时填 Compose 中 MySQL 的 service 名，例如 `mysql`。 |
 | `DB port` | 是 | 开发/测试宿主机填 `3306`；生产宿主机填 `3307`；应用在 Docker 内时一律填容器端口 `3306`。 |
 | `DB name` | 是 | 只允许 `couple_diary_agent_runtime_dev`、`couple_diary_agent_runtime_test`、`couple_diary_agent_runtime_prod`；三个 `couple_diary_dev/test/prod` 业务库会被固定拒绝。 |
-| `Redis URL` | 是 | 开发/测试宿主机填 `redis://127.0.0.1:6379/15`；生产宿主机填 `redis://127.0.0.1:6380/15`；Docker 内填 `redis://redis:6379/15`。启用 Redis 认证时由 secret manager 注入带认证的 URL。 |
+| `Redis URL` | 是 | development 宿主机填 `redis://127.0.0.1:6379/15`；test 宿主机填 `redis://127.0.0.1:6379/14`；production 宿主机填 `redis://127.0.0.1:6380/15`。Docker 内保留同一 DB 号，只把主机换成实际 Redis service 名。当前 `configure test` 交互提示默认仍是 `/15`，必须手动输入 `/14`；启用认证时由 secret manager 注入带认证的 URL。 |
 | `Service base URL` | 是 | 开发/测试填 `http://127.0.0.1:8010`；生产填经 allowlist 的真实 HTTPS API 地址，禁止在 URL 中携带凭据。 |
 
-HMAC secret、Fernet key 和 JWT secret 由 `configure` 独立随机生成，无需人工编写。生产环境不使用 `configure`：必须由 secret manager 分别注入 client HMAC secret、tool/callback HMAC secret、Fernet key、JWT secret、数据库密码与 Redis 凭据，且 client/tool/JWT 不得共用密钥。
+client HMAC secret、Fernet key 和 JWT secret 由 `configure` 分别随机生成，无需人工编写。当前 B9/B10 冻结合同不再使用独立 tool/callback secret：同一 client HMAC secret 在业务端→Runtime 入站验签和 Runtime→业务端 connector/callback 签名中双向共用。生产环境不使用 `configure`：必须由 secret manager 注入 client HMAC secret、Fernet key、JWT secret、数据库密码与 Redis 凭据；HMAC、Fernet、JWT 与数据库密码之间不得复用。
 
 `prepare/start` 启动数据库顺序为：先检查环境与专库名，再查询库是否存在；缺库且 `DB_AUTO_CREATE=true` 时创建，已存在时复用；最后执行 Alembic。预期分别看到 `[OK] database ... status=created` 或 `status=existing`。未知 revision、非规范库名或迁移失败会固定 fail-closed，不自动 stamp。
 
@@ -80,7 +80,7 @@ mysql -h127.0.0.1 -P3306 -uroot -p -e \
   "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='couple_diary_agent_runtime_dev'; SELECT version_num FROM couple_diary_agent_runtime_dev.alembic_version;"
 ```
 
-预期：只输出新的 `couple_diary_agent_runtime_dev` 与 `20260729_1000`。不要对 `couple_diary_dev/test/prod` 执行 `alembic upgrade`、`stamp`、`create_all`、`reset`、`DROP` 或任何 DDL。
+预期：只输出新的 `couple_diary_agent_runtime_dev` 与 `20260820_0900`。不要对 `couple_diary_dev/test/prod` 执行 `alembic upgrade`、`stamp`、`create_all`、`reset`、`DROP` 或任何 DDL。
 
 上述密钥的手工生成命令、字段间一致性、生产注入和轮换顺序，以及 exporter/媒体的条件必填项，统一参考 [ENV_CONFIG.md](ENV_CONFIG.md)。
 
@@ -88,9 +88,10 @@ mysql -h127.0.0.1 -P3306 -uroot -p -e \
 
 | 环境/运行位置 | `HOST` | `PORT` | `DB_HOST:DB_PORT` | `RUNTIME_REDIS_URL` |
 |---|---:|---:|---|---|
-| 开发/测试，应用在宿主机 | `127.0.0.1` | `8010` | `127.0.0.1:3306` | `redis://127.0.0.1:6379/15` |
+| development，应用在宿主机 | `127.0.0.1` | `8010` | `127.0.0.1:3306` | `redis://127.0.0.1:6379/15` |
+| test，应用在宿主机 | `127.0.0.1` | `8010` | `127.0.0.1:3306` | `redis://127.0.0.1:6379/14` |
 | 生产，应用在宿主机 | `127.0.0.1` | `8011` | `127.0.0.1:3307` | `redis://127.0.0.1:6380/15` |
-| 测试，应用也在 Docker | `0.0.0.0` | `8010` | `mysql:3306` | `redis://redis:6379/15` |
+| test，应用也在 Docker | `0.0.0.0` | `8010` | `mysql:3306` | `redis://redis:6379/14` |
 | 生产，应用也在 Docker | `0.0.0.0` | `8011` | `mysql:3306` | `redis://redis:6379/15` |
 
 `mysql`/`redis` 是示例 service 名，必须换成实际 Compose service 名。生产宿主机发布 `3307:3306` 和 `127.0.0.1:6380:6379`，不会改变 Docker 网络内仍使用 `3306/6379` 的规则。
@@ -316,7 +317,7 @@ poetry run pytest -q \
   -k repair
 ```
 
-预期：当前为 `14 passed`。首次模型候选在本地 JSON repair、Schema 或确定性语义校验后仍无效时，只允许一次 `structured-output-repair@v1`；成功路径产生新的物理 `model_attempt`、独立 Redis permit 和 `AgentModelUsage`，并按有界 repair request 提高 token/成本预留。repair 前重新复核 cancel、purge、authorization、tenant、驻留、部署 route、旧 lease、调用预算、Redis 和 deadline；任一失效时不发送第二次 Provider 请求，repair 仍无效时直接模板降级。原始模型候选只进入短生命周期 untrusted data 槽，不进入 Store、日志、trace、callback、审计、Artifact、Checkpoint 或测试输出。
+预期：当前为 `16 passed`。首次模型候选在本地 JSON repair、Schema 或确定性语义校验后仍无效时，只允许一次 `structured-output-repair@v1`；成功路径产生新的物理 `model_attempt`、独立 Redis permit 和 `AgentModelUsage`，并按有界 repair request 提高 token/成本预留。repair 前重新复核 cancel、purge、authorization、tenant、驻留、部署 route、旧 lease、调用预算、Redis 和 deadline；任一失效时不发送第二次 Provider 请求，repair 仍无效时直接模板降级。原始模型候选只进入短生命周期 untrusted data 槽，不进入 Store、日志、trace、callback、审计、Artifact、Checkpoint 或测试输出。
 
 Task 6.5/7 归档、Snapshot envelope 与媒体关闭合同：
 
@@ -333,7 +334,7 @@ poetry run pytest -q \
 poetry run alembic heads
 ```
 
-预期：全部测试通过，Alembic 只显示 `20260729_1000 (head)`。旧 `enhancement_status=not_started` 被迁为 `disabled`，未知状态和同一 `archive_id + generation_epoch` 的第二个 RunRef 被数据库拒绝；Archive 固化 partner 昵称/头像资产引用与 bound/unbound 时间，Snapshot 只保存加密的版本化白名单 envelope。发布完整作品只推进 `content_status=succeeded + published_revision`，不得改写 enhancement。`memory.enqueue_tts` 保持 `enabled=false`；`enqueue_media_tasks` 的 AgentStep 为 `skipped`、reason 为 `CAPABILITY_DISABLED`，`media_tasks=[]`，且不会调用 connector。
+预期：全部测试通过，Alembic 只显示 `20260820_0900 (head)`。旧 `enhancement_status=not_started` 被迁为 `disabled`，未知状态和同一 `archive_id + generation_epoch` 的第二个 RunRef 被数据库拒绝；Archive 固化 partner 昵称/头像资产引用与 bound/unbound 时间，Snapshot 只保存加密的版本化白名单 envelope。发布完整作品只推进 `content_status=succeeded + published_revision`，不得改写 enhancement。`memory.enqueue_tts` 保持 `enabled=false`。对 1.0.0-1.0.2 或未装配媒体服务的运行，`enqueue_media_tasks` 不触达媒体 Provider；1.0.3/1.0.4 的具体降级与媒体契约由 `tests/test_memoir_media_channel.py` 单独验证。
 
 Snapshot 版本兼容与旧 revision 迟到媒体可单独快速回归：
 

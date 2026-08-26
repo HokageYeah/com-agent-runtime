@@ -1,8 +1,12 @@
 # 回忆录高阶情感作品与公共 Agent Runtime 技术探索
 
+> **2026-08-26 阅读说明：** 本目录保留了项目初期的技术探索、候选方案和分期设想，不是当前部署手册或精确 wire 契约。新手应先阅读仓库根目录 `README.md` 、`ENV_CONFIG.md` 和 `VERIFICATION.md`，再阅读 `头脑风暴/docs/AgentRuntime/需求设计文档.md` 与 `契约冻结记录.md`。本目录中的 LiteLLM、Redis 队列、异步 MediaTask、3–16 张与 80 字上限等描述，如果与当前 AgentPackage 或测试冲突，只代表历史方案。
+>
+> **当前实现摘要：** Runtime 使用自研 `ModelGateway`/Provider Adapter，Run 调度以数据库 outbox/lease 为权威，Redis 只承担模型共享流控。`memoir_agent@1.0.4` 至少生成 3 个场景，不再设场景总数和 `body` 字数上限；发布前可在 Runtime 内部逐场景串行文生图，再把 `media_manifest` 与文档原子发布。媒体默认关闭，当前不读取或外发用户照片。
+
 > **定位：** 将「情侣日记」回忆录从解绑后的静态归档升级为可生成、可播放、可降级、可扩展的高阶情感作品系统；同时从设计阶段开始抽离公共 AI Agent Runtime，避免回忆录、客服、学习助手等业务重复建设 Agent 基础能力。  
 > **参考：** `OpenMAIC项目技术栈/PROJECT_ANALYSIS.md` 中对 OpenMAIC 的 Stage / Scene / Action、两阶段生成、媒体补全、播放引擎、AI SDK、LangChain / LangGraph 和降级策略的分析。  
-> **推荐技术栈：** OpenMAIC 的 TypeScript / AI SDK / LangGraph 经验作为架构参考；当前 AgentRuntime 若新启动独立 Python 工程，则采用 FastAPI + LangGraph Python + LangChain Python + LiteLLM/Provider Adapter + MCP SDK + OpenTelemetry / LangSmith，通过 HTTP Tool API 与情侣日记 FastAPI 后端集成。
+> **已落地技术栈：** FastAPI + LangGraph Python + LangChain Core + 自研 ModelGateway/Provider Adapter + SQLAlchemy/Alembic + MySQL；Redis 用于模型共享流控。LiteLLM、Arq、OpenTelemetry Collector、LangSmith 和 MCP 还不是当前必需运行依赖。Runtime 通过授权 Business Tool 与情侣日记 FastAPI 后端集成。
 
 ## 一、核心结论
 
@@ -12,15 +16,16 @@
 公共 Agent Runtime
   -> 执行 MemoirAgent 回忆录业务 Agent
   -> 通过业务工具读取 MemorySnapshot
-  -> 生成 MemoryScene / MemoryAction / MediaTask
-  -> 通过业务工具写回情侣日记后端
+  -> 生成 MemoryScene / MemoryAction
+  -> 可选在发布前生成图片并组装 media_manifest
+  -> 通过唯一发布工具原子写回完整 PlaybackDocument
 ```
 
 公共 Runtime 负责 Agent 的通用能力：
 
 - LangGraph 工作流编排、状态持久化、失败恢复、人工介入。
 - LangChain prompt、tool、parser、retriever、middleware 等组件生态。
-- 模型调用、结构化输出、流式生成和 provider 适配。若 Runtime 使用 Python，则通过 LiteLLM 或 Provider Adapter 承接 AI SDK 的 provider 抽象思想。
+- 模型调用、结构化输出和 provider 适配。当前由自研 ModelGateway 与版本化 Provider Adapter 承接 AI SDK 的 provider 抽象思想。
 - MCP / HTTP Tool Gateway，统一接入业务工具和外部工具。
 - 上下文管理、记忆、模型路由、安全护栏、观测、评测、成本记录。
 - Public Trace 策略，决定前端是否展示脱敏后的 Agent 思考与执行轨迹。
@@ -95,7 +100,7 @@ MemorySnapshot
 
 ### 4.1 公共能力先抽离
 
-回忆录还在设计阶段，因此第一版就按公共 Runtime 设计。不要先做回忆录专属生成服务，再等客服 Agent 出现时迁移。
+项目在最初设计阶段就选择了公共 Runtime 路线，当前实现仍保持这一边界：不在情侣日记业务后端内另建一套回忆录专属 Agent 运行时。
 
 ### 4.2 第一版不是巨型平台
 
@@ -107,7 +112,7 @@ MemorySnapshot
 - Planner / Evaluator / PolicyEngine
 - LangGraph Workflow Executor
 - LangChain prompt / tool / parser 组件
-- Provider Adapter / LiteLLM ModelGateway
+- 自研 ModelGateway / 版本化 Provider Adapter
 - ToolGateway
 - ContextManager
 - Guardrails

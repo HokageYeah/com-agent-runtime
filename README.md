@@ -1,1065 +1,641 @@
-# Couple Diary Backend
+# com-agent-runtime
 
-这是 `com-agent-runtime` 项目的后端服务工程。
+`com-agent-runtime` 是独立部署的公共 Agent 执行服务。它负责 AgentPackage、AgentRun、计划与步骤执行、模型和工具调用、Checkpoint、Artifact、Worker、callback、对账、观测与治理。
 
-当前仓库里既包含“项目级”的后端基础设施，也保留了一组新的示例接口用于沉淀工程规范。因此后续做重构或让 LLM 参与开发时，需要特别注意：
+当前首个业务 Agent 是 `MemoirAgent`。它通过情侣日记业务后端提供的 Business Tool 读取脱敏快照并发布回忆录作品，但 Runtime 不拥有用户、关系、Archive、Snapshot、密码或 PlaybackDocument 等业务事实，也不直连情侣日记业务数据库。
 
-- `Couple Diary Backend` / `情侣日记项目后端`：表示整个后端工程
-- `demo_api`：表示当前保留下来的“示例规范接口模块”，对外统一挂载到 `/api/v1/demo/...`
-- `diary_api`：表示当前补好的“正式业务模块骨架”，对外统一挂载到 `/api/v1/diary/...`
-- 不要把“项目级基础设施”和“示例接口代码”混为一谈
+本文面向第一次接触项目的开发者。按顺序阅读“项目结构 → 环境启动 → 启动脚本 → 开发验证”，即可完成本地启动和基本维护。
 
-## 阅读导航
+## 文档导航
 
-如果你是第一次接手这个项目，推荐按下面顺序阅读：
+| 想做什么 | 阅读位置 |
+|---|---|
+| 第一次理解工程 | 本文的“整体架构”“项目结构”“项目结构说明” |
+| 启动开发、测试或生产环境 | 本文的“三套环境快速启动” |
+| 理解每个脚本用途 | 本文的“启动与运维脚本说明” |
+| 填写数据库、HMAC、Redis、模型和媒体配置 | [ENV_CONFIG.md](ENV_CONFIG.md) |
+| 运行完整测试或真实 Docker harness | [VERIFICATION.md](VERIFICATION.md) |
+| 理解公共 Runtime 需求和安全边界 | [需求设计文档](头脑风暴/docs/AgentRuntime/需求设计文档.md) |
+| 确认已冻结的 API/Event/Tool/Artifact 契约 | [契约冻结记录](头脑风暴/docs/AgentRuntime/契约冻结记录.md) |
+| 查看开发阶段和历史完成记录 | [总控开发计划](头脑风暴/docs/AgentRuntime/plans/2026-07-07-AgentRuntime-总控开发计划.md)、[后端开发计划](头脑风暴/docs/AgentRuntime/backend/2026-07-07-AgentRuntime-后端开发计划.md) |
+| 理解当前回忆录图片生成通道 | [媒体通道设计说明](头脑风暴/docs/AgentRuntime/plans/2026-08-20-回忆录媒体通道设计说明.md) |
 
-1. `快速开始`：先把项目跑起来
-2. `开发与协作约定`：理解接口返回规范、命名边界、LLM 开发约束
-3. `开发工具链`：知道提交前要跑哪些检查
-4. `环境配置`、`数据库操作`、`运行应用`：掌握日常开发流程
-5. `日志系统`、`项目结构`、`集成框架`：补齐工程细节
+计划文档会保留历史决策和勾选记录。判断当前接口、版本和实现状态时，以 `app/contracts/`、当前路由、Alembic history、contract fixtures 和实际测试为准。
 
-如果你是让 LLM 接入开发，至少先让它理解：
+## 整体架构
 
-- `开发与协作约定`
-- `开发工具链`
-- `环境配置`
-- `数据库操作`
-- `demo_api.py` 是示例规范，当前对外路由归属在 `/api/v1/demo/...`
-- `diary_api.py` 是正式业务模块骨架，后续真实业务优先参考它扩展
+```text
+couple-diary-f 前端
+  -> couple-diary-b 业务 API
+     -> 用户、关系、权限、Archive、Snapshot、PlaybackDocument
+     -> HMAC 调用 com-agent-runtime
+        -> AgentRun / Plan / Step
+        -> Worker + LangGraph workflow
+        -> ModelGateway / ToolGateway / Guardrails
+        -> Checkpoint / Artifact / Audit / Callback
+        -> MemoirAgent 经 Business Tool 读取快照、发布完整作品
+     <- 安全 callback 或主动状态对账
+  <- 业务后端返回 published revision 或安全 baseline
+```
 
-## 模板工程使用手册目录
+### 系统所有权
 
-如果你后面要把这个项目当成“个人项目模板”“团队协作模板”或“LLM 接入模板”使用，推荐按下面方式查阅。
+| 数据或能力 | 唯一责任方 |
+|---|---|
+| AgentDefinition、AgentRun、Plan、Step、ToolCall、ModelUsage、Checkpoint、Artifact、RuntimeAuditEvent | `com-agent-runtime` |
+| 用户、关系、业务权限、Archive、Snapshot、密码、PlaybackDocument、`published_revision` | `couple-diary-b` |
+| 页面交互、业务状态轮询、Scene/Action 播放 | `couple-diary-f` |
 
-### 按角色阅读
+必须遵守的边界：
 
-- 个人开发者：先看 `快速开始`、`环境配置`、`数据库操作`、`运行应用`
-- 新接手的开发者：先看 `阅读导航`、`开发与协作约定`、`项目结构`
-- 让 LLM 接入开发：先看 `开发与协作约定`、`开发工具链`、`环境配置`、`项目结构`
-- 需要排查线上 / 本地问题：先看 `运行应用`、`日志系统`、`healthz / readyz` 相关说明
+- 前端只调用业务后端，不直连 Runtime。
+- Runtime 不连接情侣日记业务库，只调用预注册且已授权的 Business Tool/callback。
+- 完整作品只通过 `memory.publish_playback_document` 在业务后端原子发布。
+- 创建链路采用 `held create -> 业务绑定 run_id -> start`，避免业务映射建立前执行。
+- 所有副作用使用稳定幂等键；lease、fencing token、generation epoch、privacy version 和 authorization version 共同拦截迟到写入。
+- prompt、模型原输出、工具原始载荷、正文、凭据和私有 URL 不得进入日志、public trace、callback、Artifact 或测试输出。
 
-### 按场景阅读
+## 项目结构
 
-- 想先把项目跑起来：看 `快速开始`
-- 想切换开发 / 测试 / 生产环境：看 `环境配置`
-- 想初始化数据库或跑迁移：看 `数据库操作`
-- 想新增正式业务模块：看 `如何基于模板新增正式业务模块`
-- 想确认接口返回规范：看 `统一响应格式` 与 `接口开发约束`
-- 想知道哪些代码是示例、哪些是正式业务骨架：看 `示例模块与历史模块`
-- 想知道提交前要跑什么：看 `开发工具链`
-- 想知道当前模板目录该怎么看：看 `项目结构`
+下面的目录树以当前代码为准。它重点列出长期维护时需要理解的目录和入口，不列出 `.venv`、缓存、日志及本机私有配置。
 
-### 常用入口文件
+```text
+com-agent-runtime/
+├── .github/
+│   └── workflows/
+│       └── com-agent-runtime.yml             # CI：测试、Ruff、Mypy 等质量门禁
+├── alembic/
+│   ├── env.py                                # Alembic metadata 与数据库环境入口
+│   ├── script.py.mako                        # 迁移文件模板
+│   └── versions/                             # 从历史业务表到 Runtime/M6 的完整迁移谱系
+├── app/
+│   ├── agents/
+│   │   └── memoir_agent/
+│   │       ├── runner.py                     # MemoirAgent 节点执行与版本门控
+│   │       ├── 1.0.0/ ... 1.0.4/             # 不可变的版本化 AgentPackage
+│   │       │   ├── agent.yaml                # 包身份、版本、策略、Prompt 清单
+│   │       │   ├── workflow.graph.py         # 受信任静态工作流声明
+│   │       │   ├── input.schema.json         # Run 输入 JSON Schema
+│   │       │   ├── output.schema.json        # Agent 输出 JSON Schema
+│   │       │   ├── tools.manifest.json       # 允许调用的 Tool 与副作用声明
+│   │       │   ├── guardrails.yaml           # 内容与安全护栏
+│   │       │   ├── callbacks.yaml            # callback 能力声明
+│   │       │   ├── ui-trace.yaml             # 面向业务端的安全进度摘要
+│   │       │   ├── prompts/                   # 版本化 Prompt 文件
+│   │       │   └── evals/                     # Agent 最小评测集
+│   │       └── ...
+│   ├── api/
+│   │   ├── api.py                            # 路由聚合与 production 路由门禁
+│   │   └── endpoints/
+│   │       ├── health_api.py                 # Runtime live/ready
+│   │       ├── capabilities_api.py           # 已验签能力发现
+│   │       ├── agent_runs_api.py             # Run 创建、启动、查询、重试、取消、清理
+│   │       ├── memory_api.py                 # dev/test 保留的用户侧回忆录迁移路由
+│   │       ├── memory_tools_api.py           # dev/test 保留的本地 memory Tool handler
+│   │       ├── memory_callbacks_api.py       # dev/test 保留的业务 callback consumer
+│   │       ├── memory_status_api.py          # dev/test 保留的历史生成状态路由
+│   │       ├── demo_api.py                   # 历史工程示例接口
+│   │       └── diary_api.py                  # 历史业务骨架接口
+│   ├── contracts/
+│   │   ├── api.py                            # AgentRun API wire contract
+│   │   ├── events.py                         # RuntimeEvent 与 callback event 枚举
+│   │   ├── tools.py                          # ToolManifest/Request/Result/Error
+│   │   ├── artifacts.py                      # Artifact envelope
+│   │   ├── errors.py                         # 稳定错误码
+│   │   └── schema_export.py                  # JSON Schema 导出
+│   ├── config/
+│   │   └── database_config.py                # 历史数据库 URL 兼容入口
+│   ├── core/
+│   │   ├── config.py                         # 环境识别、配置加载和 Settings
+│   │   ├── security.py                       # Runtime HMAC 签名与请求安全
+│   │   ├── authorization.py                  # caller/tenant/connector/target 授权
+│   │   ├── connectors.py                     # Business connector 配置解析
+│   │   ├── tool_security.py                  # Tool 入站签名与安全检查
+│   │   ├── user_auth.py                      # 历史用户 JWT 验证边界
+│   │   ├── api_response.py                   # 历史统一业务响应结构
+│   │   ├── logging_uru.py                    # Loguru 初始化、脱敏和关闭
+│   │   └── model_policy.yaml                 # 逻辑模型策略名
+│   ├── db/
+│   │   ├── sqlalchemy_db.py                  # SQLAlchemy Engine/Session 工厂
+│   │   ├── metadata.py                       # Alembic 使用的统一 metadata
+│   │   └── alembic_schema_bootstrap.py       # 隔离 schema bootstrap 支持
+│   ├── decorators/
+│   │   └── cache_decorator.py                # 历史接口缓存装饰器
+│   ├── middleware/
+│   │   ├── request_logging.py                # request_id、耗时和安全请求日志
+│   │   └── exception_handlers.py             # 统一异常响应
+│   ├── models/
+│   │   ├── runtime.py                        # Run/Plan/Step/ToolCall/Usage/Outbox/Audit 等权威表
+│   │   ├── memory_archive.py                 # 保留的回忆录迁移模型
+│   │   ├── memory_snapshot.py                # 加密 Snapshot 迁移模型
+│   │   ├── memory_playback_document.py       # PlaybackDocument 迁移模型
+│   │   ├── memory_scene.py                   # Scene 迁移模型
+│   │   ├── memory_action.py                  # Action 迁移模型
+│   │   ├── memory_media_asset.py             # 媒体资产迁移模型
+│   │   ├── memory_agent_run_ref.py           # 业务 RunRef 迁移模型
+│   │   └── ...                               # 密码、关系、来源引用与补偿模型
+│   ├── runtime/
+│   │   ├── planner.py                        # 静态 AgentPlan 构建与校验
+│   │   ├── graph_builder.py                  # 静态 LangGraph StateGraph 编译
+│   │   ├── executor.py                       # workflow 执行、恢复和安全边界
+│   │   ├── state.py                          # 不含原始私密正文的图状态
+│   │   ├── context_manager.py                # 上下文预算与敏感信息控制
+│   │   ├── model_gateway.py                  # Provider 路由、限流、用量和 fallback
+│   │   ├── memoir_model_gateway.py           # Memoir 节点的模型适配
+│   │   ├── tool_gateway.py                   # Business Tool 授权、签名、幂等和调用
+│   │   ├── callback_gateway.py               # callback 目标与安全发送
+│   │   ├── checkpoint.py                     # 加密 checkpoint 存取
+│   │   ├── artifact.py                       # 安全 Artifact 存取
+│   │   ├── guardrails.py                     # Memoir 内容护栏
+│   │   ├── evaluator.py                      # 结构与质量评价
+│   │   ├── policy_engine.py                  # step/model/tool/token/成本硬限制
+│   │   ├── prompt_registry.py                # 版本化 Prompt 加载
+│   │   ├── structured_output.py              # Pydantic 结构化输出解析
+│   │   ├── json_repair.py                    # 本地一次 JSON 修复
+│   │   ├── semantic_validation.py            # 引用、数量和业务语义校验
+│   │   ├── native_tools.py                   # 固定 allowlist 的本地安全工具
+│   │   ├── langchain_components.py           # LangChain message 组装
+│   │   ├── langchain_tools.py                # LangChain Tool adapter
+│   │   ├── observability.py                  # 安全聚合观测对象
+│   │   └── *harness*.py / mock_*.py          # 隔离进程、Provider、业务服务测试设施
+│   ├── schemas/
+│   │   ├── agent_package.py                  # AgentPackage Pydantic 定义
+│   │   ├── agent_run.py                      # API 层 Run DTO
+│   │   ├── plan.py                           # Plan DTO
+│   │   ├── callback.py                       # callback payload
+│   │   ├── audit.py                          # 安全审计事件
+│   │   ├── public_trace.py                   # 前端可见的安全 trace
+│   │   ├── context.py                        # 节点上下文 DTO
+│   │   ├── evaluation.py                     # 评价结果 DTO
+│   │   └── model.py                          # 结构化模型结果 DTO
+│   ├── services/
+│   │   ├── agent_package_service.py          # Package 加载、digest 和不可变校验
+│   │   ├── agent_run_service.py              # Run 生命周期事务
+│   │   ├── admission_service.py              # held/queued/running 容量控制
+│   │   ├── idempotency_service.py            # API 写操作幂等
+│   │   ├── run_queue_service.py              # Worker claim、lease 和 fencing
+│   │   ├── lease_service.py                  # 失效 lease 回收
+│   │   ├── outbox_service.py                 # 持久 outbox 创建
+│   │   ├── callback_service.py               # callback 事件生成
+│   │   ├── callback_delivery_service.py      # callback 投递
+│   │   ├── reconciliation_service.py         # Runtime 状态对账与修复
+│   │   ├── audit_service.py                  # 无正文持久审计
+│   │   ├── observability_service.py          # 安全聚合报告
+│   │   ├── traffic_event_service.py          # Provider/安全流量窗口计数
+│   │   ├── model_usage_service.py            # 模型 attempt、token 和成本账本
+│   │   ├── tool_call_audit_service.py        # ToolCall 生命周期审计
+│   │   ├── memoir_media_service.py           # 回忆录图片生成与上传
+│   │   └── memory_*.py                       # 保留的业务迁移、联调和补偿服务
+│   ├── scripts/
+│   │   ├── agent_runtime_cli.py               # agent-runtime.sh 的真实 CLI 实现
+│   │   ├── register_agent_package.py          # Package 注册底层实现
+│   │   ├── set_env.py / manage_db.py          # 历史通用脚本，非 Runtime 首选入口
+│   │   ├── create_database.py                 # 历史建库脚本，禁止用于 Runtime 专库
+│   │   ├── init_database.py                   # 历史 create_all 初始化脚本
+│   │   └── docker-entrypoint.sh               # 容器入口辅助脚本
+│   ├── utils/
+│   │   ├── aliyun/oss_client.py               # 阿里云 OSS 上传客户端
+│   │   └── volcano/cv_client.py               # 火山视觉图片生成客户端
+│   ├── main.py                                # FastAPI 应用与基础探针
+│   ├── worker.py                              # Runtime Worker 常驻进程
+│   ├── dispatcher.py                          # Worker 使用的 outbox dispatcher 组件
+│   ├── reconciler.py                          # Runtime 对账常驻进程
+│   └── memory_runtime_launcher.py             # 历史回忆录启动 outbox 单轮任务
+├── tests/
+│   ├── fixtures/
+│   │   ├── runtime-contract-v1.0.0.json       # 公共 Runtime 契约夹具
+│   │   ├── memory-runtime-contract-v1.*.json  # 跨仓 Tool 契约夹具
+│   │   ├── memory_playback_shared_v1.json     # 播放文档共享夹具
+│   │   └── memoir_snapshots/                  # MemoirAgent 场景输入夹具
+│   ├── runtime_test_*.py                      # Worker/Executor/安全/并发行为回归
+│   └── test_*.py                              # API、服务、迁移、Gateway、媒体和治理测试
+├── docs/superpowers/
+│   ├── specs/                                 # 已确认的专题设计记录
+│   └── plans/                                 # 已执行的专题实施计划
+├── 头脑风暴/docs/AgentRuntime/
+│   ├── 需求设计文档.md                         # 公共 Runtime 总需求
+│   ├── 契约冻结记录.md                         # 当前冻结契约入口
+│   ├── backend/                               # 后端详细计划
+│   └── plans/                                 # 总控与专题计划
+├── .env.development                           # development 团队基础模板
+├── .env.test                                  # test 团队基础模板
+├── .env.production                            # production 团队基础模板
+├── .env.example                               # 最小字段示例
+├── .gitignore                                 # 本地配置、日志和缓存忽略规则
+├── .pre-commit-config.yaml                    # 提交前自动检查配置
+├── AGENTS.md                                  # Agent/Codex 项目级工作约定
+├── agent-runtime.sh                           # 配置、迁移、注册、启动、验收统一入口
+├── run.sh                                     # 只启动 API 的开发调试入口
+├── run_app.py                                 # Uvicorn 启动实现
+├── project_structure.sh                       # 输出稳定目录边界
+├── docker-compose.postgres-harness.yml        # 隔离 PostgreSQL 真实验证
+├── docker-compose.redis-harness.yml           # 隔离 Redis 真实验证
+├── alembic.ini                                # Alembic 配置
+├── pyproject.toml                             # 依赖、pytest、Ruff、Mypy 配置
+├── poetry.lock                                # 锁定依赖版本
+├── poetry.toml                                # Poetry 本项目行为配置
+├── requirements.txt                           # 历史依赖清单，仅作参考
+├── ENV_CONFIG.md                              # 完整配置说明
+├── VERIFICATION.md                            # 完整验证说明
+└── LLM_PROMPTS.md                             # 可复制的 LLM 协作上下文
+```
 
-- `app/main.py`：FastAPI 应用入口
-- `app/api/api.py`：全量路由注册入口
-- `app/api/endpoints/demo_api.py`：示例规范接口入口
-- `app/api/endpoints/diary_api.py`：正式业务骨架接口入口
-- `app/core/api_response.py`：统一响应结构构造入口
-- `app/core/config.py`：环境识别、配置加载、配置分组入口
-- `app/middleware/request_logging.py`：请求日志与 `request_id` 入口
-- `app/middleware/exception_handlers.py`：统一错误返回入口
-- `app/scripts/set_env.py`：环境切换与命令转发入口
-- `agent-runtime.sh`：AgentRuntime 配置检查、安全建库、Alembic 迁移、AgentPackage 注册与进程托管入口
+## 项目结构说明
 
-### 最常用命令速查
+### 修改需求时应该去哪里
+
+| 需求类型 | 首选目录 | 说明 |
+|---|---|---|
+| 新增或调整公共 API | `app/contracts/` + `app/api/endpoints/` | 先冻结 wire contract，再实现路由；同步 provider/consumer fixture |
+| 修改 Run 状态或事务 | `app/services/` + `app/models/runtime.py` | 必须考虑幂等、Admission、outbox、lease/fencing 和 callback |
+| 修改 Agent 执行方式 | `app/runtime/` | Planner、Executor、Gateway、Checkpoint、Guardrail 等公共内核在这里 |
+| 修改 MemoirAgent 行为 | 新建 `app/agents/memoir_agent/<新版本>/`，必要时改 `runner.py` | 不覆盖已发布包；调用方显式选择版本 |
+| 修改模型路由 | `app/runtime/model_gateway.py` + 部署环境配置 | Provider、model、endpoint 和 key 不允许由业务请求覆盖 |
+| 修改 Business Tool | `app/contracts/tools.py` + `app/runtime/tool_gateway.py` | 必须保持授权、签名、稳定幂等键和安全错误合同 |
+| 修改数据库结构 | `app/models/` + `alembic/versions/` | 只对 Runtime 专库运行 Alembic；禁止 `create_all()` 兜底 |
+| 修改启动或部署流程 | `app/scripts/agent_runtime_cli.py` + `agent-runtime.sh` | `agent-runtime.sh` 是对用户唯一推荐入口 |
+| 修改回忆录业务数据或用户 API | `couple-diary-b` | 本仓 `memory_*` 是迁移证据，不是生产目标归属 |
+
+### 不要新建或搬迁的结构
+
+- 不创建第二套 `app/`、`alembic/`、`pyproject.toml` 或嵌套 `services/agent-runtime/`。
+- 不为了目录整齐移动 `runtime/`、`contracts/`、`services/`；这些路径已被代码、测试和历史链接稳定引用。
+- 不把新 Runtime 能力写进 `demo_api.py`、`diary_api.py` 或 `demo_service.py`。
+- 不删除历史 memory 模型或迁移来“清理目录”；迁移完成、生产数据盘点和回滚方案明确后再单独处理。
+
+## 集成框架
+
+以下均来自当前 `pyproject.toml` 或工程脚本，不是规划中的候选技术。
+
+| 技术 | 用途 |
+|---|---|
+| Python 3.13 | 当前运行与类型检查基线 |
+| FastAPI | Runtime HTTP API、依赖注入与 OpenAPI |
+| Uvicorn | ASGI 进程启动 |
+| Pydantic v2 / pydantic-settings | API、AgentPackage、配置和结构化输出校验 |
+| SQLAlchemy 2 | Runtime 权威数据、事务、条件更新和 Session 管理 |
+| Alembic | 数据库迁移谱系；当前单 head 为 `20260820_0900` |
+| MySQL Connector/Python | development/test/production 默认 Runtime 数据库驱动 |
+| PostgreSQL + psycopg | Docker 真实并发、锁、Worker/Reconciler harness |
+| Redis | 模型并发 permit、RPM/TPM、共享冷却和 fail-closed 流控 |
+| LangGraph | 将冻结的静态 AgentPlan 编译为 `StateGraph` |
+| LangChain Core | 版本化 Prompt message 和 Tool adapter |
+| httpx | Provider、Business Tool、callback 等受控 HTTP 调用 |
+| cryptography/Fernet | Snapshot 与 Checkpoint 加密 |
+| boto3 | S3/MinIO/COS 兼容私有媒体短期签名 URL |
+| Alibaba Cloud OSS SDK | Agent 生成图片上传 |
+| 火山视觉 HTTP Client | 可选真实图片生成 Provider |
+| PyYAML | AgentPackage、guardrails、callback、UI trace 和策略文件解析 |
+| Loguru | 请求、Worker 和后台任务日志；关闭时排空日志队列 |
+| pytest / pytest-asyncio | 单元、契约、进程和真实依赖回归 |
+| Ruff | Python 静态检查与格式约束 |
+| Mypy | Runtime 核心边界类型检查 |
+| pre-commit / GitHub Actions | 本地提交前和远端 CI 门禁 |
+
+项目没有把 Provider 写死为某一家模型服务。真实 Provider、模型、endpoint、价格和 API Key 由受控部署配置决定；`MODEL_ROUTES_JSON=[]` 时不调用外部模型，MemoirAgent 走确定性模板降级。
+
+## 环境与配置加载
+
+### 环境差异
+
+| 环境 | API 默认地址 | Runtime 数据库 | Redis | 建库默认 | 用途 |
+|---|---|---|---|---|---|
+| development | `127.0.0.1:8010` | `couple_diary_agent_runtime_dev` | `127.0.0.1:6379/15` | 允许 | 日常开发和热重载调试 |
+| test | `127.0.0.1:8010` | `couple_diary_agent_runtime_test` | `127.0.0.1:6379/14` | 允许 | 独立测试和联调，不能复用 development 数据 |
+| production | `127.0.0.1:8011` | `couple_diary_agent_runtime_prod` | `127.0.0.1:6380/15` | 禁止 | 生产部署；数据库由 DBA/平台预建 |
+
+如果应用运行在 Docker 内，`HOST` 通常改为 `0.0.0.0`，数据库和 Redis 主机改为实际 Compose service 名；容器内 MySQL/Redis 端口仍是 `3306/6379`。完整规则见 [ENV_CONFIG.md](ENV_CONFIG.md)。
+
+### 配置加载顺序
+
+应用按当前 `ENVIRONMENT` 加载：
+
+```text
+.env.<environment>
+  -> .env.<environment>.local
+  -> .env.local
+  -> 进程环境变量
+```
+
+后加载的同名字段覆盖前面的值。建议：
+
+- `.env.development/.env.test/.env.production` 只保存可提交的团队模板。
+- development/test 的真实密码和本机地址放在 `./agent-runtime.sh configure` 生成的 `.env.<environment>.local`。
+- production 的凭据由 secret manager 或部署平台注入。
+- `.env.local` 会覆盖所有环境的同名字段，除非确实需要全局本机覆盖，否则不要使用。
+- 本机 `.local` 文件权限必须为 `0600`，不得提交、截图或复制到工单。
+
+## 三套环境快速启动
+
+### 共同前置条件
+
+1. 安装 Python `>=3.13` 和 Poetry。
+2. 在仓库根目录执行 `poetry install`。
+3. development/test/production 分别准备独立 MySQL 数据库或具备对应建库权限的账号。
+4. 准备独立 Redis DB；不要把测试流控数据写入生产 Redis。
+5. 需要运行真实 harness 时安装 Docker 与 Docker Compose。
 
 ```bash
-# 安装依赖
 poetry install
+poetry run python --version
+poetry run alembic heads
+```
 
-# 首次初始化 AgentRuntime 开发专库
+预期 Python 为 3.13.x，Alembic 只显示 `20260820_0900 (head)`。
+
+### development：日常开发
+
+首次配置：
+
+```bash
+./agent-runtime.sh configure development
+chmod 600 .env.development.local
+./agent-runtime.sh doctor development
 ./agent-runtime.sh prepare development
-
-# 注册/升级 AgentPackage 到指定环境库（磁盘包不会自动入库；--version 必填，--dry-run 可预检不落库）
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.2
-
-# 启动开发环境
-./run.sh development
-
-# 启动测试环境
-./run.sh test
-
-# 查看当前环境会加载哪套配置
-poetry run python -m app.scripts.set_env development
-
-# 运行测试
-poetry run pytest
-
-# 运行静态检查
-poetry run ruff check app tests
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh start development
 ```
 
-### 当前模板边界
+说明：
 
-- `demo_*` 相关代码：保留作示例规范，不承载长期正式业务
-- `diary_*` 相关代码：作为正式业务模块骨架样板，后续真实功能优先沿这条线扩展
-- `diary_entries`：当前模板默认的正式业务持久化模型样板
-- `requirements.txt`：仅保留作历史参考，依赖管理以 `pyproject.toml` 为准
+- `configure` 交互询问数据库、Redis、Runtime 地址和业务后端地址，并随机生成 HMAC、Fernet 与 JWT secret。
+- 已存在 `.env.development.local` 时不会覆盖。只有确认旧配置和密钥不再需要时才使用 `--force`。
+- `doctor` 只输出字段名和安全错误码，不回显值。
+- `prepare` 检查固定库名，缺库且 `DB_AUTO_CREATE=true` 时建库，然后执行 Alembic。
+- `register --dry-run` 先验证磁盘包和数据库现状；正式 `register` 才写 `agent_definitions`。
+- `start` 保持前台运行，按 `Ctrl-C` 统一停止所有托管进程。
 
-## LLM 接入提示词模板
-
-下面这两份模板是给后续 ChatGPT / Codex / Claude 这类 LLM 接手本项目时使用的。
-
-### 最短实用版
-
-适合你临时给模型下发任务时直接粘贴，目标是先保证它不要跑偏。
-
-```text
-你现在在维护一个 FastAPI 后端模板工程：Couple Diary Backend。
-
-请先理解这些核心约束再开始改代码：
-1. 这是“项目级后端工程”，不是单一 demo 项目。
-2. `demo_api.py / demo_service.py` 只用于示例规范，对外路由归属在 `/api/v1/demo/...`。
-3. `diary_api.py / diary_service.py / diary_entry.py` 是正式业务骨架样板，真实业务优先沿这条线扩展。
-4. 所有 `/api/v1/...` 接口必须在路由层显式返回统一结构，优先使用 `build_api_response_from_request()`。
-5. 不要依赖中间件去给普通业务响应“自动补齐” `platform / api / v`。
-6. 新增正式业务模块时，按“路由层 + 服务层 + schema + 必要模型”独立落目录，不要长期堆进 demo 模块。
-7. 新代码优先使用 `settings.application / server / cors / request_logging / database` 这套配置分组视图。
-8. 环境切换、建库、迁移、启动，优先复用 `app/scripts/set_env.py`、`app/scripts/manage_db.py`、`run.sh`，不要自己发明新入口。
-9. 提交前至少运行 `poetry run ruff check app tests` 和 `poetry run pytest`。
-10. 修改前优先阅读 README 的 `开发与协作约定`、`环境配置`、`数据库操作`、`项目结构`。
-
-如果你要新增业务模块，请优先参考：
-- `app/api/endpoints/diary_api.py`
-- `app/services/diary_service.py`
-- `app/core/api_response.py`
-- `app/core/config.py`
-```
-
-### 标准协作版
-
-适合长期复用，信息更完整，能明显降低 LLM 把示例模块和正式业务模块混写的概率。
-
-```text
-你现在在维护 com-agent-runtime-b 这个 FastAPI 后端模板工程。
-
-在开始任何改动前，请先遵守以下工程约束：
-
-一、项目定位
-- 项目名是 `Couple Diary Backend`，这是整个后端工程名，不是某一个子模块名。
-- 当前仓库里同时存在“项目级基础设施”和“示例规范模块”，不要混淆。
-- `demo_*` 代码只用于保留示例规范。
-- `diary_*` 代码是当前正式业务骨架样板。
-
-二、模块边界
-- `app/api/endpoints/demo_api.py`、`app/services/demo_service.py`：示例规范模块
-- `app/api/endpoints/diary_api.py`、`app/services/diary_service.py`、`app/schemas/diary.py`：正式业务骨架
-- `app/models/diary_entry.py`：当前模板默认的正式业务持久化模型样板
-- 不要把真实长期业务持续追加到 `demo_*` 里
-- 如果新增正式业务域，继续按独立目录和独立 router 注册方式扩展
-
-三、接口返回规范
-- 所有 `/api/v1/...` 接口都必须返回统一结构：
-  - `platform`
-  - `api`
-  - `data`
-  - `ret`
-  - `v`
-- 成功响应必须在路由层显式构造
-- 推荐统一使用 `app/core/api_response.py` 中的 `build_api_response_from_request()`
-- 不要让服务层直接拼整套 HTTP 响应格式
-- 不要依赖中间件为普通成功响应做自动包装
-
-四、错误处理规范
-- 优先抛出 `HTTPException` 或复用现有异常处理器
-- 当前项目已经有统一异常格式化逻辑
-- 调试错误返回格式时，可参考 `/api/v1/demo/error-demo`
-
-五、配置与环境规范
-- 配置入口在 `app/core/config.py`
-- 新代码优先使用配置分组视图：
-  - `settings.application`
-  - `settings.server`
-  - `settings.cors`
-  - `settings.request_logging`
-  - `settings.database`
-- 环境文件按 `development / test / production` 分开管理
-- 本地真实密码优先放在 `.env.development.local`、`.env.test.local`、`.env.local`
-
-六、数据库与脚本规范
-- AgentRuntime 唯一安全建库/迁移/启动入口：`./agent-runtime.sh`
-- 首次初始化开发专库：`./agent-runtime.sh prepare development`
-- 完整启动：`./agent-runtime.sh start <env>`
-- 原模板 `set_env.py/manage_db.py/init_database.py` 不得用于 AgentRuntime 建库、重置或兜底
-- 如果是数据库结构演进，优先走 Alembic，而不是只用 `create_all()`
-
-七、日志与排障规范
-- 请求日志与 `request_id` 入口：`app/middleware/request_logging.py`
-- 统一异常格式：`app/middleware/exception_handlers.py`
-- 基础健康检查：`/healthz`
-- 依赖就绪检查：`/readyz`
-
-八、开发前推荐先读
-- `README.md` 的以下章节：
-  - `开发与协作约定`
-  - `开发工具链`
-  - `环境配置`
-  - `数据库操作`
-  - `项目结构`
-- 关键文件：
-  - `app/main.py`
-  - `app/api/api.py`
-  - `app/core/api_response.py`
-  - `app/core/config.py`
-  - `app/api/endpoints/demo_api.py`
-  - `app/api/endpoints/diary_api.py`
-
-九、开发行为约束
-- 改代码前先判断当前需求属于“示例规范”还是“正式业务模块”
-- 新增正式业务优先参考 `diary_*`，不要默认参考 `demo_*`
-- 新增接口时，优先补测试
-- 变更完成后至少执行：
-  - `poetry run ruff check app tests`
-  - `poetry run pytest`
-
-十、如果要新增正式业务模块
-- 推荐步骤：
-  1. 新增 `app/api/endpoints/<module>_api.py`
-  2. 新增 `app/services/<module>_service.py`
-  3. 需要时新增 `app/schemas/<module>.py`
-  4. 需要持久化时新增模型
-  5. 在 `app/api/api.py` 里注册路由
-  6. 路由层继续显式返回 `build_api_response_from_request()`
-
-如果不确定应该参考哪部分代码，请优先参考正式业务骨架 `diary_*`，而不是示例模块 `demo_*`。
-```
-
-如果你想直接复制完整文本版本，也可以看仓库里的 `LLM_PROMPTS.md`。
-
-## 快速开始
-
-项目根目录的 `agent-runtime.sh` 是 AgentRuntime 的统一入口。它负责生成本机私有配置、检查必填项、执行 Alembic 迁移、把部署目录内的 AgentPackage 注册进库（`register`，须显式 `--version`）、前台托管 API/Worker/Reconciler/launcher，以及运行隔离的 PostgreSQL/Redis 真实 harness。
-
-首次启动测试环境：
+只调试 FastAPI、需要 development 热重载时：
 
 ```bash
-poetry install
+./agent-runtime.sh prepare development
+./run.sh development
+```
+
+这种方式不启动 Worker、Reconciler 或 launcher，不能用来验证完整 AgentRun 执行。
+
+### test：独立测试和联调
+
+`configure test` 使用的是通用 Redis URL 交互默认值 `/15`。为了不与
+development 流控状态混用，在 `Redis URL` 提示处请明确输入
+`redis://127.0.0.1:6379/14`，不要直接回车接受 `/15`。Docker 内联调时对应
+使用 `redis://redis:6379/14`（`redis` 换成实际 service 名）。
+
+```bash
 ./agent-runtime.sh configure test
+chmod 600 .env.test.local
 ./agent-runtime.sh doctor test
+./agent-runtime.sh prepare test
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.4 --dry-run
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.4
 ./agent-runtime.sh start test
 ```
 
-`configure` 会交互读取 MySQL 连接信息，生成随机服务签名密钥、Snapshot Fernet key 和用户 JWT secret，然后写入已忽略的 `.env.test.local`。生成文件的每个字段都带有中文用途、必填类型和填写方法；脚本将文件权限设为 `0600`，不会在终端回显密码或密钥。手动必填项、宿主机/Docker 地址规则见 [AgentRuntime 验证流程](VERIFICATION.md#2-生成本地测试配置)。
+test 与 development 即使监听同一默认端口，也必须使用不同数据库、Redis DB 和密钥。不要同时以默认端口启动两套服务；需要并行时先在各自 `.local` 配置中修改端口和 `MEMORY_RUNTIME_BASE_URL`。
 
-`SERVICE_BASE_URL`、外部 exporter 治理、client/tool HMAC、Snapshot Fernet key、JWT secret 以及 S3/MinIO/COS 私有媒体桶的生成、一致性、轮换和无凭据检查方法，详见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
+如果只运行自动化测试，一般不需要启动常驻服务：
 
-启动前需要有可连接的 MySQL 服务和 Redis。development/test 默认 `DB_AUTO_CREATE=true`：`start` 会在 AgentRuntime 专库缺失时创建库，再通过 `alembic upgrade head` 创建或升级表；库已存在时直接检查并迁移。脚本不会创建 MySQL 账号、启动 MySQL/Redis 容器或覆盖现有配置。按 `Ctrl-C` 后，脚本会排空日志队列并回收它启动的所有进程；为避免嵌套进程，该模式固定关闭 Uvicorn reloader。
+```bash
+poetry run pytest -q
+```
 
-AgentRuntime 仅允许 `couple_diary_agent_runtime_dev/test/prod`，会在连接前拒绝正在运行的业务库 `couple_diary_dev/test/prod`。数据库自动创建、生产首次 bootstrap 和权限配置详见 [AgentRuntime 环境配置说明](ENV_CONFIG.md#3-agentruntime-专用数据库)。
+需要真实 PostgreSQL、Redis、API、Worker 和 Reconciler 的隔离验收：
 
-如果你只想在隔离容器中验收真实 PostgreSQL、Redis、API、Worker 和 Reconciler，运行：
+```bash
+docker compose version
+./agent-runtime.sh verify
+```
+
+`verify` 使用独立回环端口和临时密码，无论成功或失败都会尝试执行 `down -v` 清理容器和 volume。
+
+### production：受控部署
+
+production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_diary_agent_runtime_prod`，再通过 secret manager/部署平台注入完整配置。
+
+```bash
+./agent-runtime.sh doctor production
+./agent-runtime.sh prepare production
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.4 --dry-run
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh start production
+```
+
+上线前必须确认：
+
+- `DB_AUTO_CREATE=false`，运行账号不是 root，只拥有 Runtime 专库最小权限。
+- production 使用独立 HMAC、Fernet、JWT、数据库密码、Redis 凭据和 Provider Key。
+- `DEBUG=false`、`RELOAD=false`，CORS 不使用 `*`。
+- Runtime 和业务 connector/callback 使用受控 HTTPS 域名，禁止 localhost、私网地址和凭据 URL。
+- 模型路由的 Provider、价格、驻留、并发和 API Key 已经过部署评审。
+- 外部 exporter 未完成数据治理前保持关闭。
+- AgentPackage 已按明确版本注册；磁盘上存在包不等于数据库已注册。
+
+单机部署可以使用 `start production` 前台托管全部进程。容器或 Kubernetes 应把 API、Worker、Reconciler 和周期 launcher 拆成独立 workload，并注入同一套受控配置；不要在多个容器内重复运行 supervisor。
+
+## 启动与运维脚本说明
+
+### 推荐用户入口
+
+| 入口 | 是否首选 | 作用 | 是否连接数据库/启动进程 |
+|---|---|---|---|
+| `./agent-runtime.sh` | 是 | 转发到安全 Runtime CLI，统一执行配置、检查、迁移、注册、启动和真实验收 | 取决于子命令 |
+| `./run.sh <env>` | 仅 API 调试 | 设置 `ENVIRONMENT` 后调用 `run_app.py`，保留 development 热重载 | 启动 API，会连接数据库；不启动后台进程 |
+| `run_app.py` | 底层入口 | 按 Settings 启动 Uvicorn `app.main:app` | 启动 API，会连接数据库 |
+| `project_structure.sh` | 辅助 | 打印稳定目录边界，不生成或修改文件 | 不连接数据库，不启动服务 |
+
+### `agent-runtime.sh` 子命令
+
+| 命令 | 作用 | 会修改什么 | 适用环境 |
+|---|---|---|---|
+| `configure <env>` | 交互生成本机私有配置和随机密钥 | 新建 `.env.development.local` 或 `.env.test.local` | development/test |
+| `configure <env> --force` | 覆盖已有本机配置 | 替换本机密钥和配置，可能使旧加密数据不可读 | 仅确认旧配置废弃后使用 |
+| `doctor <env>` | 无内容检查配置完整性、安全性和固定库名 | 不连接数据库，不打印配置值 | 全环境 |
+| `prepare <env>` | 先 doctor，再检查/创建固定 Runtime 专库并迁移到 head | 可能建库并执行 Alembic DDL | 全环境；production 默认不建库 |
+| `register <env> --agent-id ... --version ... --dry-run` | 加载并校验指定磁盘包，显示将发生的注册动作 | 不写 `agent_definitions` | 全环境 |
+| `register <env> --agent-id ... --version ...` | 幂等注册明确版本的 AgentPackage | 写入或校准 `agent_definitions` | 全环境 |
+| `start <env>` | prepare 后前台托管完整 Runtime | 迁移数据库并启动四类进程 | 全环境 |
+| `verify` | 启动隔离 PostgreSQL/Redis 并运行真实进程测试 | 创建临时容器/volume，结束时清理 | 本机/CI 验收 |
+
+查看帮助：
+
+```bash
+./agent-runtime.sh --help
+./agent-runtime.sh register --help
+```
+
+### `start` 实际启动顺序
+
+```text
+取得当前工程启动锁
+  -> doctor
+  -> 检查/创建 Runtime 专库
+  -> alembic upgrade head
+  -> 清理本工程同环境的遗留托管进程
+  -> 启动 API（run_app.py）
+  -> 等待 /healthz 与 /api/v1/runtime/health/ready
+  -> 启动 launcher loop（每 5 秒执行一次历史回忆录启动补偿）
+  -> 启动 Worker（默认每 1 秒轮询数据库 outbox）
+  -> 启动 Reconciler（默认每 300 秒一轮）
+  -> 前台监控所有子进程
+```
+
+任一子进程异常退出时 supervisor 返回失败并回收其余进程。按 `Ctrl-C` 时 Worker 先进入 draining，API、launcher、Worker 和 Reconciler 最终由 supervisor 统一回收。supervisor 模式固定设置 `RELOAD=false`，避免 Uvicorn reloader 再生成不受控子进程。
+
+### 独立进程入口
+
+这些命令主要用于容器拆分部署、诊断或定向验证。新手日常开发优先使用 `agent-runtime.sh start`。
+
+| 入口 | 用途 | 常用参数 |
+|---|---|---|
+| `poetry run python run_app.py` | 单独启动 API | 配置来自当前 `ENVIRONMENT` |
+| `poetry run python -m app.worker` | 常驻 Worker，处理 outbox、claim 和 workflow | `--worker-id`、`--poll-seconds`、`--once` |
+| `poetry run python -m app.reconciler` | 常驻状态对账、lease 回收、purge 和补偿 | `--interval-seconds`、`--once` |
+| `poetry run python -m app.memory_runtime_launcher` | 执行一次历史回忆录启动 outbox 和 callback 补偿 | 没有 `--help`/参数；运行即连接数据库并执行一轮 |
+| `app.dispatcher.Dispatcher` | Worker 内部使用的 outbox 派发组件 | 不是独立 CLI，不要直接当进程启动 |
+
+单轮诊断示例：
+
+```bash
+ENVIRONMENT=test poetry run python -m app.worker --once --worker-id diagnostic-worker
+ENVIRONMENT=test poetry run python -m app.reconciler --once
+```
+
+这两条命令会连接 test Runtime 数据库并可能推进状态，只能在隔离测试环境使用。
+
+### 历史脚本边界
+
+`app/scripts/set_env.py`、`manage_db.py`、`create_database.py` 和 `init_database.py` 来自早期后端模板，仍被部分测试或兼容逻辑引用，但不是 AgentRuntime 的安全操作入口：
+
+- 不使用 `set_env ... bootstrap` 启动 Runtime。
+- 不使用 `manage_db reset`、`create_all()` 或 `init_database.py` 初始化 Runtime。
+- 不对 `couple_diary_dev/test/prod` 运行 Alembic、stamp、reset 或任何 DDL。
+- 建库、迁移、注册和完整启动统一使用 `agent-runtime.sh`。
+
+## 启动后检查
+
+development/test 默认端口：
+
+```bash
+curl -fsS http://127.0.0.1:8010/healthz
+curl -fsS http://127.0.0.1:8010/readyz
+curl -fsS http://127.0.0.1:8010/api/v1/runtime/health/live
+curl -fsS http://127.0.0.1:8010/api/v1/runtime/health/ready
+```
+
+production 默认端口：
+
+```bash
+curl -fsS http://127.0.0.1:8011/healthz
+curl -fsS http://127.0.0.1:8011/readyz
+curl -fsS http://127.0.0.1:8011/api/v1/runtime/health/live
+curl -fsS http://127.0.0.1:8011/api/v1/runtime/health/ready
+```
+
+预期四个请求均返回 HTTP 200。区别：
+
+- `/healthz`：FastAPI 进程存活。
+- `/readyz`：基础应用依赖就绪，当前主要检查数据库。
+- `/api/v1/runtime/health/live`：Runtime 事件循环与服务存活。
+- `/api/v1/runtime/health/ready`：Runtime 数据库、trusted clients、audit sink、callback dispatcher、draining 等治理条件就绪。
+
+API 文档默认位于 `http://127.0.0.1:<PORT>/docs`，OpenAPI JSON 位于 `/api/v1/openapi.json`。
+
+## 常见启动问题
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `CONFIG_FILE_EXISTS` | `.env.<env>.local` 已存在 | 直接编辑/复用；确认旧密钥废弃后才 `configure --force` |
+| `INSECURE_FILE_MODE` | 私有配置可被 group/other 读取 | `chmod 600 .env.<env>.local` |
+| `PLACEHOLDER_VALUE` / `MISSING_VALUE` | 必填配置未填写或仍是模板值 | 按 [ENV_CONFIG.md](ENV_CONFIG.md) 补齐对应字段 |
+| `RUNTIME_DATABASE_NAME_MISMATCH` | `DB_NAME` 不是当前环境固定 Runtime 专库 | 改为 `couple_diary_agent_runtime_dev/test/prod` 对应值 |
+| `RUNTIME_DATABASE_MISSING` | production 未预建库或自动建库关闭 | 让 DBA/平台预建 Runtime 专库，再执行 `prepare` |
+| MySQL/Redis 连接失败 | 服务未启动、地址/端口或凭据错误 | 先用数据库/Redis 客户端确认连通，再运行 `doctor/prepare` |
+| Runtime readiness 503 | trusted client、audit、callback、数据库或 draining 未就绪 | 查看 readiness 的安全状态码并修复对应配置 |
+| create Run 返回 Package 不可用 | 磁盘包未注册进目标环境数据库 | 明确版本执行 `register --dry-run`，再正式 `register` |
+| `model_enhancement_available=false` | 模型路由为空、Redis 不可用或治理字段不完整 | 不需要真实模型时保持模板降级；需要时按 ENV_CONFIG 配置 |
+| 启动后没有执行 AgentRun | 只用了 `run.sh`，没有 Worker | 使用 `agent-runtime.sh start <env>` 或单独启动 Worker |
+| 第二套环境无法启动 | development/test 默认都占用 8010 | 修改其中一套 `PORT` 与 `MEMORY_RUNTIME_BASE_URL` |
+
+## 公共 API
+
+公共路径位于 `API_PREFIX`（默认 `/api/v1`）下。
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/runtime/health/live` | Runtime 存活探针 |
+| GET | `/runtime/health/ready` | Runtime 依赖和治理 readiness |
+| GET | `/runtime/capabilities` | 已验签的契约、AgentPackage 和模型能力摘要 |
+| POST | `/runtime/agent-runs` | 创建 held/auto AgentRun |
+| POST | `/runtime/agent-runs/{run_id}/start` | 启动 held Run |
+| GET | `/runtime/agent-runs/{run_id}` | 查询 Run 摘要 |
+| GET | `/runtime/agent-runs/{run_id}/steps` | 查询安全步骤摘要 |
+| POST | `/runtime/agent-runs/{run_id}/retry` | 显式重试 |
+| POST | `/runtime/agent-runs/{run_id}/cancel` | 取消 Run |
+| POST | `/runtime/agent-runs/{run_id}/human-approval` | 最小人工确认 |
+| POST | `/runtime/agent-runs/{run_id}/purge-private-data` | 请求隐私清理 |
+
+除部署探针外，Runtime API 受 HMAC、时间戳、caller/tenant、资源可见性和授权版本约束；写操作还要求独立 `Idempotency-Key`。精确 wire contract 以 `app/contracts/` 和 `tests/fixtures/runtime-contract-v1.0.0.json` 为准。
+
+### 环境路由门禁
+
+`production` 注册公共 `/api/v1/runtime/*` provider，并暂时保留 `demo/diary` 工程示例。以下 Runtime-local 回忆录路由只在 development/test 注册，用于迁移审计与跨仓回归，不是生产目标架构：
+
+- `/api/v1/memory/*`
+- `/api/v1/memory-archives/*`
+- `/api/v1/internal/agent-tools/memory.*`
+- `/api/v1/internal/agent-callbacks/memory`
+
+新增回忆录业务 API、Archive/Snapshot/密码或 PlaybackDocument 能力时，应在 `couple-diary-b` 实现，不继续扩展本仓历史路由。
+
+## AgentPackage 与 MemoirAgent
+
+AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不可变；修改受管文件应发布新版本，不覆盖旧版本。调用方和部署脚本都必须显式指定版本，不会自动选择磁盘最新版。
+
+当前保留版本：
+
+- `1.0.0–1.0.2`：历史文本工作流版本。
+- `1.0.3`：媒体节点进入发布前链路，只为 `image` 场景生成配图。
+- `1.0.4`：当前最新磁盘包；至少生成 3 个场景，场景数和正文长度不设上限。媒体开启时仅用场景正文逐场景尝试文生图，不读取用户照片；预算耗尽、媒体关闭或单图失败时降级为文字卡。
+
+磁盘上存在 `1.0.4` 不代表目标环境已经注册。使用下面的命令确认并注册：
+
+```bash
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4
+```
+
+## 开发与验证
+
+常用最小流程：
+
+```bash
+# 只跑直接相关测试
+poetry run pytest -q tests/test_runtime_capabilities.py
+
+# 全量代码门禁
+poetry run pytest -q
+poetry run ruff check .
+poetry run mypy app
+poetry run alembic heads
+git diff --check
+```
+
+当前 Alembic 预期只有 `20260820_0900 (head)`。真实 PostgreSQL/Redis/Worker/Reconciler 验收使用：
 
 ```bash
 ./agent-runtime.sh verify
 ```
 
-该命令自动生成临时测试密码、启动 Docker PostgreSQL/Redis、运行进程级验收，然后在成功或失败后执行 `down -v`。密码只存在子进程环境中。
+修改代码前先确定它属于公共 Runtime 还是保留的业务迁移证据。文档 checkbox 只有在代码、测试、迁移或可复现命令提供证据后才能更新。完整验证矩阵见 [VERIFICATION.md](VERIFICATION.md)。
 
-生产环境不使用 `configure`。请在部署平台或 secret manager 中注入配置，然后执行：
+## 历史与兼容边界
 
-```bash
-./agent-runtime.sh doctor production
-./agent-runtime.sh prepare production
-./agent-runtime.sh start production
-```
+仓库从情侣日记后端模板演进而来，因此仍包含 `demo_*`、`diary_*`、memory 业务模型/服务和旧管理脚本。它们当前用于兼容、迁移证据或回归测试：
 
-单机部署可以使用 `start production` 前台托管全部进程。容器/Kubernetes 环境应分别部署 API、Worker、Reconciler 和周期 launcher，并为每个进程注入同一套受控配置。
+- 不把 `demo_api.py`、`diary_api.py` 当成新增公共 Runtime 能力的样板。
+- 不用 `create_database.py`、`init_database.py`、`manage_db reset` 或 `create_all()` 代替 `agent-runtime.sh prepare` 与 Alembic。
+- 不在 Runtime 中继续建设用户侧回忆录业务事实；目标归属是 `couple-diary-b`。
+- 不为了目录观感删除历史模型、迁移或测试；清理必须等待跨仓迁移、生产数据盘点和回滚方案完成。
 
-启动后检查：
-
-```bash
-curl http://127.0.0.1:8010/healthz
-curl http://127.0.0.1:8010/readyz
-curl http://127.0.0.1:8010/api/v1/runtime/health/live
-curl http://127.0.0.1:8010/api/v1/runtime/health/ready
-```
-
-预期四个请求均返回 HTTP 200；Runtime readiness 中 `database/trusted_clients/audit_sink/callback_dispatcher` 应为可用状态，`draining=false`。响应不应包含数据库连接串、URL 配置或密钥。
-
-数据库建库、模型路由、真实 harness 和手工验收流程请阅读 [AgentRuntime 验证流程](VERIFICATION.md)；敏感与条件环境变量请阅读 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。
-
-## 开发与协作约定
-
-这一章是给人工开发者和 LLM 都看的核心约束，建议在改代码前先读完。
-
-### 统一响应格式
-
-当前项目约定所有 `/api/v1/...` 接口都返回统一响应结构：
-
-```json
-{
-  "platform": "DEMO",
-  "api": "api/v1/demo/hot-topics",
-  "data": {},
-  "ret": ["SUCCESS::请求成功"],
-  "v": 1
-}
-```
-
-- `platform`：根据接口路径自动识别，例如 `/api/v1/demo/...` 会自动识别为 `DEMO`
-- `api`：接口完整路径，方便前端、日志系统和排错统一定位
-- `data`：业务数据主体
-- `ret`：结果描述数组，成功以 `SUCCESS::` 开头，失败以 `ERROR::` 开头
-- `v`：接口响应版本号，当前统一由后端配置生成
-
-请求参数校验失败、业务异常、响应模型异常，也会尽量返回同一套结构，方便前端统一处理。
-
-### 命名约束
-
-为了避免后续 LLM 或新同事在维护时误判代码性质，项目约定如下：
-
-- `PROJECT_NAME`、`PROJECT_DESCRIPTION`、README 标题、OpenAPI 标题：统一使用整个项目级命名，例如 `Com Agent Runtime Backend`
-- `demo_api`：保留为“示例规范模块”，并且对外接口统一归属到 `demo`
-- 如果未来新增新的业务域，例如 `diary`、`auth`、`feed`，继续按“项目名通用、模块名准确”的原则扩展
-
-换句话说：
-
-- 可以改项目标题、文档标题、服务描述
-- 新功能优先参考 `demo_api.py` 的组织方式
-- 如果是示例、教学、联调用接口，优先归到 `/api/v1/demo/...`
-
-### 接口开发约束
-
-- 成功响应必须在“路由层”显式返回标准结构
-- 推荐统一使用 `app/core/api_response.py` 中的 `build_api_response_from_request()`
-- 不要再用中间件对普通业务响应做“事后补齐”或“自动包装”
-- 如果新增接口，优先让路由函数直接 `return build_api_response_from_request(...)`
-- 如果是错误响应，优先抛出 `HTTPException` 或交给现有异常处理器统一格式化
-
-推荐写法示例：
-
-```python
-from fastapi import APIRouter, Request
-
-from app.core.api_response import build_api_response_from_request
-from app.schemas.common_data import ApiResponseData
-
-router = APIRouter()
-
-
-@router.get("/demo", response_model=ApiResponseData)
-async def demo(request: Request):
-    result = {"hello": "world"}
-    return build_api_response_from_request(
-        request,
-        data=result,
-        ret=["SUCCESS::获取示例数据成功"],
-    )
-```
-
-不推荐的写法：
-
-- 路由直接返回裸 `dict`，指望别的中间件自动补 `platform/api/v`
-- 在服务层直接拼整套 HTTP 响应格式
-- 在多个接口里复制粘贴一套手写响应结构，导致字段慢慢不一致
-
-### 错误返回自检接口
-
-如果你想快速验证错误返回格式，可以访问：
-
-```bash
-GET /api/v1/demo/error-demo
-```
-
-它会主动抛出一个 `418` 错误，并返回统一错误结构，适合前端联调和 LLM 开发时自检。
-
-### 示例模块与历史模块
-
-当前仓库里最值得参考的示例代码是：
-
-- `app/api/endpoints/demo_api.py`
-- `app/services/demo_service.py`
-- `app/api/endpoints/diary_api.py`
-- `app/services/diary_service.py`
-
-- `demo_*` 这组文件主要用于演示推荐的接口结构、日志写法、缓存装饰器使用方式和统一错误处理方式。
-- `diary_*` 这组文件则是当前模板工程里的“正式业务域最小骨架”，用于告诉后续开发者和 LLM：真实业务模块应该怎样独立落目录、独立注册路由、独立组织 service 与 schema。
-- `demo_*` 对外统一归在 `/api/v1/demo/...`，避免和正式业务域混淆。
-- `diary_*` 对外统一归在 `/api/v1/diary/...`，作为正式业务模块样板。
-
-### 如何基于模板新增正式业务模块
-
-如果你后面要从这个模板继续开发正式业务模块，推荐按下面顺序做，而不是直接在 `demo_api.py` 里不断追加真实业务逻辑。
-
-推荐步骤：
-
-1. 先确定业务域名称
-   例如：`diary`、`auth`、`feed`
-2. 新增路由文件
-   例如：`app/api/endpoints/diary_api.py`
-3. 新增服务层文件
-   例如：`app/services/diary_service.py`
-4. 如果需要请求/响应模型，再新增 schema 文件
-   例如：`app/schemas/diary.py`
-5. 在 `app/api/api.py` 里统一注册新路由
-   例如挂到 `/api/v1/diary/...`
-6. 路由层继续显式返回 `build_api_response_from_request(...)`
-7. 如果这个业务域需要独立平台标识，再去 `app/core/api_response.py` 的 `detect_platform_from_path()` 里补平台识别规则
-
-推荐目录落点示例：
-
-```text
-app/
-├── api/
-│   └── endpoints/
-│       ├── demo_api.py
-│       └── diary_api.py
-├── services/
-│   ├── demo_service.py
-│   └── diary_service.py
-└── schemas/
-    ├── common_data.py
-    └── diary.py
-```
-
-推荐开发原则：
-
-- `demo_api.py / demo_service.py` 继续保留为示例规范，不要把正式业务长期混写进去
-- 正式业务模块优先按“一个业务域，一套路由层 + 服务层 + schema”的方式扩展
-- 统一响应结构继续由路由层调用 `build_api_response_from_request()` 构造
-- 错误处理优先继续复用现有异常处理器，不要每个业务模块自己拼错误响应
-
-如果你是让 LLM 来新增模块，建议直接给它下面这类指令：
-
-```text
-请参考 demo_api.py / demo_service.py 的结构，
-新增一个 diary 业务模块，
-路由挂载到 /api/v1/diary，
-并继续使用 build_api_response_from_request() 返回统一结构。
-```
-
-## 开发工具链
-
-为了方便个人开发、后续团队协作，以及 LLM 按统一规范接手，本项目推荐使用下面这套开发工具链：
-
-- `pytest`：当前基础回归测试的主要执行入口
-- `pytest-asyncio`：后续扩展异步测试时可直接复用
-- `ruff`：统一静态检查与格式化
-- `pre-commit`：在提交前自动执行基础检查
-- `GitHub Actions`：在远端自动执行基础 CI 校验
-
-如果你刚拉下最新代码，推荐执行：
-
-```bash
-poetry install
-poetry run pre-commit install
-```
-
-如果你是在受限环境、沙箱环境，或者不希望污染全局缓存目录，也可以这样运行：
-
-```bash
-PRE_COMMIT_HOME=.pre-commit-cache poetry run pre-commit run --all-files
-```
-
-第一次执行 `pre-commit` 时需要联网下载 hook 依赖；如果当前机器不能访问 GitHub，这一步会失败，这属于环境限制，不是项目代码本身报错。
-
-常用命令：
-
-```bash
-# 运行全部测试
-poetry run pytest
-
-# 只跑单个测试文件
-poetry run pytest tests/test_api_responses.py
-
-# 执行静态检查
-poetry run ruff check .
-
-# 自动格式化
-poetry run ruff format .
-
-# 手动执行 pre-commit
-poetry run pre-commit run --all-files
-```
-
-### 本地检查 vs 远端 CI
-
-为了让这个项目既适合个人高效开发，也适合后续团队协作和 LLM 接入，可以把质量校验理解成两层：
-
-#### 本地检查
-
-本地检查主要解决“你在提交前，自己先快速发现问题”：
-
-- `pre-commit`：适合拦截格式、尾部空格、基础 lint 这类低成本问题
-- `ruff check`：适合做静态检查
-- `pytest`：适合在本机先确认核心链路没有被改坏
-
-本地检查的特点是：
-
-- 反馈快
-- 适合边改边跑
-- 适合个人开发阶段快速自检
-
-#### 远端 CI
-
-远端 CI 主要解决“代码推上去之后，仓库还能不能稳定通过统一校验”。
-
-- `.github/workflows/backend-com-agent-runtime-b-ci.yml` 是当前后端模板工程的 GitHub Actions 持续集成配置文件
-- `backend/com-agent-runtime-b/.github/workflows/backend-com-agent-runtime-b-ci.yml` 是给“后端工程单独上传到 GitHub 作为模板仓库”时使用的同等 CI 模板
-- 当 `backend/com-agent-runtime-b/` 下的代码，或者这个 workflow 文件本身发生 `push` / `pull_request` 变更时，它会自动触发
-- 它会在 GitHub 提供的 Linux 环境里执行统一检查，避免不同人本地环境差异导致的误判
-
-它当前主要负责四件事：
-
-- 安装 Python `3.13`
-- 安装 Poetry 和项目依赖
-- 执行 `poetry run ruff check app tests`
-- 执行 `poetry run pytest`
-
-它的核心价值是：
-
-- 避免“我本地能跑，推上去就坏了”
-- 让团队成员和 LLM 改代码后，都有一套统一的远端兜底校验
-- 让模板工程具备最基础的持续集成能力
-
-两份 workflow 的分工如下：
-
-- 仓库根目录 `.github/workflows/backend-com-agent-runtime-b-ci.yml`
-  用于当前这个 monorepo，只在 `backend/com-agent-runtime-b/**` 发生变更时触发
-- 子工程目录 `backend/com-agent-runtime-b/.github/workflows/backend-com-agent-runtime-b-ci.yml`
-  用于你后续把这个后端工程单独上传到 GitHub 后直接复用，不再依赖 monorepo 的路径前缀或工作目录
-
-#### 推荐协作方式
-
-推荐把这两层配合起来使用：
-
-1. 本地改代码时，优先跑 `pre-commit`、`ruff`、`pytest`
-2. 提交代码后，让 `backend-com-agent-runtime-b-ci.yml` 再做一次远端自动校验
-3. 如果远端 CI 失败，以 CI 结果为准继续修正
-
-### 当前测试覆盖
-
-当前仓库已经补了几组基础回归测试，主要覆盖这些高价值链路：
-
-- `tests/test_config.py`：环境别名归一化、`.env` 文件映射、本地覆盖文件顺序、占位账号密码识别、配置分组视图稳定性
-- `tests/test_sqlalchemy_db.py`：数据库依赖生成器、数据库连接初始化时动态读取最新配置
-- `tests/test_alembic_metadata.py`：Alembic 是否能正确发现模型元数据
-- `tests/test_api_responses.py`：统一成功响应、请求参数校验失败、业务异常、响应模型校验失败
-- `tests/test_logging_uru.py`：日志级别、`diagnose` 开关、日志文件路径规则
-- `tests/test_set_env.py`：环境脚本命令分发、`bootstrap` 迁移失败回退行为
-- `tests/test_main.py`：主应用 `healthz / readyz` 基础探针接口
-
-推荐在提交前至少执行：
-
-```bash
-poetry run ruff check app tests
-poetry run pytest
-```
-
-### 仓库清洁约束
-
-为了降低协作噪音，下面这些文件不应该进入版本库：
-
-- `__pycache__/`
-- `*.pyc`
-- `.DS_Store`
-- 本地日志文件
-- 本地 `.env.local` / `*.env.local`
-- 本地虚拟环境目录，例如 `venv/`、`.venv/`
-- 工具缓存目录，例如 `.ruff_cache/`、`.pytest_cache/`、`.pre-commit-cache/`
-
-如果你发现这些文件重新出现在 `git status` 里，优先判断是不是误提交的缓存产物，而不是业务代码变更。这条规则对人工开发和 LLM 开发都适用。
-
-## 环境配置
-
-### 环境文件规则
-
-本项目支持多环境配置，包括：
-
-- `.env.development`：开发环境配置
-- `.env.test`：测试环境配置
-- `.env.production`：生产环境配置
-
-应用启动时会读取 `ENVIRONMENT` 环境变量，并按下面的规则加载对应文件：
-
-- `development` -> `.env.development`
-- `test` -> `.env.test`
-- `production` -> `.env.production`
-
-`run.sh` 和 `set_env.py` 只传递 `ENVIRONMENT`。`agent-runtime.sh configure development|test` 会新建或在显式 `--force` 时替换对应的 `.env.<environment>.local`，不修改可跟踪的 `.env.development/.env.test/.env.production`。
-
-同时还支持两层本地覆盖文件，方便把真实密码留在本机，不提交到仓库：
-
-- `.env.development.local` / `.env.test.local` / `.env.production.local`
-- `.env.local`
-
-推荐做法：
-
-- 把仓库里的 `.env.development / .env.test / .env.production` 当作团队共享模板
-- 开发/测试环境优先用 `./agent-runtime.sh configure <env>` 生成本机 `.local` 文件
-- 生产环境从 secret manager 或部署平台注入，不由脚本写入工作区
-- `.local` 文件已经加入忽略规则，不会进入 git
-- `.local` 文件权限应为 `0600`；`doctor` 检测到 group/other 可读时会拒绝启动
-- 跨域白名单通过 `BACKEND_CORS_ORIGINS` 配置，不再写死在代码里
-- 请求链路日志也支持基础配置，例如 `REQUEST_ID_HEADER` 和 `SLOW_REQUEST_THRESHOLD_MS`
-
-编辑相应的环境配置文件，设置数据库连接信息和其他参数：
-
-```env
-# 数据库配置
-DB_DRIVER=mysql+mysqlconnector
-DB_USER=root
-DB_PASSWORD=password
-DB_HOST=localhost
-DB_PORT=3306
-DB_AUTO_CREATE=true
-DB_NAME=couple_diary_agent_runtime_dev
-DB_CHARSET=utf8mb4
-
-# API配置
-API_PREFIX=/api/v1
-DEBUG=True
-ENVIRONMENT=development
-
-# CORS 配置（支持逗号分隔，或 JSON 数组字符串）
-BACKEND_CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-
-# 请求日志配置
-REQUEST_ID_HEADER=X-Request-ID
-SLOW_REQUEST_THRESHOLD_MS=800
-```
-
-### 配置分组约定
-
-为了兼顾“老代码稳定”和“新代码更容易理解”，当前项目的配置读取采用两层设计：
-
-- 扁平字段：例如 `PROJECT_NAME`、`DB_HOST`、`REQUEST_ID_HEADER`
-- 分组视图：例如 `settings.application`、`settings.server`、`settings.database`
-
-现在的约定是：
-
-- 老代码可以继续使用原来的扁平字段，不强制一次性重构
-- 新代码优先使用分组视图，表达“当前逻辑依赖的是哪一类配置”
-
-当前分组含义如下：
-
-- `settings.application`：应用身份信息，例如项目名、描述、版本、接口前缀、响应版本、环境
-- `settings.server`：服务监听信息，例如 `host`、`port`、`reload`
-- `settings.cors`：跨域配置，例如 `allow_origins`
-- `settings.logging`：日志系统基础配置，例如 `logging_level`
-- `settings.request_logging`：请求链路日志配置，例如 `request_id_header`、`slow_request_threshold_ms`
-- `settings.database`：数据库运行时配置，例如驱动、主机、库名、连接池参数
-
-推荐示例：
-
-```python
-from app.core.config import settings
-
-application_config = settings.application
-database_config = settings.database
-
-print(application_config.project_name)
-print(database_config.database)
-```
-
-不推荐在新增代码里继续到处散落读取一长串 `settings.DB_*`、`settings.PROJECT_*`、`settings.REQUEST_*`，这样后面很难快速看出某段逻辑到底依赖了哪类配置。
-
-如果你不使用一键脚本，也可以手工新建：
-
-```bash
-.env.development.local
-```
-
-示例：
-
-```env
-DB_USER=root
-DB_PASSWORD=你的真实密码
-MYSQL_ROOT_PASSWORD=你的真实密码
-MYSQL_USER=你的真实用户名
-MYSQL_PASSWORD=你的真实密码
-```
-
-如果你没有配置这些本地覆盖文件，应用启动时会直接提示“当前数据库账号或密码仍然是模板占位值”。
-
-## 数据库操作
-
-对 AgentRuntime 只使用 `agent-runtime.sh` 作为建库和迁移入口。它在连接前强制环境与专库名映射，会拒绝 `couple_diary_dev/test/prod` 三个正在运行的业务库。
-
-```bash
-# 检查配置，不连接和修改数据库
-./agent-runtime.sh doctor development
-
-# 库不存在时按 DB_AUTO_CREATE 建库，然后迁移到 head
-./agent-runtime.sh prepare development
-
-# 日常启动；已有库和表时只执行幂等迁移
-./agent-runtime.sh start development
-```
-
-预期首次缺库输出 `status=created`，后续输出 `status=existing`，Alembic 只有 `20260729_1000 (head)`。development/test 默认允许创建固定专库；production 默认 `DB_AUTO_CREATE=false`，应由 DBA 预建库并分配最小权限。
-
-`app.scripts.create_database` / `set_env ... bootstrap` / `manage_db reset` 是原模板的通用管理工具，不提供 AgentRuntime 专库名保护，不得用于本项目的 Runtime 启动、建库或重置。不使用 `create_all()` 作为迁移失败的自动回退，也不自动 `stamp`。详细的库名、权限与首次 bootstrap 见 [AgentRuntime 环境配置说明](ENV_CONFIG.md#3-agentruntime-专用数据库)。
-
-### 常用数据库命令
-
-```bash
-# 开发环境首次初始化
-./agent-runtime.sh prepare development
-
-# 测试环境首次初始化
-./agent-runtime.sh prepare test
-
-# 生产环境：DBA 预建专库并完成 doctor 后迁移
-./agent-runtime.sh prepare production
-
-# 查看当前迁移版本
-poetry run python -m app.scripts.manage_db current
-
-# 查看迁移历史
-poetry run python -m app.scripts.manage_db history
-
-```
-
-### 初始化数据库表
-
-Runtime 表只由受保护的 `prepare` 通过 Alembic 创建：
-
-```bash
-./agent-runtime.sh prepare development
-```
-
-禁止使用 `init_database.py` / `create_all()` 绕过迁移谱系，禁止在三个业务库上运行 Alembic。需要新建迁移时，先执行 `doctor` 并在隔离的 development Runtime 专库生成、审阅和测试。
-
-### 数据库字段更新
-
-当模型定义发生变化时，例如添加、修改或删除字段，使用 Alembic 进行数据库迁移：
-
-```bash
-# 生成迁移脚本
-poetry run alembic revision --autogenerate -m "更新字段描述"
-
-# 应用迁移
-poetry run alembic upgrade head
-
-# 回滚迁移
-poetry run alembic downgrade -1
-```
-
-或者继续使用环境脚本：
-
-```bash
-# 创建迁移脚本
-poetry run python -m app.scripts.set_env development migrate revision --autogenerate -m "pro_table"
-
-# 应用迁移
-poetry run python -m app.scripts.set_env development upgrade
-
-# 回滚迁移
-poetry run python -m app.scripts.set_env development downgrade
-```
-
-## 运行应用
-
-需要运行完整 AgentRuntime 时，使用：
-
-```bash
-./agent-runtime.sh start development
-# 或
-./agent-runtime.sh start test
-```
-
-该入口会先执行配置检查和 Alembic 迁移，再启动 API、周期 launcher、Worker 和 Reconciler。下面三种方式只启动 FastAPI 进程，适合接口调试，不会消费 Runtime outbox。
-
-### 方式一：使用 run.sh 脚本
-
-```bash
-./run.sh development
-```
-
-该脚本会把 `ENVIRONMENT` 传给应用，再通过 Poetry 启动服务。
-
-如果当前 AgentRuntime 专库还没有创建，首次运行请先执行安全准备入口：
-
-```bash
-./agent-runtime.sh prepare development
-```
-
-脚本内容如下：
-
-```bash
-#!/bin/bash
-set -e
-
-APP_ENV="${1:-development}"
-echo "使用环境: ${APP_ENV}"
-echo "如果是首次运行，请先执行: ./agent-runtime.sh prepare ${APP_ENV}"
-echo "如果看到 your_mysql_user / your_mysql_password 相关报错，请检查 .env.${APP_ENV}.local 或 .env.local"
-ENVIRONMENT="$APP_ENV" poetry run python run_app.py
-```
-
-### 方式二：直接运行 Python 脚本
-
-```bash
-ENVIRONMENT=development poetry run python run_app.py
-```
-
-### 方式三：使用环境脚本启动
-
-```bash
-poetry run python -m app.scripts.set_env development runserver
-```
-
-`run_app.py` 会启动 Uvicorn 服务并加载 `app.main:app`。FastAPI 会在 `lifespan` 阶段初始化日志和数据库连接。
-
-按当前 AgentRuntime 本地默认配置，应用将在 http://localhost:8010 运行，API 文档可在 http://localhost:8010/docs 访问。如果在 `.env.<environment>.local` 中修改了 `PORT`，以该配置为准。
-
-基础健康检查接口：
-
-```http
-GET /healthz
-```
-
-示例返回：
-
-```json
-{
-  "status": "ok",
-  "service": "Couple Diary Backend",
-  "environment": "development",
-  "version": "0.1.0"
-}
-```
-
-依赖就绪检查接口：
-
-```http
-GET /readyz
-```
-
-示例返回：
-
-```json
-{
-  "status": "ready",
-  "service": "Couple Diary Backend",
-  "environment": "development",
-  "version": "0.1.0",
-  "checks": [
-    {
-      "dependency": "database",
-      "status": "ready"
-    }
-  ]
-}
-```
-
-### 推荐使用顺序
-
-首次启动某个环境：
-
-1. `poetry install`
-2. `./agent-runtime.sh doctor <env>`
-3. `./agent-runtime.sh start <env>`
-
-已经初始化过数据库后的日常启动：
-
-1. `./agent-runtime.sh start development`
-2. 仅调试 FastAPI 时才使用 `./run.sh development`
-
-## 日志系统
-
-当前日志系统已经做了两点工程化约束：
-
-- DEBUG 环境下会开启更强的诊断信息，方便本地调试
-- 非 DEBUG 环境默认关闭 `diagnose`，避免异常日志把过多局部变量和上下文暴露出来
-
-当前请求链路日志还额外做了三件事：
-
-- 每个请求都会分配或透传一个 `request_id`
-- 响应头会回写 `X-Request-ID`（可通过 `REQUEST_ID_HEADER` 配置修改）
-- 超过 `SLOW_REQUEST_THRESHOLD_MS` 的请求会单独打慢请求告警日志
-
-日志文件默认写入：
-
-- `logs/app_run/`：普通运行日志
-- `logs/app_error/`：错误日志
-
-你在本地排查接口时，推荐优先看这些信息是否能串起来：
-
-- 请求入口日志：方法、路径、客户端 IP、`request_id`
-- 请求完成日志：状态码、耗时、`request_id`
-- 异常日志：异常类型、路径、`request_id`
-- 接口响应头：`X-Request-ID`
-
-如果后续要继续扩展日志能力，优先修改：
-
-- `app/core/logging_uru.py`
-- `app/middleware/request_logging.py`
-- `app/middleware/exception_handlers.py`
-
-不要在多个业务模块里各自重新初始化一套日志系统。
-
-## API 接口
-
-### 示例接口：获取热门话题
-
-```http
-GET /api/v1/demo/hot-topics?count=10
-```
-
-这个接口来自 `demo_api.py`，主要用于演示当前项目推荐的接口组织方式、统一响应结构、缓存装饰器使用方式和日志打印方式。
-现在文件名、服务层命名和对外路由都已经统一归到 `demo` 语义下，方便区分“示例接口”和“正式业务接口”。
-
-示例成功响应：
-
-```json
-{
-  "platform": "DEMO",
-  "api": "api/v1/demo/hot-topics",
-  "data": {
-    "topics": [
-      {
-        "id": 1,
-        "title": "热门话题 1",
-        "views": 1000
-      }
-    ],
-    "timestamp": 0.0
-  },
-  "ret": [
-    "SUCCESS::获取热门话题成功"
-  ],
-  "v": 1
-}
-```
-
-### 正式业务模块骨架接口
-
-```http
-GET /api/v1/diary/ping
-```
-
-这个接口来自 `diary_api.py`，它的目标不是返回真实日记数据，而是提供一个最小正式业务域样板，告诉后续开发者：
-
-- 正式业务模块应该独立于 `demo` 模块存在
-- 正式业务模块也继续通过路由层显式返回统一响应
-- 正式业务逻辑仍然进入 `service` 层，而不是直接堆在接口函数里
-
-示例成功响应：
-
-```json
-{
-  "platform": "DIARY",
-  "api": "api/v1/diary/ping",
-  "data": {
-    "module": "diary",
-    "status": "skeleton_ready",
-    "message": "这是正式业务模块样板，可在此基础上继续扩展真实日记能力"
-  },
-  "ret": [
-    "SUCCESS::获取 diary 模块骨架信息成功"
-  ],
-  "v": 1
-}
-```
-
-### 基础健康检查接口
-
-```http
-GET /healthz
-```
-
-这个接口不走 `/api/v1/...` 统一业务响应结构，而是作为基础设施探针使用。它的职责是告诉你：
-
-- 服务进程是否已经启动
-- 当前运行的是哪个环境
-- 当前服务版本是什么
-- 它适合给容器探针、反向代理、部署平台做快速存活检查
-
-### 依赖就绪检查接口
-
-```http
-GET /readyz
-```
-
-这个接口和 `/healthz` 的区别是：
-
-- `/healthz` 只回答“进程是否活着”
-- `/readyz` 进一步回答“数据库等关键依赖是否已经可用”
-
-当前版本里，`/readyz` 会检查数据库依赖是否可正常执行一次轻量探测；如果依赖未就绪，会返回 `503`。
-
-## 项目结构
-
-```text
-.
-├── alembic/                         # 数据库迁移相关目录
-│   ├── env.py                       # Alembic 环境配置与 metadata 入口
-│   ├── script.py.mako               # 迁移脚本模板
-│   └── versions/                    # 具体迁移版本文件
-├── app/                             # 应用主代码目录
-│   ├── api/                         # API 路由注册与 endpoints
-│   ├── config/                      # 数据库等基础配置封装
-│   ├── core/                        # 核心能力：统一响应、全局配置、日志
-│   ├── db/                          # SQLAlchemy 连接、Base、metadata
-│   ├── decorators/                  # 缓存等通用装饰器
-│   ├── middleware/                  # 异常处理等中间层逻辑
-│   ├── models/                      # 数据库模型定义
-│   ├── schemas/                     # Pydantic 请求/响应模型
-│   ├── scripts/                     # 环境切换、建库、迁移、初始化脚本
-│   ├── services/                    # 业务逻辑服务层
-│   └── main.py                      # FastAPI 应用入口
-├── logs/                            # 运行日志与错误日志目录
-├── tests/                           # 基础回归测试
-├── .env.development                 # 开发环境基础模板
-├── .env.test                        # 测试环境基础模板
-├── .env.production                  # 生产环境基础模板
-├── .env.example                     # 环境变量示例文件
-├── .env.local                       # 通用本地覆盖文件（可选，本地使用，不提交）
-├── .env.development.local           # 开发环境本地覆盖文件（可选，本地使用，不提交）
-├── .env.test.local                  # 测试环境本地覆盖文件（可选，本地使用，不提交）
-├── .env.production.local            # 生产环境本地覆盖文件（可选，本地使用，不提交）
-├── .github/
-│   └── workflows/
-│       └── backend-com-agent-runtime-b-ci.yml  # 后端工程独立发布到 GitHub 时使用的 CI 模板
-├── .gitignore                       # 项目级忽略规则，防止缓存、日志、虚拟环境误提交
-├── alembic.ini                      # Alembic 主配置文件
-├── pyproject.toml                   # Poetry 项目配置与工具链配置
-├── poetry.lock                      # Poetry 锁定依赖
-├── poetry.toml                      # Poetry 本地行为配置
-├── .pre-commit-config.yaml          # pre-commit 钩子配置
-├── requirements.txt                 # 已废弃，保留作历史参考
-├── run.sh                           # 推荐启动脚本
-├── run_app.py                       # 应用启动脚本
-└── project_structure.sh             # 输出当前模板推荐结构说明的辅助脚本
-```
-
-### 项目结构说明
-
-- `app/core/` 是后端工程约束最集中的目录，后续如果要改统一响应、日志策略、环境配置，优先看这里。
-- `app/core/api_response.py` 负责统一成功/失败响应的构造；改接口返回规范时，优先看这里。
-- `app/core/config.py` 负责环境识别、`.env` 加载顺序、全局配置读取；改环境切换行为时，优先看这里。
-- `app/core/config.py` 现在同时保留“扁平字段 + 分组视图”两套访问方式；新增代码优先使用 `settings.application / server / cors / logging / request_logging / database`。
-- `app/core/logging_uru.py` 负责日志初始化、日志级别策略、日志文件路径规则；改日志行为时，优先看这里。
-- `app/scripts/` 是数据库和环境切换的标准入口，个人开发、团队协作、LLM 自动化都尽量通过这里操作，而不是手敲零散命令。
-- `app/scripts/set_env.py` 是最常用的开发脚本入口，负责把当前环境显式传给子命令。
-- `app/scripts/manage_db.py` 负责数据库迁移、重置、历史查看等数据库管理命令。
-- `app/api/endpoints/demo_api.py` 和 `app/services/demo_service.py` 是当前推荐参考的示例模块。
-- `app/api/endpoints/diary_api.py`、`app/services/diary_service.py`、`app/schemas/diary.py` 是当前正式业务模块骨架样板。
-- `.env.*` 文件是团队共享模板，`.env*.local` 是你本机私有覆盖，不应该提交到仓库。
-- `requirements.txt` 现在只保留作历史参考，新的依赖管理、开发依赖、工具链配置都以 `pyproject.toml` 为准。
-- `tests/` 目前以“关键链路回归测试”为主，后续继续扩展时，建议优先补接口、脚本、异常分支测试。
-
-## 集成框架
-
-本项目集成了以下框架和库：
-
-1. **FastAPI**: 现代、快速的 Web 框架，用于构建 API。它基于标准的 Python 类型提示，提供自动文档生成和高性能。
-2. **SQLAlchemy**: Python 的 SQL 工具包和 ORM 框架，提供 SQL 抽象层，使数据库操作更加简单和灵活。
-3. **Alembic**: SQLAlchemy 的数据库迁移工具，用于管理数据库模式的变更。
-4. **MySQL**: 用于数据存储的关系型数据库。
-5. **python-dotenv**: 用于从 `.env` 文件加载环境变量，方便配置管理。
-6. **pydantic-settings**: 基于 pydantic 的配置管理工具，提供类型安全的配置验证。
-7. **pydantic**: 数据验证和设置管理库，使用 Python 类型注解。
-8. **httpx**: 现代化的 HTTP 客户端，支持异步请求。
-9. **uvicorn**: 现代的 ASGI 服务器，用于运行 FastAPI 应用。
-10. **cachetools**: 缓存工具库，可减少重复计算或重复请求，提高接口响应速度。
-11. **loguru**: 现代化日志库，支持多种日志级别和格式。
-12. **click**: 命令行工具开发库，当前项目的数据库管理脚本和环境脚本会用它来组织命令入口。
-13. **pytest**: 主流 Python 测试框架，适合统一执行项目测试。
-14. **pytest-asyncio**: `pytest` 的异步测试扩展，后续编写异步接口测试和服务测试时会依赖它。
-15. **ruff**: Python 静态检查与格式化工具，用于统一代码风格、导入顺序和基础质量检查。
-16. **pre-commit**: Git 提交前检查工具，用于把 `ruff`、基础文件检查等动作串起来。
+`requirements.txt` 仅作历史参考。依赖、工具链和版本锁定以 `pyproject.toml` 与 `poetry.lock` 为准。

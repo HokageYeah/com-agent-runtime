@@ -71,14 +71,14 @@
 
 顺序原则：先共享契约，再业务后端事实源，再 Runtime connector/workflow，最后前端消费与跨仓联调。里程碑内可按子计划标明的依赖并行，但不得让前端直连 Runtime，也不得在 Runtime 新增业务事实表/API。
 
-### 3.3 计划状态基线
+### 3.3 2026-08-06 计划起点（历史基线）
 
 - **已实现：** 开发/测试环境 Runtime capabilities 安全代理；它只证明连接级合同。
 - **部分实现：** Runtime 公共 Run/Worker/Tool/callback/MemoirAgent、稳定空间/关系段、五类素材的部分模型或读取能力；均仍有总控所列的真实 connector、契约、隐私或投影缺口。
 - **未实现：** 目标业务仓中的 Archive/Snapshot/密码/Playback 正式闭环，以及回忆录正式前端页面；Runtime 同名遗留实现不得算作目标业务仓完成。
 - **待确认/上线门禁：** Runtime 遗留业务数据是否有生产记录、staging HTTPS、生产密钥轮换、合法域名、备份与回滚证据。
 
-每次执行后只在唯一总控与对应子计划更新 checkbox/执行记录，并用代码、迁移、测试和 Git 状态刷新本基线。技能地图只提供导航与稳定边界，不替代计划内的逐项验收。
+上述四项是总控建立时的起点，不能作为当前进度结论。每次执行后只在唯一总控与对应子计划更新 checkbox/执行记录，并用两仓当前代码、迁移、测试和 Git 状态重新判断“已实现/部分实现/未实现/待确认”。技能地图只提供导航与稳定边界，不替代计划内的逐项验收。
 
 ## 4. 项目技能路由
 
@@ -122,11 +122,10 @@ couple-diary-f
 
 ## 6. 当前里程碑与契约注意
 
-- 回忆录需求文档当前明确：已有改动仅是开发/测试环境的 Runtime capabilities 连接级验证；前端经 `/memory/runtime-connectivity` 调业务后端，后端代签并裁剪安全摘要。production 必须隐藏并拒绝该调试入口。
-- 该阶段不创建 AgentRun、Archive、Snapshot、Worker、Callback 或 Published Revision。以后任务必须重新审计代码和测试，不把本条作为永久进度结论。
+- 2026-08-06 时的起点只完成了开发/测试环境 Runtime capabilities 连接级验证。该结论已是历史基线，不能用来否定后续代码或宣称当前仍只有连接能力。当前里程碑必须从心约手帐唯一总控、对应子计划、两仓实现和实际验证重新得出。
 - Runtime 当前实现与测试使用 `/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs`等规范路径。较旧总控/需求中可能出现 `/api/v1/runtime-capabilities` 或不带 `/runtime` 段的示意路径；实施时以 `app/contracts/`、当前路由、contract fixture 和双方测试为准，并同步清理受影响的有效文档。
-- 第一版小程序进度以业务后端 HTTP 退避轮询为基线；Runtime 原生 SSE、TTS、封面/图片/视频媒体生成不是第一版必须闭环。
-- 正常 MemoirAgent MVP 作品为 3–8 张 Scene，单卡主体不超过 80 字，绝不发布超过 16 张的作品；媒体关闭时仍显式提交空 `media_manifest`。
+- 小程序进度仍以业务后端 HTTP 退避轮询为正确性基线；Runtime 原生 SSE、TTS、音乐和视频不是当前必须闭环。Runtime 已实现可选的发布前图片生成，但 `MEMOIR_MEDIA_ENABLED` 默认关闭，真实火山计费调用和真实 OSS 写入仍需目标环境受控联调。
+- MemoirAgent 场景数和正文长度是 AgentPackage 版本合同：`1.0.0-1.0.3` 保持 3-8 个场景且 `body` 最多 80 字；`1.0.4` 至少 3 个场景，不设场景总数和 `body` 字数上限。媒体关闭或生成失败时显式提交空或部分 `media_manifest`，以文字卡安全降级。
 
 ## 7. 联调验收最小矩阵
 

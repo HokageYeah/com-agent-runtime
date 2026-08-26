@@ -1,7 +1,7 @@
 [project]
 name = "com-agent-runtime"
 version = "0.1.0"
-description = "情侣日记后端"
+description = "独立部署的公共 Agent 执行服务"
 authors = [
     {name = "yuye",email = "18838280615@163.com"}
 ]

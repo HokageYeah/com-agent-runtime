@@ -22,12 +22,17 @@ chmod 600 .env.development.local .env.test.local .env.production.local
 | test | `./agent-runtime.sh configure test` | `8010` | 脚本自动生成三类密钥，不复用 development |
 | production | secret manager / 部署平台 | `8011` | 在受控边界生成、注入和轮换 |
 
+development 使用 Redis DB `/15`，test 使用 `/14`。当前
+`configure` 的 Redis URL 提示是通用默认 `/15`，因此执行
+`configure test` 时必须手动输入 `redis://127.0.0.1:6379/14`；
+不要让 `.env.test.local` 用 `/15` 覆盖 `.env.test` 的隔离值。
+
 `configure` 会直接把生成的 secret 写入官方 Settings 字段和 JSON 注册表。`RUNTIME_CLIENT_HMAC_SECRET` 是手工 `.env` 模板中为避免重复而使用的辅助变量，不是 `Settings` 的业务字段；业务侧 `MEMORY_RUNTIME_SECRET` 与 Runtime 出站 connector/callback 共用同一值（B9/B10 冻结对称合同）。
 
 如果必须手工生成本地密钥，可以使用：
 
 ```bash
-# 生成一个 256-bit HMAC/JWT secret；client、tool、JWT 需分别执行一次。
+# 生成一个 256-bit secret；client HMAC 与 JWT 需分别执行一次。
 openssl rand -hex 32
 
 # 生成合法 Fernet key。
@@ -330,7 +335,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 ### 9.4 回忆录媒体生成开关（M6，默认全关）
 
-以下键已进 `app/core/config.py`；`MEMOIR_MEDIA_ENABLED=False` 时媒体服务不装配，1.0.3 的图片场景自动降级为文本卡，1.0.0-1.0.2 行为零变化。
+以下键已进 `app/core/config.py`；`MEMOIR_MEDIA_ENABLED=False` 时媒体服务不装配。1.0.3 的 `image` 场景会降级为文本卡，1.0.4 的全部场景会保留为纯文字卡并剥离仅供配图使用的 `title_word`；1.0.0-1.0.2 行为不变。
 
 | 字段 | 默认 | 作用 |
 |---|---|---|
@@ -372,7 +377,12 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 - 响应自动解包 `choices[0].message.content`，其余 envelope 字段不进入 Runtime；
 - API Key 按 route_id 从 `MODEL_PROVIDER_API_KEYS_JSON` 取出注入请求头；没有对应条目的路由不发送 Authorization。
 
-当前三个环境均已配置 `deepseek-chat` 路由（endpoint 为 DeepSeek 官方 chat/completions，价格字段仅用于内部记账）。若 `MODEL_PROVIDER_API_KEYS_JSON` 中的值仍是占位符“待填入”，Provider 会返回 401，该次模型调用失败并走模板降级；替换为真实 Key 并重启 Worker 后即恢复模型增强。
+当前三个受管环境模板均是 `MODEL_ROUTES_JSON=[]` 和
+`MEMOIR_MODEL_NODE_ROUTES_JSON={}`，不会默认调用 DeepSeek 或任何
+外部 Provider。如需启用 `deepseek-chat`，必须由部署管理员显式增加
+route、三个节点映射、价格/驻留/限流字段和 `MODEL_PROVIDER_API_KEYS_JSON`
+的对应 Key，再重启 Worker。任一项缺失都应 fail-closed 或走确定性
+模板降级，不应依赖 Provider 401 才发现配置不完整。
 
 新增其他 openai_compatible 模型时，复制 DeepSeek 的 route 与节点映射，替换 route_id、model、endpoint、限流和价格，并在 `MODEL_PROVIDER_API_KEYS_JSON` 中补上对应条目，例如：
 

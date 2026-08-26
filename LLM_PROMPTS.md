@@ -1,124 +1,68 @@
-# LLM Prompts
+# AgentRuntime LLM 协作提示词
 
-这份文档用于给后续 ChatGPT / Codex / Claude 等 LLM 接手 `com-agent-runtime` 时直接复制使用。
+这份文档提供可复制的最小上下文。项目规则仍以 `AGENTS.md`、`.codex/rules/AI通用编码与协作规范.mdc`、[README.md](README.md) 和实际代码为准。
 
 ## 最短实用版
 
 ```text
-你现在在维护一个 FastAPI 后端模板工程：Couple Diary Backend。
+你正在维护独立公共执行服务 com-agent-runtime，不是情侣日记业务后端模板。
 
-请先理解这些核心约束再开始改代码：
-1. 这是“项目级后端工程”，不是单一 demo 项目。
-2. `demo_api.py / demo_service.py` 只用于示例规范，对外路由归属在 `/api/v1/demo/...`。
-3. `diary_api.py / diary_service.py / diary_entry.py` 是正式业务骨架样板，真实业务优先沿这条线扩展。
-4. 所有 `/api/v1/...` 接口必须在路由层显式返回统一结构，优先使用 `build_api_response_from_request()`。
-5. 不要依赖中间件去给普通业务响应“自动补齐” `platform / api / v`。
-6. 新增正式业务模块时，按“路由层 + 服务层 + schema + 必要模型”独立落目录，不要长期堆进 demo 模块。
-7. 新代码优先使用 `settings.application / server / cors / request_logging / database` 这套配置分组视图。
-8. 环境切换、建库、迁移、启动，优先复用 `app/scripts/set_env.py`、`app/scripts/manage_db.py`、`run.sh`，不要自己发明新入口。
-9. 提交前至少运行 `poetry run ruff check app tests` 和 `poetry run pytest`。
-10. 修改前优先阅读 README 的 `开发与协作约定`、`环境配置`、`数据库操作`、`项目结构`。
+开始修改前请遵守：
+1. Runtime 负责 AgentPackage、AgentRun、Worker、Model/Tool Gateway、Checkpoint、Artifact、callback、对账和治理。
+2. 用户、关系、Archive、Snapshot、密码、PlaybackDocument 和 published_revision 属于 couple-diary-b；Runtime 不直连业务库。
+3. 生产公共接口位于 /api/v1/runtime/*。memory/* 与 internal memory handler 是 development/test 的迁移证据，不是新业务扩展点。
+4. 公共契约以 app/contracts/、当前路由、tests/fixtures 和 contract tests 为准；旧计划中的示意路径不能覆盖实现。
+5. 写操作必须保持 HMAC、授权、幂等、lease/fencing、generation/privacy version 与安全日志边界。
+6. prompt、模型原输出、工具原始 payload、正文、凭据和私有 URL 不得进入日志、trace、callback、Artifact、测试输出或 Checkpoint（即使加密也不持久化）。
+7. AgentPackage 版本和 digest 不可变；修改 Agent 行为时发布新版本，不覆盖旧包。
+8. 建库、迁移、注册和完整启动统一使用 ./agent-runtime.sh；不得迁移 couple_diary_dev/test/prod 业务库。
+9. 先运行最窄相关测试，再按影响运行 pytest、Ruff、Mypy、Alembic single-head 与 git diff --check。
 
-如果你要新增业务模块，请优先参考：
-- `app/api/endpoints/diary_api.py`
-- `app/services/diary_service.py`
-- `app/core/api_response.py`
-- `app/core/config.py`
+优先阅读 README.md、ENV_CONFIG.md、VERIFICATION.md、头脑风暴/docs/AgentRuntime/需求设计文档.md 和契约冻结记录.md。
 ```
 
 ## 标准协作版
 
 ```text
-你现在在维护 com-agent-runtime 这个 FastAPI 后端模板工程。
+你正在维护 com-agent-runtime：一个 FastAPI + SQLAlchemy/Alembic + LangGraph/LangChain 的公共 Agent 执行服务。
 
-在开始任何改动前，请先遵守以下工程约束：
+一、事实与所有权
+- Runtime 拥有 AgentDefinition/Run/Plan/Step/ToolCall/ModelUsage/Checkpoint/Artifact/Audit/Outbox。
+- couple-diary-b 拥有用户、关系、权限、Archive、Snapshot、密码、PlaybackDocument 和 published_revision。
+- couple-diary-f 只调用业务后端，不直连 Runtime。
+- Runtime 只经已授权 Business Tool/callback 与业务后端交互，不连接业务数据库。
 
-一、项目定位
-- 项目名是 `Couple Diary Backend`，这是整个后端工程名，不是某一个子模块名。
-- 当前仓库里同时存在“项目级基础设施”和“示例规范模块”，不要混淆。
-- `demo_*` 代码只用于保留示例规范。
-- `diary_*` 代码是当前正式业务骨架样板。
+二、代码边界
+- app/contracts：版本化 API/Event/Tool/Artifact wire contract。
+- app/api/endpoints：公共 Runtime API 与环境路由门禁。
+- app/runtime：Planner、Executor、Model/Tool Gateway、Checkpoint、Guardrail 等执行内核。
+- app/services + app/models/runtime.py：事务、幂等、lease/fencing、outbox、callback、reconciliation 和治理。
+- app/agents/<agent>/<version>：不可变 AgentPackage。
+- demo/diary/memory 业务代码是历史兼容或迁移证据，不是新增公共能力的默认落点。
 
-二、模块边界
-- `app/api/endpoints/demo_api.py`、`app/services/demo_service.py`：示例规范模块
-- `app/api/endpoints/diary_api.py`、`app/services/diary_service.py`、`app/schemas/diary.py`：正式业务骨架
-- `app/models/diary_entry.py`：当前模板默认的正式业务持久化模型样板
-- 不要把真实长期业务持续追加到 `demo_*` 里
-- 如果新增正式业务域，继续按独立目录和独立 router 注册方式扩展
+三、运行与数据安全
+- create/start 使用 held 握手；HTTP 请求不执行长 workflow。
+- 数据库是 run、outbox、lease、fencing、checkpoint 和幂等的权威来源；Redis 只做共享流控或通知加速。
+- 所有副作用使用稳定逻辑幂等键，attempt 只用于审计。
+- 模型、工具、callback 和恢复前复核 authorization/privacy/lease/fencing/generation 边界。
+- 不记录 prompt、模型原输出、工具原载荷、业务正文、凭据、私有 endpoint 或签名 URL。
 
-三、接口返回规范
-- 所有 `/api/v1/...` 接口都必须返回统一结构：
-  - `platform`
-  - `api`
-  - `data`
-  - `ret`
-  - `v`
-- 成功响应必须在路由层显式构造
-- 推荐统一使用 `app/core/api_response.py` 中的 `build_api_response_from_request()`
-- 不要让服务层直接拼整套 HTTP 响应格式
-- 不要依赖中间件为普通成功响应做自动包装
+四、契约与兼容
+- 精确契约先查 app/contracts、tests/fixtures、provider/consumer contract tests 和当前路由。
+- Runtime 公共路径为 /api/v1/runtime/health/*、/capabilities 和 /agent-runs*。
+- 破坏性契约变更提升 major；同 major 只做兼容演进。
+- AgentPackage 调用方必须显式指定版本，不能自动选择磁盘最新版。
 
-四、错误处理规范
-- 优先抛出 `HTTPException` 或复用现有异常处理器
-- 当前项目已经有统一异常格式化逻辑
-- 调试错误返回格式时，可参考 `/api/v1/demo/error-demo`
+五、操作入口
+- 配置检查：./agent-runtime.sh doctor <environment>
+- 安全建库与迁移：./agent-runtime.sh prepare <environment>
+- 注册 Package：./agent-runtime.sh register <environment> --agent-id <id> --version <version>
+- 完整单机启动：./agent-runtime.sh start <environment>
+- 隔离真实 harness：./agent-runtime.sh verify
+- run.sh/run_app.py 只启动 API，不消费 Runtime outbox。
 
-五、配置与环境规范
-- 配置入口在 `app/core/config.py`
-- 新代码优先使用配置分组视图：
-  - `settings.application`
-  - `settings.server`
-  - `settings.cors`
-  - `settings.request_logging`
-  - `settings.database`
-- 环境文件按 `development / test / production` 分开管理
-- 本地真实密码优先放在 `.env.development.local`、`.env.test.local`、`.env.local`
-
-六、数据库与脚本规范
-- 环境切换命令入口：`app/scripts/set_env.py`
-- 数据库管理入口：`app/scripts/manage_db.py`
-- 推荐启动入口：`./run.sh <env>`
-- 首次初始化某个环境时，优先使用：
-  - `poetry run python -m app.scripts.set_env development bootstrap`
-- 如果是数据库结构演进，优先走 Alembic，而不是只用 `create_all()`
-
-七、日志与排障规范
-- 请求日志与 `request_id` 入口：`app/middleware/request_logging.py`
-- 统一异常格式：`app/middleware/exception_handlers.py`
-- 基础健康检查：`/healthz`
-- 依赖就绪检查：`/readyz`
-
-八、开发前推荐先读
-- `README.md` 的以下章节：
-  - `开发与协作约定`
-  - `开发工具链`
-  - `环境配置`
-  - `数据库操作`
-  - `项目结构`
-- 关键文件：
-  - `app/main.py`
-  - `app/api/api.py`
-  - `app/core/api_response.py`
-  - `app/core/config.py`
-  - `app/api/endpoints/demo_api.py`
-  - `app/api/endpoints/diary_api.py`
-
-九、开发行为约束
-- 改代码前先判断当前需求属于“示例规范”还是“正式业务模块”
-- 新增正式业务优先参考 `diary_*`，不要默认参考 `demo_*`
-- 新增接口时，优先补测试
-- 变更完成后至少执行：
-  - `poetry run ruff check app tests`
-  - `poetry run pytest`
-
-十、如果要新增正式业务模块
-- 推荐步骤：
-  1. 新增 `app/api/endpoints/<module>_api.py`
-  2. 新增 `app/services/<module>_service.py`
-  3. 需要时新增 `app/schemas/<module>.py`
-  4. 需要持久化时新增模型
-  5. 在 `app/api/api.py` 里注册路由
-  6. 路由层继续显式返回 `build_api_response_from_request()`
-
-如果不确定应该参考哪部分代码，请优先参考正式业务骨架 `diary_*`，而不是示例模块 `demo_*`。
+六、验证
+- 先运行与改动直接相关的最小 pytest。
+- 再按风险运行 poetry run pytest -q、poetry run ruff check .、poetry run mypy app、poetry run alembic heads、git diff --check。
+- 文档和计划状态只能用代码、测试、迁移或可复现命令校准；不要仅凭历史 checkbox 宣称完成。
 ```

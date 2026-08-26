@@ -13,8 +13,8 @@ BACKEND_RUNTIME_PLAN = (
 )
 
 
-def test_project_structure_script_matches_current_template_direction() -> None:
-    """项目结构脚手架不应再回退到旧的 wx / articles 模板语义。"""
+def test_project_structure_script_matches_current_runtime_direction() -> None:
+    """项目结构脚本应描述公共 Runtime，而不是历史业务模板。"""
 
     script_path = PROJECT_ROOT / "project_structure.sh"
     content = script_path.read_text(encoding="utf-8")
@@ -24,10 +24,14 @@ def test_project_structure_script_matches_current_template_direction() -> None:
     assert "articles" not in content
     assert "public_account" not in content
 
-    assert "Couple Diary Backend" in content
-    assert "demo_api.py" in content
-    assert "diary_api.py" in content
-    assert "diary_entries" in content
+    assert "com-agent-runtime（公共 Agent 执行服务）" in content
+    assert "contracts/" in content
+    assert "runtime/" in content
+    assert "dispatcher.py" in content
+    assert "worker.py" in content
+    assert "reconciler.py" in content
+    assert "demo/diary 模块不是新增 Runtime 能力的推荐样板" in content
+    assert "Couple Diary Backend" not in content
 
 
 def test_agent_runtime_plans_forbid_nested_project() -> None:

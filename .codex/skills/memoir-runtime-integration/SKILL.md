@@ -61,7 +61,7 @@ description: Use when designing, planning, implementing, reviewing, or debugging
 
 ## 实施与验证
 
-1. 先确认当前里程碑。`couple-diary-doc` 的回忆录文档当前只声明“Runtime 连接级验证”，不代表 Archive/Snapshot/Run/Worker/Callback/Published Revision 业务闭环已完成。每次使用时用代码、测试、迁移和 Git 状态重新校准。
+1. 先确认当前里程碑。“只完成 Runtime 连接级验证”是 2026-08-06 的历史起点，不是永久进度结论；也不能因为仓库已经出现 Archive/Snapshot/Run/Worker/Callback/Published Revision 代码，就不经验收宣称业务闭环已完成。每次使用时必须通过唯一总控、对应子计划、两仓代码、测试、迁移和 Git 状态重新校准。
 2. 先写或调整失败的 contract/behavior test，再做两边最小实现。共享契约改动必须同时覆盖 provider 与 consumer fixture，并记录兼容性结论。
 3. 单仓任务先跑相关小测试；跨仓联调至少覆盖：契约版本、签名/幂等、权限隔离、乱序/重复 callback、失败降级、旧 run 拒绝、无素材 baseline、隐私不泄漏和前端不直连 Runtime。
 4. Runtime 侧执行相关 pytest、Ruff、Mypy/Alembic 门禁与 `git diff --check`；心约手帐后端执行相关 pytest/Ruff，前端执行改动文件 lint、type-check、小程序构建和相关 contract test。不得用一侧绿灯代替另一侧验证。
