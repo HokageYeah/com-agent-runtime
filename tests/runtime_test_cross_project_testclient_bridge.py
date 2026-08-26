@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -42,6 +43,17 @@ _DIGEST_100 = "sha256:a6e2f53e223658fb648026335373d23f548232e5dd2c4c67a2c774df6e
 _RUN_ID = "historical-cross-repo-1-0-0"
 _ARCHIVE_ID = "01J00000000000000000000001"
 _SNAPSHOT_ID = "01J00000000000000000000002"
+
+
+def _skip_unless_business_venv_present() -> None:
+    """跨仓桥接只在本机双仓联调环境执行。
+
+    CI 只签出 Runtime 仓，业务仓路径（本机绝对路径）必然不存在，
+    此时跳过而非失败；业务仓 venv 存在的本地环境仍完整跑跨仓链路，
+    跨仓契约漂移由双仓都在时的本测试与各仓内契约测试共同守护。
+    """
+    if not _BUSINESS_PYTHON.is_file():
+        pytest.skip("跨仓 bridge 需要业务仓独立 venv")
 
 
 # The child owns both its SQLite session and TestClient for its whole lifetime.
@@ -251,7 +263,7 @@ def _runtime_run(session: Session, package: AgentPackage, monkeypatch: Any, *, r
 
 def test_historical_1_0_0_cross_repo_single_persistent_chain(monkeypatch: Any) -> None:
     """Migration-shaped NULL ref → signed Runtime identity query → three persistent Tool calls."""
-    assert _BUSINESS_PYTHON.is_file(), "cross-repo bridge requires the isolated business venv"
+    _skip_unless_business_venv_present()
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     from app.db.sqlalchemy_db import Base
     Base.metadata.create_all(engine)
@@ -342,7 +354,7 @@ def test_1_0_3_cross_repo_publish_media_document(monkeypatch: Any) -> None:
     publish 三层校验（manifest 六键 / image payload 白名单 / URL 域白名单）
     在跨仓边界零契约摩擦；发布成功后四字段对账查询同样命中。
     """
-    assert _BUSINESS_PYTHON.is_file(), "cross-repo bridge requires the isolated business venv"
+    _skip_unless_business_venv_present()
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     from app.db.sqlalchemy_db import Base
     Base.metadata.create_all(engine)

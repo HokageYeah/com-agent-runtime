@@ -154,12 +154,11 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         process = self._start_role(
             "api", port=port, mock_port=mock_port, provider_port=provider_port
         )
+        # API 子进程需冷导入完整 Runtime app（FastAPI+SQLAlchemy+Worker 栈），
+        # CI 受限 runner 的冷启动可超过调用方给的短超时；与 _wait_for_ready
+        # 保持同一 60 秒硬下限，正常启动仍会在端口就绪时立即返回。
         self.wait_for_port(
-            "127.0.0.1",
-            port,
-            timeout_seconds=max(
-                self._timeout_seconds, 60.0 if self._postgres is not None else 0.0
-            ),
+            "127.0.0.1", port, timeout_seconds=max(self._timeout_seconds, 60.0)
         )
         return process
 
