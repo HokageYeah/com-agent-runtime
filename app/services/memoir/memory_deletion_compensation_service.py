@@ -12,15 +12,19 @@ from uuid import uuid4
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_runtime_compensation_event import MemoryRuntimeCompensationEvent
-from app.models.memory_snapshot import MemorySnapshot
-from app.models.memory_source_reference import MemorySourceReference
-from app.services.memory_revision_gc_service import MemoryRevisionGcService
-from app.services.memory_source_reference_service import MemorySourceReferenceService
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_runtime_compensation_event import (
+    MemoryRuntimeCompensationEvent,
+)
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.models.memoir.memory_source_reference import MemorySourceReference
+from app.services.memoir.memory_revision_gc_service import MemoryRevisionGcService
+from app.services.memoir.memory_source_reference_service import (
+    MemorySourceReferenceService,
+)
 
 
 class MemoryDeletionRuntimeGateway(Protocol):

@@ -9,11 +9,11 @@ from datetime import UTC, datetime
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.memory_action import MemoryAction
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_scene import MemoryScene
-from app.models.memory_source_reference import MemorySourceReference
+from app.models.memoir.memory_action import MemoryAction
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_scene import MemoryScene
+from app.models.memoir.memory_source_reference import MemorySourceReference
 
 
 @dataclass(frozen=True)

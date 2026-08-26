@@ -10,12 +10,12 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.services.memory_agent_adapter import RuntimeRunState
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_agent_callback_reconciliation_service import (
+from app.services.memoir.memory_agent_adapter import RuntimeRunState
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_agent_callback_reconciliation_service import (
     MemoryAgentCallbackReconciliationService,
 )
-from app.services.memory_archive_service import (
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,

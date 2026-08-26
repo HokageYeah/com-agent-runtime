@@ -9,7 +9,9 @@ from app.core.security import (
     assert_single_service_headers,
     verify_signature,
 )
-from app.services.memory_generation_status_service import MemoryGenerationStatusService
+from app.services.memoir.memory_generation_status_service import (
+    MemoryGenerationStatusService,
+)
 
 router = APIRouter(prefix="/memory-archives", tags=["memory-generation-status"])
 

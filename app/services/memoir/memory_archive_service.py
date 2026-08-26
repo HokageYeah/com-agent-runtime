@@ -15,12 +15,12 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_action import MemoryAction
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_scene import MemoryScene
-from app.models.memory_snapshot import MemorySnapshot
-from app.models.memory_source_reference import MemorySourceReference
+from app.models.memoir.memory_action import MemoryAction
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_scene import MemoryScene
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.models.memoir.memory_source_reference import MemorySourceReference
 
 # 回忆录第一版只允许这些已冻结的作品类型，避免模型或业务输入扩展播放器语义。
 _SCENE_TYPES = frozenset(
@@ -212,7 +212,9 @@ class MemoryArchiveService:
     ) -> list[MemoryArchive]:
         """从真实业务表冻结已解绑关系段，再复用唯一归档写入路径。"""
         # 延迟导入避免冻结 DTO 与 materializer 的模块循环依赖。
-        from app.services.memory_snapshot_materializer import MemorySnapshotMaterializer
+        from app.services.memoir.memory_snapshot_materializer import (
+            MemorySnapshotMaterializer,
+        )
 
         frozen = MemorySnapshotMaterializer(self._session).freeze_relationship(
             relationship_id

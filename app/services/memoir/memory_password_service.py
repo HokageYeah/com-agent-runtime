@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_password import MemoryPassword
+from app.models.memoir.memory_password import MemoryPassword
 
 
 class MemoryPasswordError(ValueError):

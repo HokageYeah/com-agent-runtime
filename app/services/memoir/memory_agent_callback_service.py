@@ -7,8 +7,8 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
 
 
 class MemoryAgentCallbackService:

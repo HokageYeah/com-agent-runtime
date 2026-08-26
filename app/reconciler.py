@@ -21,11 +21,11 @@ from app.core.config import settings
 from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.runtime.test_harness import RuntimeDependencies
-from app.services.memory_agent_adapter import (
+from app.services.memoir.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeClientConfig,
 )
-from app.services.memory_deletion_compensation_service import (
+from app.services.memoir.memory_deletion_compensation_service import (
     MemoryDeletionCompensationService,
     MemoryDeletionMaintenanceReport,
 )

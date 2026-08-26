@@ -22,6 +22,8 @@ from app.api.endpoints import (
     demo_api,
     diary_api,
     health_api,
+)
+from app.api.endpoints.memoir import (
     memory_api,
     memory_callbacks_api,
     memory_status_api,

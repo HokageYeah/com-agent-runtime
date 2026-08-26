@@ -16,12 +16,15 @@ from app.core.user_auth import (
 )
 from app.db.sqlalchemy_db import Base
 from app.main import app
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.services.memory_archive_service import FrozenMemoryInput, MemoryArchiveService
-from app.services.memory_password_service import MemoryPasswordService
-from app.services.memory_s3_media_proxy import MemoryS3MediaProxyConfigError
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.services.memoir.memory_archive_service import (
+    FrozenMemoryInput,
+    MemoryArchiveService,
+)
+from app.services.memoir.memory_password_service import MemoryPasswordService
+from app.services.memoir.memory_s3_media_proxy import MemoryS3MediaProxyConfigError
 
 
 def test_archive_list_returns_only_current_owner_minimal_fields(client) -> None:

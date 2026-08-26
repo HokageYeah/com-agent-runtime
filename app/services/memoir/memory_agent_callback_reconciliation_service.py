@@ -9,9 +9,9 @@ from typing import Protocol
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.services.memory_agent_adapter import RuntimeRunState
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.services.memoir.memory_agent_adapter import RuntimeRunState
 
 
 class MemoryRunStateGateway(Protocol):

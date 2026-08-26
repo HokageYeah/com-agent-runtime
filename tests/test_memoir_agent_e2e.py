@@ -26,14 +26,14 @@ from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.schemas.agent_run import CreateRunCommand
 from app.services.agent_run_service import AgentRunService
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_agent_callback_service import MemoryAgentCallbackService
-from app.services.memory_archive_service import (
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_agent_callback_service import MemoryAgentCallbackService
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,
 )
-from app.services.memory_player_service import MemoryPlayerService
+from app.services.memoir.memory_player_service import MemoryPlayerService
 from app.services.run_queue_service import RunQueueService
 from app.services.tool_call_audit_service import ToolCallAuditService
 

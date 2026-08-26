@@ -8,8 +8,8 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_source_reference import MemorySourceReference
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_source_reference import MemorySourceReference
 
 
 @dataclass(frozen=True)

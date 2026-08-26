@@ -7,10 +7,10 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.bet import Bet
-from app.models.couple_relationship import CoupleRelationship
-from app.models.diary_entry import DiaryEntry
-from app.services.memory_archive_service import FrozenMemoryInput
+from app.models.memoir.bet import Bet
+from app.models.memoir.couple_relationship import CoupleRelationship
+from app.models.memoir.diary_entry import DiaryEntry
+from app.services.memoir.memory_archive_service import FrozenMemoryInput
 
 
 class MemorySnapshotMaterializer:

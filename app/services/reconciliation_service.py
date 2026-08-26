@@ -27,7 +27,7 @@ from app.services.agent_run_service import AgentRunService
 from app.services.audit_service import AuditService
 from app.services.idempotency_service import IdempotencyService
 from app.services.lease_service import LeaseService
-from app.services.memory_deletion_compensation_service import (
+from app.services.memoir.memory_deletion_compensation_service import (
     MemoryDeletionMaintenanceReport,
 )
 from app.services.model_usage_service import ModelUsageService

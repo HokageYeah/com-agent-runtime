@@ -22,7 +22,7 @@ from app.models import (
 )
 from app.reconciler import ReconcilerRunner
 from app.services.idempotency_service import IdempotencyService
-from app.services.memory_deletion_compensation_service import (
+from app.services.memoir.memory_deletion_compensation_service import (
     MemoryDeletionMaintenanceReport,
 )
 from app.services.reconciliation_lease_service import ReconciliationLeaseService

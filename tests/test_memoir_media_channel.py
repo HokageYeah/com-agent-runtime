@@ -33,7 +33,7 @@ from app.agents.memoir_agent.runner import (
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
 from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
-from app.services.memoir_media_service import (
+from app.services.memoir.memoir_media_service import (
     MEDIA_IMAGE_HEIGHT,
     MEDIA_IMAGE_WIDTH,
     MEDIA_MANIFEST_KEYS,

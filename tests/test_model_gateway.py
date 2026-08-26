@@ -13,11 +13,11 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+from app.agents.memoir_agent.model_gateway import MemoirModelGatewayAdapter
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
 from app.models import AgentDefinition, AgentModelUsage, AgentRun, AgentStep
 from app.runtime.interfaces import LeaseContext
-from app.runtime.memoir_model_gateway import MemoirModelGatewayAdapter
 from app.runtime.model_gateway import (
     ModelCallContext,
     ModelCapabilityEvaluator,

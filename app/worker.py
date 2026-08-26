@@ -22,6 +22,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.memoir_agent.model_gateway import MemoirModelGatewayAdapter
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.core.authorization import AuthorizationError, AuthorizationService
 from app.core.config import settings
@@ -34,7 +35,6 @@ from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext, RunExecutor
-from app.runtime.memoir_model_gateway import MemoirModelGatewayAdapter
 from app.runtime.model_gateway import (
     HttpProviderAdapter,
     ModelCallContext,
@@ -306,7 +306,7 @@ def configured_media_service(
     if not bool(getattr(runtime_settings, "MEMOIR_MEDIA_ENABLED", False)):
         return None
     try:
-        from app.services.memoir_media_service import (
+        from app.services.memoir.memoir_media_service import (
             MemoirMediaConfig,
             MemoirMediaService,
         )

@@ -40,3 +40,26 @@ def test_agent_runtime_plans_forbid_nested_project() -> None:
         content = plan_path.read_text(encoding="utf-8")
         assert "services/agent-runtime/" not in content
         assert "当前 com-agent-runtime 根工程" in content
+
+
+def test_memoir_business_modules_are_grouped_under_named_subpackages() -> None:
+    """回忆录迁移代码应与公共 Runtime 模块物理分开。"""
+
+    expected_packages = (
+        PROJECT_ROOT / "app/api/endpoints/memoir",
+        PROJECT_ROOT / "app/services/memoir",
+        PROJECT_ROOT / "app/models/memoir",
+    )
+    assert all(path.is_dir() for path in expected_packages)
+
+    assert not list((PROJECT_ROOT / "app/api/endpoints").glob("memory*_api.py"))
+    assert not list((PROJECT_ROOT / "app/services").glob("memory_*.py"))
+    assert not list((PROJECT_ROOT / "app/services").glob("memoir_*.py"))
+    assert not (PROJECT_ROOT / "app/services/relationship_archive_service.py").exists()
+    assert not list((PROJECT_ROOT / "app/models").glob("memory_*.py"))
+    assert not any(
+        (PROJECT_ROOT / "app/models" / filename).exists()
+        for filename in ("bet.py", "couple_relationship.py", "diary_entry.py")
+    )
+    assert (PROJECT_ROOT / "app/agents/memoir_agent/model_gateway.py").is_file()
+    assert not (PROJECT_ROOT / "app/runtime/memoir_model_gateway.py").exists()

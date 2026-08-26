@@ -72,6 +72,7 @@ com-agent-runtime/
 │   ├── agents/
 │   │   └── memoir_agent/
 │   │       ├── runner.py                     # MemoirAgent 节点执行与版本门控
+│   │       ├── model_gateway.py              # Memoir 节点到公共 ModelGateway 的适配
 │   │       ├── 1.0.0/ ... 1.0.4/             # 不可变的版本化 AgentPackage
 │   │       │   ├── agent.yaml                # 包身份、版本、策略、Prompt 清单
 │   │       │   ├── workflow.graph.py         # 受信任静态工作流声明
@@ -90,10 +91,11 @@ com-agent-runtime/
 │   │       ├── health_api.py                 # Runtime live/ready
 │   │       ├── capabilities_api.py           # 已验签能力发现
 │   │       ├── agent_runs_api.py             # Run 创建、启动、查询、重试、取消、清理
-│   │       ├── memory_api.py                 # dev/test 保留的用户侧回忆录迁移路由
-│   │       ├── memory_tools_api.py           # dev/test 保留的本地 memory Tool handler
-│   │       ├── memory_callbacks_api.py       # dev/test 保留的业务 callback consumer
-│   │       ├── memory_status_api.py          # dev/test 保留的历史生成状态路由
+│   │       ├── memoir/                       # 回忆录业务迁移路由子包
+│   │       │   ├── memory_api.py             # dev/test 用户侧回忆录路由
+│   │       │   ├── memory_tools_api.py       # dev/test 本地 memory Tool handler
+│   │       │   ├── memory_callbacks_api.py   # dev/test 业务 callback consumer
+│   │       │   └── memory_status_api.py      # dev/test 历史生成状态路由
 │   │       ├── demo_api.py                   # 历史工程示例接口
 │   │       └── diary_api.py                  # 历史业务骨架接口
 │   ├── contracts/
@@ -126,14 +128,13 @@ com-agent-runtime/
 │   │   └── exception_handlers.py             # 统一异常响应
 │   ├── models/
 │   │   ├── runtime.py                        # Run/Plan/Step/ToolCall/Usage/Outbox/Audit 等权威表
-│   │   ├── memory_archive.py                 # 保留的回忆录迁移模型
-│   │   ├── memory_snapshot.py                # 加密 Snapshot 迁移模型
-│   │   ├── memory_playback_document.py       # PlaybackDocument 迁移模型
-│   │   ├── memory_scene.py                   # Scene 迁移模型
-│   │   ├── memory_action.py                  # Action 迁移模型
-│   │   ├── memory_media_asset.py             # 媒体资产迁移模型
-│   │   ├── memory_agent_run_ref.py           # 业务 RunRef 迁移模型
-│   │   └── ...                               # 密码、关系、来源引用与补偿模型
+│   │   └── memoir/                           # 回忆录业务迁移模型子包
+│   │       ├── memory_archive.py             # Archive 迁移模型
+│   │       ├── memory_snapshot.py            # 加密 Snapshot 迁移模型
+│   │       ├── memory_playback_document.py   # PlaybackDocument 迁移模型
+│   │       ├── memory_scene.py / memory_action.py
+│   │       ├── memory_media_asset.py / memory_agent_run_ref.py
+│   │       └── bet.py / couple_relationship.py / diary_entry.py / ...
 │   ├── runtime/
 │   │   ├── planner.py                        # 静态 AgentPlan 构建与校验
 │   │   ├── graph_builder.py                  # 静态 LangGraph StateGraph 编译
@@ -141,7 +142,6 @@ com-agent-runtime/
 │   │   ├── state.py                          # 不含原始私密正文的图状态
 │   │   ├── context_manager.py                # 上下文预算与敏感信息控制
 │   │   ├── model_gateway.py                  # Provider 路由、限流、用量和 fallback
-│   │   ├── memoir_model_gateway.py           # Memoir 节点的模型适配
 │   │   ├── tool_gateway.py                   # Business Tool 授权、签名、幂等和调用
 │   │   ├── callback_gateway.py               # callback 目标与安全发送
 │   │   ├── checkpoint.py                     # 加密 checkpoint 存取
@@ -184,8 +184,11 @@ com-agent-runtime/
 │   │   ├── traffic_event_service.py          # Provider/安全流量窗口计数
 │   │   ├── model_usage_service.py            # 模型 attempt、token 和成本账本
 │   │   ├── tool_call_audit_service.py        # ToolCall 生命周期审计
-│   │   ├── memoir_media_service.py           # 回忆录图片生成与上传
-│   │   └── memory_*.py                       # 保留的业务迁移、联调和补偿服务
+│   │   └── memoir/                           # 回忆录专属服务子包
+│   │       ├── memoir_media_service.py       # 图片生成与上传
+│   │       ├── memory_*.py                   # 业务迁移、联调和补偿服务
+│   │       ├── relationship_archive_service.py # 解绑归档迁移服务
+│   │       └── runtime_launcher.py           # 启动 outbox 与 callback 补偿实现
 │   ├── scripts/
 │   │   ├── agent_runtime_cli.py               # agent-runtime.sh 的真实 CLI 实现
 │   │   ├── register_agent_package.py          # Package 注册底层实现
@@ -200,7 +203,7 @@ com-agent-runtime/
 │   ├── worker.py                              # Runtime Worker 常驻进程
 │   ├── dispatcher.py                          # Worker 使用的 outbox dispatcher 组件
 │   ├── reconciler.py                          # Runtime 对账常驻进程
-│   └── memory_runtime_launcher.py             # 历史回忆录启动 outbox 单轮任务
+│   └── memory_runtime_launcher.py             # 保留原 -m 命令的薄兼容入口
 ├── tests/
 │   ├── fixtures/
 │   │   ├── runtime-contract-v1.0.0.json       # 公共 Runtime 契约夹具
@@ -247,19 +250,22 @@ com-agent-runtime/
 | 需求类型 | 首选目录 | 说明 |
 |---|---|---|
 | 新增或调整公共 API | `app/contracts/` + `app/api/endpoints/` | 先冻结 wire contract，再实现路由；同步 provider/consumer fixture |
+| 接入新业务 Agent | `app/agents/<agent_id>/` + 各分层的 `<business>/` 子包 | AgentPackage/执行适配放 `agents`；业务专属路由、服务、模型分别放入同名子包，不散落在公共根目录 |
 | 修改 Run 状态或事务 | `app/services/` + `app/models/runtime.py` | 必须考虑幂等、Admission、outbox、lease/fencing 和 callback |
 | 修改 Agent 执行方式 | `app/runtime/` | Planner、Executor、Gateway、Checkpoint、Guardrail 等公共内核在这里 |
-| 修改 MemoirAgent 行为 | 新建 `app/agents/memoir_agent/<新版本>/`，必要时改 `runner.py` | 不覆盖已发布包；调用方显式选择版本 |
+| 修改 MemoirAgent 行为 | `app/agents/memoir_agent/` | 版本化 Prompt/Workflow 放新版本目录，执行适配改 `runner.py`，回忆录模型调用改 `model_gateway.py`；不覆盖已发布包 |
 | 修改模型路由 | `app/runtime/model_gateway.py` + 部署环境配置 | Provider、model、endpoint 和 key 不允许由业务请求覆盖 |
 | 修改 Business Tool | `app/contracts/tools.py` + `app/runtime/tool_gateway.py` | 必须保持授权、签名、稳定幂等键和安全错误合同 |
 | 修改数据库结构 | `app/models/` + `alembic/versions/` | 只对 Runtime 专库运行 Alembic；禁止 `create_all()` 兜底 |
 | 修改启动或部署流程 | `app/scripts/agent_runtime_cli.py` + `agent-runtime.sh` | `agent-runtime.sh` 是对用户唯一推荐入口 |
-| 修改回忆录业务数据或用户 API | `couple-diary-b` | 本仓 `memory_*` 是迁移证据，不是生产目标归属 |
+| 修改回忆录业务数据或用户 API | `couple-diary-b` | 本仓 `memoir/` 子包中的历史业务实现是迁移与回归证据，不是生产目标归属 |
+
+这里采用“公共根模块 + 业务同名子包”：Runtime 契约、执行内核和通用服务仍是单一公共实现；只有某个业务专属的路由、服务和数据模型才放入同名子包。后续接入新业务时可以复用这个边界，但不应复制一套 Runtime 内核。
 
 ### 不要新建或搬迁的结构
 
 - 不创建第二套 `app/`、`alembic/`、`pyproject.toml` 或嵌套 `services/agent-runtime/`。
-- 不为了目录整齐移动 `runtime/`、`contracts/`、`services/`；这些路径已被代码、测试和历史链接稳定引用。
+- 不整体搬迁 `runtime/`、`contracts/`、`services/` 等公共根模块；业务专属实现则应收口到各分层下的同名子包。
 - 不把新 Runtime 能力写进 `demo_api.py`、`diary_api.py` 或 `demo_service.py`。
 - 不删除历史 memory 模型或迁移来“清理目录”；迁移完成、生产数据盘点和回滚方案明确后再单独处理。
 
@@ -631,7 +637,7 @@ git diff --check
 
 ## 历史与兼容边界
 
-仓库从情侣日记后端模板演进而来，因此仍包含 `demo_*`、`diary_*`、memory 业务模型/服务和旧管理脚本。它们当前用于兼容、迁移证据或回归测试：
+仓库从情侣日记后端模板演进而来，因此仍包含 `demo_*`、`diary_*`、收口在 `memoir/` 子包中的历史回忆录实现，以及旧管理脚本。它们当前用于兼容、迁移证据或回归测试：
 
 - 不把 `demo_api.py`、`diary_api.py` 当成新增公共 Runtime 能力的样板。
 - 不用 `create_database.py`、`init_database.py`、`manage_db reset` 或 `create_all()` 代替 `agent-runtime.sh prepare` 与 Alembic。

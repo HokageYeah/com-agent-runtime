@@ -14,10 +14,13 @@ import app.models  # noqa: F401
 from app.core.tool_security import tool_signature
 from app.db.sqlalchemy_db import Base
 from app.main import app
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_snapshot import MemorySnapshot
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_archive_service import FrozenMemoryInput, MemoryArchiveService
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_archive_service import (
+    FrozenMemoryInput,
+    MemoryArchiveService,
+)
 
 
 def _tool_headers(path: str, body: bytes, key: str) -> dict[str, str]:

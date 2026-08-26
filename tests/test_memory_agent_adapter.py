@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from app.services.memory_agent_adapter import (
+from app.services.memoir.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeAdapterError,
     MemoryRuntimeClientConfig,

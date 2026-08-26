@@ -11,11 +11,11 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
-from app.models.memory_snapshot import MemorySnapshot
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
 
 LOGGER = logging.getLogger(__name__)
 

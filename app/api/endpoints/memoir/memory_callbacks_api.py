@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.core.security import request_hash
 from app.core.tool_security import verify_runtime_tool
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
-from app.services.memory_agent_callback_service import MemoryAgentCallbackService
+from app.services.memoir.memory_agent_callback_service import MemoryAgentCallbackService
 
 router = APIRouter(prefix="/internal/agent-callbacks", tags=["memory-internal-callbacks"])
 

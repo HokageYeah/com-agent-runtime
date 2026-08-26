@@ -18,22 +18,24 @@ from app.core.user_auth import (
     get_current_user_id,
     get_current_user_identity,
 )
-from app.models.memory_action import MemoryAction
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_scene import MemoryScene
-from app.services.memory_agent_adapter import MemoryAgentAdapter
-from app.services.memory_deletion_compensation_service import (
+from app.models.memoir.memory_action import MemoryAction
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_scene import MemoryScene
+from app.services.memoir.memory_agent_adapter import MemoryAgentAdapter
+from app.services.memoir.memory_deletion_compensation_service import (
     MemoryDeletionCompensationService,
 )
-from app.services.memory_generation_status_service import MemoryGenerationStatusService
-from app.services.memory_password_service import (
+from app.services.memoir.memory_generation_status_service import (
+    MemoryGenerationStatusService,
+)
+from app.services.memoir.memory_password_service import (
     MemoryPasswordError,
     MemoryPasswordService,
 )
-from app.services.memory_player_service import MemoryPlayerService
-from app.services.memory_s3_media_proxy import MemoryS3MediaProxyConfigError
+from app.services.memoir.memory_player_service import MemoryPlayerService
+from app.services.memoir.memory_s3_media_proxy import MemoryS3MediaProxyConfigError
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 

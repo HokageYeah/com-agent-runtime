@@ -29,7 +29,7 @@ from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
 from app.runtime.tool_gateway import ToolErrorRejected, ToolGateway
 from app.services.evaluation_service import EvaluationService
-from app.services.memoir_media_service import (
+from app.services.memoir.memoir_media_service import (
     MEDIA_IMAGE_MIME_TYPES,
     MEDIA_IMAGE_PREFIX,
     MEDIA_KIND_IMAGE,

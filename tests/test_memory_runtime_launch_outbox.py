@@ -10,14 +10,14 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
-from app.services.memory_archive_service import (
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,
 )
-from app.services.memory_runtime_launch_service import (
+from app.services.memoir.memory_runtime_launch_service import (
     MemoryRuntimeLaunchService,
     RuntimeHeldRun,
 )

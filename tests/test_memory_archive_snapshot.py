@@ -12,22 +12,24 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models.memory_action import MemoryAction
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_scene import MemoryScene
-from app.models.memory_snapshot import MemorySnapshot
-from app.models.memory_source_reference import MemorySourceReference
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_archive_service import (
+from app.models.memoir.memory_action import MemoryAction
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_scene import MemoryScene
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.models.memoir.memory_source_reference import MemorySourceReference
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,
 )
-from app.services.memory_player_service import MemoryPlayerService
-from app.services.memory_snapshot_service import MemorySnapshotService
-from app.services.memory_source_reference_service import MemorySourceReferenceService
+from app.services.memoir.memory_player_service import MemoryPlayerService
+from app.services.memoir.memory_snapshot_service import MemorySnapshotService
+from app.services.memoir.memory_source_reference_service import (
+    MemorySourceReferenceService,
+)
 
 
 def test_create_archives_freezes_encrypted_snapshot_and_publishes_baseline() -> None:

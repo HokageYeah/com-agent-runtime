@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.memory_s3_media_proxy import (
+from app.services.memoir.memory_s3_media_proxy import (
     MemoryS3MediaProxy,
     MemoryS3MediaProxyConfigError,
 )

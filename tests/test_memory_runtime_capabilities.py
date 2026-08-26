@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.services.memory_runtime_capability_cache import (
+from app.services.memoir.memory_runtime_capability_cache import (
     MemoryRuntimeCapabilityCache,
     RuntimeCapabilityError,
     RuntimeCapabilitySnapshot,

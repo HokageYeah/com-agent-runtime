@@ -10,10 +10,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_snapshot import MemorySnapshot
-from app.services.memory_archive_service import FernetSnapshotCipher
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.services.memoir.memory_archive_service import FernetSnapshotCipher
 
 _SUPPORTED_SNAPSHOT_SCHEMA_MAJOR = 1
 

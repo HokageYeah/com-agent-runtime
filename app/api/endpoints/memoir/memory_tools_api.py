@@ -6,8 +6,8 @@ from fastapi import APIRouter, HTTPException, Request, status
 from app.core.security import request_hash
 from app.core.tool_security import verify_runtime_tool
 from app.services.idempotency_service import IdempotencyConflict, IdempotencyService
-from app.services.memory_archive_service import MemoryArchiveService
-from app.services.memory_snapshot_service import MemorySnapshotService
+from app.services.memoir.memory_archive_service import MemoryArchiveService
+from app.services.memoir.memory_snapshot_service import MemorySnapshotService
 
 router = APIRouter(prefix="/internal/agent-tools", tags=["memory-internal-tools"])
 

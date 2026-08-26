@@ -9,13 +9,13 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_snapshot import MemorySnapshot
-from app.models.memory_source_reference import MemorySourceReference
-from app.services.memory_deletion_compensation_service import (
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_snapshot import MemorySnapshot
+from app.models.memoir.memory_source_reference import MemorySourceReference
+from app.services.memoir.memory_deletion_compensation_service import (
     MemoryDeletionCompensationService,
 )
 

@@ -82,19 +82,19 @@ exclude = '''(?x)(
         # 仅排除这两个动态包资产，不排除 memoir_agent 的运行时代码。
         agents/memoir_agent/[^/]+/workflow\.graph\.py|
         agents/memoir_agent/runner\.py|
-        api/endpoints/memory_api\.py|
+        api/endpoints/memoir/memory_api\.py|
         core/logging_uru\.py|
         db/sqlalchemy_db\.py|
         main\.py|
         memory_runtime_launcher\.py|
-        services/(?:
+        services/memoir/(?:
             memory_agent_binding_service|memory_agent_callback_service|
             memory_archive_service|memory_deletion_compensation_service|
             memory_password_service|memory_player_service|
             memory_runtime_launch_service|memory_snapshot_materializer|
-            memory_snapshot_service|model_usage_service|observability_service|
-            relationship_archive_service
-        )\.py
+            memory_snapshot_service|relationship_archive_service
+        )\.py|
+        services/(?:model_usage_service|observability_service)\.py
     )$
 )'''
 

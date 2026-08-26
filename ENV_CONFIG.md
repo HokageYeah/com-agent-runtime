@@ -315,7 +315,7 @@ MEMORY_MEDIA_SIGNED_URL_TTL_SECONDS=60
 无凭据配置检查：
 
 ```bash
-ENVIRONMENT=development poetry run python -c 'from app.core.config import settings; from app.services.memory_s3_media_proxy import MemoryS3MediaProxy; proxy = MemoryS3MediaProxy.from_settings(settings); print("MEDIA_DISABLED" if proxy is None else "MEDIA_CONFIG_OK")'
+ENVIRONMENT=development poetry run python -c 'from app.core.config import settings; from app.services.memoir.memory_s3_media_proxy import MemoryS3MediaProxy; proxy = MemoryS3MediaProxy.from_settings(settings); print("MEDIA_DISABLED" if proxy is None else "MEDIA_CONFIG_OK")'
 ```
 
 预期：五项全空时只输出 `MEDIA_DISABLED`；五项完整且格式合法时只输出 `MEDIA_CONFIG_OK`；半配置、非法桶名、非法 TTL 或生产 HTTP endpoint 应以固定配置错误失败。此命令不应输出 access key、secret、endpoint 或签名 URL。

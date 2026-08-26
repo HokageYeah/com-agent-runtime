@@ -40,7 +40,9 @@ class MemoirModelGatewayAdapter:
         self._model_gateway = model_gateway
         self._route_ids = dict(route_ids)
         self._lease_context = lease_context
-        self._prompts = PromptRegistry(Path(__file__).parents[1] / "agents")
+        # 本适配器已归入 app/agents/memoir_agent；parents[1] 就是
+        # AgentPackage 根目录 app/agents，不能再拼一层 agents。
+        self._prompts = PromptRegistry(Path(__file__).parents[1])
         self._contexts = ContextManager()
 
     def bind_lease(self, lease_context: LeaseContext) -> None:

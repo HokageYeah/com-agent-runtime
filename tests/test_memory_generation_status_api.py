@@ -14,9 +14,14 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
 from app.main import app
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_archive_service import FrozenMemoryInput, MemoryArchiveService
-from app.services.memory_generation_status_service import MemoryGenerationStatusService
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_archive_service import (
+    FrozenMemoryInput,
+    MemoryArchiveService,
+)
+from app.services.memoir.memory_generation_status_service import (
+    MemoryGenerationStatusService,
+)
 
 
 def _headers(path: str) -> dict[str, str]:

@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.services.memory_password_service import (
+from app.services.memoir.memory_password_service import (
     MemoryPasswordError,
     MemoryPasswordService,
 )

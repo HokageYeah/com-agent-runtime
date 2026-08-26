@@ -11,12 +11,12 @@ from typing import Any
 
 import httpx
 
-from app.services.memory_runtime_capability_cache import (
+from app.services.memoir.memory_runtime_capability_cache import (
     MemoryRuntimeCapabilityCache,
     RuntimeCapabilityError,
     RuntimeCapabilitySnapshot,
 )
-from app.services.memory_runtime_launch_service import RuntimeHeldRun
+from app.services.memoir.memory_runtime_launch_service import RuntimeHeldRun
 
 
 class MemoryRuntimeAdapterError(ValueError):

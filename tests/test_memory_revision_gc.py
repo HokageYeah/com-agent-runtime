@@ -10,13 +10,13 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.services.memory_archive_service import (
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,
 )
-from app.services.memory_revision_gc_service import MemoryRevisionGcService
+from app.services.memoir.memory_revision_gc_service import MemoryRevisionGcService
 
 
 def test_gc_deletes_only_expired_non_published_revision() -> None:

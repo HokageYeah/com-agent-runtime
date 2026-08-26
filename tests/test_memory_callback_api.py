@@ -13,9 +13,12 @@ import app.models  # noqa: F401
 from app.core.tool_security import tool_signature
 from app.db.sqlalchemy_db import Base
 from app.main import app
-from app.models.memory_agent_run_ref import MemoryAgentRunRef
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_archive_service import FrozenMemoryInput, MemoryArchiveService
+from app.models.memoir.memory_agent_run_ref import MemoryAgentRunRef
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_archive_service import (
+    FrozenMemoryInput,
+    MemoryArchiveService,
+)
 
 
 def _headers(path: str, body: bytes, event_id: str, archive_id: str) -> dict[str, str]:

@@ -7,11 +7,11 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.memory_action import MemoryAction
-from app.models.memory_archive import MemoryArchive
-from app.models.memory_media_asset import MemoryMediaAsset
-from app.models.memory_playback_document import MemoryPlaybackDocument
-from app.models.memory_scene import MemoryScene
+from app.models.memoir.memory_action import MemoryAction
+from app.models.memoir.memory_archive import MemoryArchive
+from app.models.memoir.memory_media_asset import MemoryMediaAsset
+from app.models.memoir.memory_playback_document import MemoryPlaybackDocument
+from app.models.memoir.memory_scene import MemoryScene
 
 
 @dataclass(frozen=True)

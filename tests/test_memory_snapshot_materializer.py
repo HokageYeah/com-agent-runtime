@@ -10,16 +10,16 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401
 from app.db.sqlalchemy_db import Base
-from app.models.bet import Bet
-from app.models.couple_relationship import CoupleRelationship
-from app.models.diary_entry import DiaryEntry
-from app.models.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
-from app.services.memory_archive_service import (
+from app.models.memoir.bet import Bet
+from app.models.memoir.couple_relationship import CoupleRelationship
+from app.models.memoir.diary_entry import DiaryEntry
+from app.models.memoir.memory_runtime_launch_event import MemoryRuntimeLaunchEvent
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     MemoryArchiveService,
 )
-from app.services.memory_snapshot_materializer import MemorySnapshotMaterializer
-from app.services.relationship_archive_service import RelationshipArchiveService
+from app.services.memoir.memory_snapshot_materializer import MemorySnapshotMaterializer
+from app.services.memoir.relationship_archive_service import RelationshipArchiveService
 
 
 def test_materializer_freezes_only_current_relationship_segment_before_unbind() -> None:

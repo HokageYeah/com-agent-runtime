@@ -27,12 +27,12 @@ from app.middleware.exception_handlers import (
 )
 from app.middleware.request_logging import request_logging_middleware
 from app.runtime.test_harness import RuntimeDependencies
-from app.services.memory_agent_adapter import (
+from app.services.memoir.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeClientConfig,
 )
-from app.services.memory_archive_service import FernetSnapshotCipher
-from app.services.memory_s3_media_proxy import MemoryS3MediaProxy
+from app.services.memoir.memory_archive_service import FernetSnapshotCipher
+from app.services.memoir.memory_s3_media_proxy import MemoryS3MediaProxy
 
 application_config = settings.application
 server_config = settings.server

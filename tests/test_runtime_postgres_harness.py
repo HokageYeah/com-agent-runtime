@@ -39,14 +39,14 @@ from app.runtime.postgres_harness import PostgresHarnessConfig, PostgresSchemaHa
 from app.runtime.process_harness import ProcessHarness
 from app.services.callback_service import CallbackDeliveryService
 from app.services.lease_service import LeaseService
-from app.services.memory_agent_binding_service import MemoryAgentBindingService
-from app.services.memory_archive_service import (
+from app.services.memoir.memory_agent_binding_service import MemoryAgentBindingService
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     FrozenMemoryInput,
     MemoryArchiveService,
 )
-from app.services.memory_player_service import MemoryPlayerService
-from app.services.memory_snapshot_service import MemorySnapshotService
+from app.services.memoir.memory_player_service import MemoryPlayerService
+from app.services.memoir.memory_snapshot_service import MemorySnapshotService
 from app.services.outbox_service import OutboxService
 from app.services.traffic_event_service import SqlAlchemyTrafficEventRecorder
 

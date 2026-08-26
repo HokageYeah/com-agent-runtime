@@ -843,7 +843,7 @@ def test_local_handler_shape_with_schema_version_is_backward_compatible() -> Non
     """
 
     def handler(_: httpx.Request) -> httpx.Response:
-        # 与 app/api/endpoints/memory_tools_api.py 现有响应形状一致。
+        # 与 app/api/endpoints/memoir/memory_tools_api.py 现有响应形状一致。
         return httpx.Response(
             200,
             json={"output": {"revision": 9, "content_digest": "abc"}, "schema_version": "1.0.0"},

@@ -8,13 +8,13 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.couple_relationship import CoupleRelationship
-from app.models.memory_archive import MemoryArchive
-from app.services.memory_archive_service import (
+from app.models.memoir.couple_relationship import CoupleRelationship
+from app.models.memoir.memory_archive import MemoryArchive
+from app.services.memoir.memory_archive_service import (
     FernetSnapshotCipher,
     MemoryArchiveService,
 )
-from app.services.memory_runtime_launch_service import MemoryRuntimeLaunchService
+from app.services.memoir.memory_runtime_launch_service import MemoryRuntimeLaunchService
 
 LOGGER = logging.getLogger(__name__)
 
