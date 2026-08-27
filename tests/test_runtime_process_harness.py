@@ -63,6 +63,31 @@ def test_harness_process_config_carries_explicit_postgres_schema_target(
     assert payload["schema"] == "agent_runtime_test_123"
 
 
+def test_harness_process_config_carries_only_api_listener_fd(tmp_path: Path) -> None:
+    """API 复用父进程预绑定 socket；文件描述符只允许进入 API 子进程。"""
+    config = HarnessProcessConfig(
+        sqlite_path=tmp_path / "runtime.db",
+        port=12345,
+        mock_port=12346,
+        role="api",
+        identity_id="test-client-123",
+        timeout_seconds=1.0,
+        socket_fd=9,
+    )
+
+    assert config.to_payload()["socket_fd"] == 9
+    with pytest.raises(ValueError, match="TEST_HARNESS_CONFIG_INVALID"):
+        HarnessProcessConfig(
+            sqlite_path=tmp_path / "runtime.db",
+            port=12345,
+            mock_port=12346,
+            role="worker",
+            identity_id="test-client-123",
+            timeout_seconds=1.0,
+            socket_fd=9,
+        )
+
+
 def test_harness_process_config_rejects_unexpected_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "harness.json"
     config_path.write_text(

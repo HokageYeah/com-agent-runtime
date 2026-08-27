@@ -38,6 +38,7 @@ _ALLOWED_CONFIG_FIELDS = frozenset(
         "redis_url",
         "role",
         "schema",
+        "socket_fd",
         "sqlite_path",
         "timeout_seconds",
     }
@@ -62,6 +63,7 @@ class HarnessProcessConfig:
     redis_url: str | None = None
     database_url: str | None = None
     schema: str | None = None
+    socket_fd: int | None = None
 
     def __post_init__(self) -> None:
         if self.role not in {"api", "worker", "reconciler"}:
@@ -77,6 +79,10 @@ class HarnessProcessConfig:
         if (self.database_url is None) != (self.schema is None):
             raise ValueError("TEST_HARNESS_CONFIG_INVALID")
         if (self.provider_port is None) != (self.redis_url is None):
+            raise ValueError("TEST_HARNESS_CONFIG_INVALID")
+        if self.socket_fd is not None and (
+            self.role != "api" or self.socket_fd < 0
+        ):
             raise ValueError("TEST_HARNESS_CONFIG_INVALID")
         if self.provider_port is not None and not 1 <= self.provider_port <= 65535:
             raise ValueError("TEST_HARNESS_CONFIG_INVALID")
@@ -109,6 +115,9 @@ class HarnessProcessConfig:
         if self.provider_port is not None and self.redis_url is not None:
             payload["provider_port"] = self.provider_port
             payload["redis_url"] = self.redis_url
+        if self.socket_fd is not None:
+            # 仅是当前测试子进程继承的监听 socket 编号，不是主机端口或凭据。
+            payload["socket_fd"] = self.socket_fd
         return payload
 
     @classmethod
@@ -128,6 +137,7 @@ class HarnessProcessConfig:
                 redis_url=_optional_str(raw, "redis_url"),
                 database_url=_optional_str(raw, "database_url"),
                 schema=_optional_str(raw, "schema"),
+                socket_fd=_optional_int(raw, "socket_fd"),
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("TEST_HARNESS_CONFIG_INVALID") from exc
@@ -385,6 +395,7 @@ def run(config: HarnessProcessConfig) -> None:
             app,
             host="127.0.0.1",
             port=config.port,
+            fd=config.socket_fd,
             access_log=False,
             log_level="warning",
         )

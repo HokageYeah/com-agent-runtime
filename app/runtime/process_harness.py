@@ -11,7 +11,14 @@ import sys
 import tempfile
 from contextlib import AbstractContextManager
 from pathlib import Path
-from socket import create_connection
+from socket import (
+    AF_INET,
+    SO_REUSEADDR,
+    SOCK_STREAM,
+    SOL_SOCKET,
+    create_connection,
+    socket,
+)
 from time import monotonic
 
 from sqlalchemy import create_engine
@@ -61,6 +68,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         *,
         capture_stdout: bool = False,
         extra_environment: dict[str, str] | None = None,
+        pass_fds: tuple[int, ...] = (),
     ) -> subprocess.Popen[str]:
         project_root = str(Path(__file__).parents[2])
         # 子进程不继承父环境，防止生产数据库、Provider 或密钥意外进入测试路径。
@@ -74,6 +82,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             env=environment,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            pass_fds=pass_fds,
         )
         self._processes.append(process)
         return process
@@ -163,10 +172,23 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
     def start_api(
         self, port: int, *, mock_port: int, provider_port: int | None = None
     ) -> subprocess.Popen[str]:
-        """以受限 JSON 启动测试 API；仅模型场景冻结同一回环 route。"""
-        process = self._start_role(
-            "api", port=port, mock_port=mock_port, provider_port=provider_port
-        )
+        """通过父进程预绑定 socket 启动 API，消除分配与 Uvicorn 绑定间的竞态。"""
+        listener = socket(AF_INET, SOCK_STREAM)
+        listener.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        try:
+            listener.bind(("127.0.0.1", port))
+            listener.set_inheritable(True)
+            socket_fd = listener.fileno()
+            process = self._start_role(
+                "api",
+                port=port,
+                mock_port=mock_port,
+                provider_port=provider_port,
+                socket_fd=socket_fd,
+            )
+        finally:
+            # Popen 已把 fd 继承给子进程；父进程必须关闭副本，端口所有权只留给 API。
+            listener.close()
         # API 子进程需冷导入完整 Runtime app（FastAPI+SQLAlchemy+Worker 栈），
         # CI 受限 runner 的冷启动可超过调用方给的短超时；与 _wait_for_ready
         # 保持同一 60 秒硬下限，正常启动仍会在端口就绪时立即返回。
@@ -193,6 +215,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
     def _start_role(
         self, role: str, *, port: int, mock_port: int, ready: bool = False,
         provider_port: int | None = None,
+        socket_fd: int | None = None,
     ) -> subprocess.Popen[str]:
         if self._postgres is None:
             self.sqlite_session_factory()
@@ -221,6 +244,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             redis_url=self._redis_url if provider_port is not None else None,
             database_url=database_url,
             schema=self._postgres.schema if self._postgres is not None else None,
+            socket_fd=socket_fd,
         )
         config_path = self.path / f"{role}.json"
         config_path.write_text(json.dumps(config.to_payload()), encoding="utf-8")
@@ -239,6 +263,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
                 if database_password is not None
                 else None
             ),
+            pass_fds=(socket_fd,) if socket_fd is not None else (),
         )
         if ready:
             self._wait_for_ready(process, role)
