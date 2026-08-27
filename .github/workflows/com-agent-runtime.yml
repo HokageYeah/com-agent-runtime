@@ -28,8 +28,13 @@ jobs:
       - name: Run Ruff
         run: poetry run ruff check app tests
 
-      - name: Run pytest
-        run: poetry run pytest
+      # 进程 harness 会启动真实 API/Worker/Reconciler 子进程；先在干净解释器中
+      # 独立验收，避免共享 runner 在完整测试末段的资源峰值造成偶发冷启动超时。
+      - name: Run process harness tests
+        run: poetry run pytest tests/test_runtime_process_harness.py
+
+      - name: Run remaining tests
+        run: poetry run pytest --ignore=tests/test_runtime_process_harness.py
 
   docker:
     runs-on: ubuntu-latest
