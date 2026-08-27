@@ -19,8 +19,9 @@
 | 确认已冻结的 API/Event/Tool/Artifact 契约 | [契约冻结记录](头脑风暴/docs/AgentRuntime/契约冻结记录.md) |
 | 查看开发阶段和历史完成记录 | [总控开发计划](头脑风暴/docs/AgentRuntime/plans/2026-07-07-AgentRuntime-总控开发计划.md)、[后端开发计划](头脑风暴/docs/AgentRuntime/backend/2026-07-07-AgentRuntime-后端开发计划.md) |
 | 理解当前回忆录图片生成通道 | [媒体通道设计说明](头脑风暴/docs/AgentRuntime/plans/2026-08-20-回忆录媒体通道设计说明.md) |
+| 规划 Docker 部署、回滚和发布验收 | [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md) |
 
-计划文档会保留历史决策和勾选记录。判断当前接口、版本和实现状态时，以 `app/contracts/`、当前路由、Alembic history、contract fixtures 和实际测试为准。
+计划文档会保留历史决策和勾选记录。判断当前接口、版本和实现状态时，以 `app/contracts/`、当前路由、Alembic history、contract fixtures 和实际测试为准。Runtime Dockerfile、基础 Compose、test/production Compose、Docker CI 和远程部署工作流已进入本仓库。容器发布必须先遵守 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)。
 
 ## 整体架构
 
@@ -299,6 +300,19 @@ com-agent-runtime/
 | pre-commit / GitHub Actions | 本地提交前和远端 CI 门禁 |
 
 项目没有把 Provider 写死为某一家模型服务。真实 Provider、模型、endpoint、价格和 API Key 由受控部署配置决定；`MODEL_ROUTES_JSON=[]` 时不调用外部模型，MemoirAgent 走确定性模板降级。
+
+## Docker 部署摘要
+
+基础 Dockerfile、基础 Compose、test/production Compose、Docker CI 和 tag 触发的腾讯云远程部署工作流已进入本仓库（工作流说明见部署契约第 9 节）。部署合同集中在 [docker/backend/DOCKER_DEPLOY.md](docker/backend/DOCKER_DEPLOY.md)，实现与发布必须遵守以下边界：
+
+- 镜像 tag 小写化后必须且只能包含 `test` 或 `production` 之一；两者同时出现或都未出现时拒绝部署。
+- 镜像 tag/digest 只标识代码产物和环境；AgentPackage 版本必须另行通过 `register --version` 明确指定，不能从 tag 推导。
+- API、Worker、launcher、Reconciler 是四个独立 workload；Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，四个长期 workload 只在两道门禁都成功后启动。
+- Docker 容器内 Runtime API 固定监听 `8002`；腾讯云宿主回环端口使用 test `18002`、production `18003`，情侣日记仍通过私有别名 `http://runtime-api:8002` 访问。
+- production 只连接外部 Runtime 专用数据库和 Redis，固定 `couple_diary_agent_runtime_prod`，并保持 `DB_AUTO_CREATE=false`；test 使用完全隔离的数据库、Redis namespace/DB 和随机凭据。
+- production Compose 强制显式注入 `RUNTIME_IMAGE`（缺失即 fail-closed）：默认服务器本地构建 tag 模式（`RUNTIME_PULL_POLICY` 默认 `missing`），接镜像仓库后可切 `repository@sha256:<digest>` 加 `RUNTIME_PULL_POLICY: always`，可变兜底 tag 无法进入生产；Worker 设置 `stop_grace_period` 覆盖整个节点执行预算，保证 SIGTERM draining 语义不被强杀破坏。
+- 镜像以非 root 用户运行；生产 secret 由 secret manager/部署平台在运行时注入，不能写入镜像、构建参数、日志或进程参数。
+- 当前 Action 为服务器本地 tag 构建；接入 TCR 后才升级为 digest 发布。回滚不自动 downgrade 数据库，上线后必须完成四个 Runtime 探针。
 
 ## 环境与配置加载
 

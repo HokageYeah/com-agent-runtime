@@ -1,6 +1,8 @@
 name: com-agent-runtime
 
 on:
+  # push 不限制 branches / tags：分支 push 跑质量与 Docker 校验；
+  # tag push 额外触发下方 deploy job（仅 *test* / *production* tag 可通过段校验）。
   push:
   pull_request:
 
@@ -10,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.13"
 
@@ -28,3 +30,244 @@ jobs:
 
       - name: Run pytest
         run: poetry run pytest
+
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Validate test Docker Compose configuration
+        env:
+          COMPOSE_PROJECT_NAME: com-agent-runtime-ci-test
+          RUNTIME_ENV_FILE: .env.example
+          ENVIRONMENT: test
+          MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-test
+          AGENT_PACKAGE_VERSION: 1.0.4
+          # 库名必须与 Docker 部署契约的固定 test 库一致，不得使用 CI 专用别名。
+          DB_NAME: couple_diary_agent_runtime_test
+          DB_USER: runtime_ci
+          DB_PASSWORD: ci-not-a-secret
+          RUNTIME_MYSQL_ROOT_PASSWORD: ci-not-a-secret
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.test.yml
+          config --quiet
+
+      - name: Validate production Docker Compose configuration (server-built tag)
+        env:
+          COMPOSE_PROJECT_NAME: com-agent-runtime-ci-production
+          RUNTIME_ENV_FILE: .env.example
+          ENVIRONMENT: production
+          MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-production
+          AGENT_PACKAGE_VERSION: 1.0.4
+          # 服务器本地构建模式：RUNTIME_IMAGE 是本地 tag，pull_policy 默认 missing。
+          RUNTIME_IMAGE: com-agent-runtime:ci-placeholder
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production.yml
+          config --quiet
+
+      - name: Validate production Docker Compose configuration (registry digest)
+        env:
+          COMPOSE_PROJECT_NAME: com-agent-runtime-ci-production
+          RUNTIME_ENV_FILE: .env.example
+          ENVIRONMENT: production
+          MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-production
+          AGENT_PACKAGE_VERSION: 1.0.4
+          # 占位 digest 仅用于 Compose 插值校验，证明 registry digest 模式
+          # 同样可插值，且缺失 RUNTIME_IMAGE 时会 fail-closed；不是真实镜像引用。
+          RUNTIME_IMAGE: registry.example.invalid/com-agent-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          RUNTIME_PULL_POLICY: always
+        run: >-
+          docker compose -f docker-compose.yml -f docker-compose.production.yml
+          config --quiet
+
+      - name: Build Runtime Docker image
+        env:
+          COMPOSE_PROJECT_NAME: com-agent-runtime-ci-test
+          RUNTIME_ENV_FILE: .env.example
+          ENVIRONMENT: test
+          MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-test
+          AGENT_PACKAGE_VERSION: 1.0.4
+        run: docker compose build api
+
+      - name: Verify image runs as non-root
+        run: |
+          uid="$(docker run --rm --entrypoint id com-agent-runtime:local -u)"
+          echo "image uid=${uid}"
+          test "${uid}" != "0"
+
+  deploy:
+    name: Deploy Runtime by tag
+    # 仅 tag push 触发；质量与 Docker 校验全部通过后才允许上服务器。
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [quality, docker]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: com-agent-runtime-server-deploy
+      cancel-in-progress: false
+
+    steps:
+      - name: Deploy by SSH
+        # 固定到 v1.0.3 的完整提交，避免可变 tag 被替换后获取服务器 SSH 私钥。
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262
+        env:
+          PROJECT_DIR: ${{ secrets.AGENT_RUNTIME_PROJECT_DIR }}
+          TEST_ENV_FILE: ${{ secrets.AGENT_RUNTIME_TEST_ENV_FILE }}
+          PRODUCTION_ENV_FILE: ${{ secrets.AGENT_RUNTIME_PRODUCTION_ENV_FILE }}
+          DEPLOY_TAG: ${{ github.ref_name }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 60m
+          envs: PROJECT_DIR,TEST_ENV_FILE,PRODUCTION_ENV_FILE,DEPLOY_TAG
+          script: |
+            set -eu
+
+            # 关闭 BuildKit，兼容服务器 docker compose build 导出镜像阶段的已知环境问题（与业务仓一致）。
+            export DOCKER_BUILDKIT=0
+            export COMPOSE_DOCKER_CLI_BUILD=0
+
+            TARGET_BRANCH="master"
+
+            # 部署仍按 tag 构建，但服务器仓库目录不应长期停留在 detached HEAD；
+            # 无论成功失败，退出前都把工作区恢复到远程 master 一致状态。
+            sync_workspace_to_master() {
+              echo "同步服务器工作区到 origin/${TARGET_BRANCH}"
+              git checkout "${TARGET_BRANCH}"
+              git reset --hard "origin/${TARGET_BRANCH}"
+            }
+
+            restore_master_on_exit() {
+              restore_exit_code=$?
+              echo "脚本退出收尾：恢复服务器工作区到 origin/${TARGET_BRANCH}"
+              # --force / --prune-tags：同名 tag 删除重打、废弃 tag 清理都以远程为准，理由同业务仓部署脚本。
+              git fetch --all --tags --force --prune --prune-tags || true
+              sync_workspace_to_master || true
+              exit "${restore_exit_code}"
+            }
+
+            # 环境标识必须是完整 tag 段，拒绝 contest、preproduction 等仅包含子串的 tag。
+            normalized_tag=$(printf '%s' "${DEPLOY_TAG}" | tr '[:upper:]' '[:lower:]')
+            has_test=0
+            has_production=0
+            if printf '%s\n' "${normalized_tag}" | grep -Eq '(^|[-_.])test([-.]|$)'; then has_test=1; fi
+            if printf '%s\n' "${normalized_tag}" | grep -Eq '(^|[-_.])production([-.]|$)'; then has_production=1; fi
+
+            if [ "${has_test}" -eq "${has_production}" ]; then
+              echo "tag 必须且只能包含一个独立环境段：test 或 production"
+              echo "示例：runtime-v1.0.0-test.1 / runtime-v1.0.0-production.1"
+              exit 1
+            fi
+
+            if [ "${has_production}" -eq 1 ]; then
+              APP_ENV="production"
+              ENV_FILE="${PRODUCTION_ENV_FILE}"
+              COMPOSE_FILES="-f docker-compose.yml -f docker-compose.production.yml"
+            else
+              APP_ENV="test"
+              ENV_FILE="${TEST_ENV_FILE}"
+              COMPOSE_FILES="-f docker-compose.yml -f docker-compose.test.yml"
+            fi
+
+            # 强制两套 Compose identity 与私有集成网络分离，不信任 env 中的可变同名值。
+            export COMPOSE_PROJECT_NAME="com-agent-runtime-${APP_ENV}"
+            export MEMOIR_INTEGRATION_NETWORK="memoir-integration-${APP_ENV}"
+
+            if [ -z "${PROJECT_DIR}" ]; then
+              echo "缺少 GitHub Secret: AGENT_RUNTIME_PROJECT_DIR"
+              exit 1
+            fi
+
+            if [ -z "${ENV_FILE}" ]; then
+              echo "缺少当前环境对应的 GitHub Secret: ${APP_ENV} env file path"
+              echo "test 需要 AGENT_RUNTIME_TEST_ENV_FILE，production 需要 AGENT_RUNTIME_PRODUCTION_ENV_FILE"
+              exit 1
+            fi
+
+            echo "进入项目目录: ${PROJECT_DIR}"
+            cd "${PROJECT_DIR}"
+
+            # GitHub concurrency 之外再加服务器锁，防止手工部署与 Action 同时改动同一工作区。
+            exec 9>/tmp/com-agent-runtime.deploy.lock
+            if ! flock -n 9; then
+              echo "另一个 Runtime 部署正在执行，本次拒绝并发进入"
+              exit 1
+            fi
+
+            trap 'restore_master_on_exit' EXIT
+
+            echo "当前分支信息："
+            git branch --show-current || true
+
+            echo "拉取远程最新代码与 tag..."
+            git fetch --all --tags --force --prune --prune-tags
+
+            # 先同步到远程 master，再校验 tag 祖先关系，避免旁支提交凭 tag 权限进入服务器。
+            sync_workspace_to_master
+
+            if ! git merge-base --is-ancestor "refs/tags/${DEPLOY_TAG}" "origin/${TARGET_BRANCH}"; then
+              echo "部署 tag 未指向 origin/${TARGET_BRANCH} 已包含的提交: ${DEPLOY_TAG}"
+              exit 1
+            fi
+
+            echo "切换到部署 tag: ${DEPLOY_TAG}"
+            git checkout --detach "refs/tags/${DEPLOY_TAG}"
+
+            if [ ! -f "${ENV_FILE}" ]; then
+              echo "缺少服务器私有环境文件: ${ENV_FILE}"
+              echo "该文件需提供 Compose 插值变量（ENVIRONMENT/RUNTIME_ENV_FILE/DB_*/RUNTIME_REDIS_URL 等），参考 docker/backend/DOCKER_DEPLOY.md"
+              exit 1
+            fi
+
+            echo "部署环境: ${APP_ENV}"
+            echo "部署 tag: ${DEPLOY_TAG}"
+
+            # 两个 overlay 都把本次发布固化到唯一 tag；基础 Compose 使用 REPOSITORY/TAG，
+            # production overlay 使用 RUNTIME_IMAGE，三者必须指向同一镜像引用。
+            export RUNTIME_IMAGE_REPOSITORY="com-agent-runtime"
+            export RUNTIME_IMAGE_TAG="${DEPLOY_TAG}"
+            export RUNTIME_IMAGE="com-agent-runtime:${DEPLOY_TAG}"
+
+            if ! docker network inspect "${MEMOIR_INTEGRATION_NETWORK}" > /dev/null 2>&1; then
+              echo "创建环境私有集成网络: ${MEMOIR_INTEGRATION_NETWORK}"
+              docker network create "${MEMOIR_INTEGRATION_NETWORK}" > /dev/null
+            fi
+
+            echo "开始构建唯一发布镜像（所有 Runtime 服务复用 api 的镜像产物）..."
+            docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" build api
+
+            echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动四个长期 workload）..."
+            docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" up -d --no-build
+
+            echo "API 健康冒烟（等待数据库、身份注册表与 Runtime 治理依赖就绪）..."
+            API_ENDPOINT="$(docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" port api 8002)"
+            echo "API 宿主端点: ${API_ENDPOINT}"
+            smoke_url() {
+              smoke_path="$1"
+              smoke_attempt=0
+              until curl --fail --silent --show-error "http://${API_ENDPOINT}${smoke_path}" > /dev/null; do
+                smoke_attempt=$((smoke_attempt + 1))
+                if [ "${smoke_attempt}" -ge 30 ]; then
+                  echo "Runtime 探针超时: ${smoke_path}"
+                  return 1
+                fi
+                sleep 2
+              done
+            }
+            smoke_url /healthz
+            smoke_url /readyz
+            smoke_url /api/v1/runtime/health/live
+            smoke_url /api/v1/runtime/health/ready
+
+            running_services="$(docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps --status running --services)"
+            printf '%s\n' "${running_services}" | grep -qx "api"
+            printf '%s\n' "${running_services}" | grep -qx "launcher"
+            printf '%s\n' "${running_services}" | grep -qx "worker"
+            printf '%s\n' "${running_services}" | grep -qx "reconciler"
+            echo "Runtime 四个长期 workload 与四个 API 探针全部通过"
+
+            echo "部署完成，当前容器状态："
+            docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps

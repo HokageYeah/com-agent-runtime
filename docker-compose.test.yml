@@ -1,0 +1,93 @@
+x-test-infra-dependencies: &test-infra-dependencies
+  # prepare 自身只等待隔离依赖就绪，不得引用含 prepare 的锚点（会形成自依赖环）。
+  mysql:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+x-test-long-dependencies: &test-long-dependencies
+  # 四个长期 workload 的依赖 = 基础设施健康 + Package 注册门禁。
+  <<: *test-infra-dependencies
+  register:
+    condition: service_completed_successfully
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${RUNTIME_MYSQL_ROOT_PASSWORD:?set an isolated test root password}
+      MYSQL_DATABASE: ${DB_NAME:?set the test Runtime database name}
+      MYSQL_USER: ${DB_USER:?set the isolated test database user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set the isolated test database password}
+      TZ: ${TZ:-Asia/Shanghai}
+    command:
+      ["--default-authentication-plugin=mysql_native_password", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - runtime_test_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prepare:
+    depends_on: *test-infra-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+      DB_AUTO_CREATE: "true"
+
+  register:
+    depends_on:
+      <<: *test-infra-dependencies
+      prepare:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+      DB_AUTO_CREATE: "true"
+
+  api:
+    depends_on: *test-long-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+
+  launcher:
+    depends_on: *test-long-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+
+  worker:
+    depends_on: *test-long-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+
+  reconciler:
+    depends_on: *test-long-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+
+volumes:
+  runtime_test_mysql_data:

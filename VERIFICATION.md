@@ -10,6 +10,48 @@
 
 `SERVICE_BASE_URL`、外部 exporter、HMAC、Fernet、JWT 和私有媒体桶的生成与填写规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。本文只保留启动顺序和可观察的验收结果。
 
+Runtime Dockerfile、基础 Compose、test/production Compose、Docker CI 和 tag 触发的远程部署工作流已进入本仓库。Compose 硬门禁顺序是 `prepare -> register --dry-run -> register -> 四个长期 workload`，test/production 使用独立 Compose project 和私有集成网络。当前远端 Action 是服务器本地 tag 构建，registry digest 是未来升级路径。
+
+## Docker 部署契约验证
+
+当前可执行的文档和代码门禁如下；这些命令不读取或输出生产凭据：
+
+```bash
+test -f docker/backend/DOCKER_DEPLOY.md
+test -f README.md
+test -f ENV_CONFIG.md
+test -f VERIFICATION.md
+poetry run pytest -q tests/test_agent_runtime_cli.py
+poetry run pytest -q tests/test_runtime_process_harness.py
+poetry run ruff check .
+poetry run mypy app
+poetry run alembic heads
+git diff --check
+```
+
+使用已落地的 Dockerfile、基础 Compose、test/production Compose 构建对应环境镜像，并验证非 root 用户。当前服务器本地 tag 发布记录 image ID；未来接入 TCR 后固定并记录 digest。远程部署步骤必须复用同一验证：
+
+```bash
+docker build --pull --file docker/backend/Dockerfile \
+  --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" .
+docker image inspect "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+  --format '{{json .RepoDigests}}'
+docker run --rm --entrypoint id \
+  "$IMAGE_REPOSITORY@$IMAGE_DIGEST" -u
+```
+
+其中 `IMAGE_TAG` 必须恰好包含 `test` 或 `production` 之一；同时包含两者、两者都不包含或使用 `latest` 时验证失败。test 注入隔离数据库/Redis 和随机 secret，production 注入外部 Runtime-only 数据库/Redis 并确认 `DB_AUTO_CREATE=false`。启动 API 后执行：
+
+```bash
+BASE_URL="${BASE_URL:?set BASE_URL}"
+curl --fail --silent --show-error "$BASE_URL/healthz"
+curl --fail --silent --show-error "$BASE_URL/readyz"
+curl --fail --silent --show-error "$BASE_URL/api/v1/runtime/health/live"
+curl --fail --silent --show-error "$BASE_URL/api/v1/runtime/health/ready"
+```
+
+四个请求必须返回 HTTP 200；四类 workload 必须分别运行，prepare/migrations 只能成功执行一次。所有输出不得包含 secret、DSN、私有 URL、prompt、正文、模型原文或工具 payload。
+
 ## 一键配置、启动与验收
 
 项目根目录的 `agent-runtime.sh` 提供六个对外命令：
@@ -199,7 +241,7 @@ MODEL_PROVIDER_API_KEYS_JSON={"memoir-private-v1":"<由 secret manager 注入的
 
 预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 和周期 launcher 分为独立 workload，并使用同一权威数据库与配置版本。
 
-AgentPackage 不随部署自动入库：正式服务链路只读 `agent_definitions` 表内的 definition，从不自动同步磁盘包。发布或升级包版本后，须在启动服务前把它幂等注册进目标环境（`--version` 必填，防止静默注册过期版本；`--dry-run` 只加载打印不写库，可用于预检库内现状）：
+AgentPackage 不会由应用运行时自动选版本：手工部署时须显式执行下列命令；Docker Compose 部署则由 `register` 一次性服务对 `AGENT_PACKAGE_VERSION` 执行同样的 dry-run + 幂等注册，失败时不启动长期 workload：
 
 ```bash
 ./agent-runtime.sh register production --agent-id memoir_agent --version <部署包版本>

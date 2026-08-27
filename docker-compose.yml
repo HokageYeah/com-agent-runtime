@@ -1,0 +1,140 @@
+x-runtime-image: &runtime-image
+  build:
+    context: .
+    dockerfile: docker/backend/Dockerfile
+  image: ${RUNTIME_IMAGE_REPOSITORY:-com-agent-runtime}:${RUNTIME_IMAGE_TAG:-local}
+
+x-runtime-env-file: &runtime-env-file
+  - ${RUNTIME_ENV_FILE:?set RUNTIME_ENV_FILE to a private runtime env file}
+
+x-runtime-environment: &runtime-environment
+  ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT to test or production}
+  HOST: 0.0.0.0
+  PORT: 8002
+  RELOAD: "false"
+  PYTHONUNBUFFERED: "1"
+
+x-runtime-hardening: &runtime-hardening
+  labels:
+    # 强制 test/production 使用不同 Compose project，避免容器、卷和网络相互覆盖。
+    com.agent-runtime.compose-project: ${COMPOSE_PROJECT_NAME:?set a unique COMPOSE_PROJECT_NAME}
+    com.agent-runtime.environment: ${ENVIRONMENT:?set ENVIRONMENT to test or production}
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  init: true
+
+services:
+  # 一次性迁移 job：留在默认服务集（不挂 profile），让任何 up 都必须先跑迁移。
+  # 之前挂在 profile 下时，普通 `docker compose up` 会跳过迁移直接启动长期服务，
+  # 空库或旧 schema 直接进入运行态——这是部署合同禁止的路径。
+  prepare:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    command:
+      ["python", "-m", "app.scripts.agent_runtime_cli", "prepare", "${ENVIRONMENT:?set ENVIRONMENT}"]
+    restart: "no"
+
+  # Package 注册是数据库迁移后的独立幂等门禁；未明确版本或注册失败时不启动长期进程。
+  register:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    depends_on:
+      prepare:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - >-
+        python -m app.scripts.agent_runtime_cli register "${ENVIRONMENT:?set ENVIRONMENT}"
+        --agent-id memoir_agent --version "${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}" --dry-run &&
+        python -m app.scripts.agent_runtime_cli register "${ENVIRONMENT:?set ENVIRONMENT}"
+        --agent-id memoir_agent --version "${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}"
+    restart: "no"
+
+  api:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    # prepare 成功退出前不得启动任何长期 workload；迁移失败则 up 整体中止。
+    depends_on:
+      register:
+        condition: service_completed_successfully
+    command: ["python", "run_app.py"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RUNTIME_API_HOST_PORT:-18002}:8002"
+    volumes:
+      - runtime_logs:/app/logs
+    networks:
+      default: {}
+      memoir-integration:
+        aliases:
+          - runtime-api
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/healthz', timeout=5)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  launcher:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    depends_on:
+      register:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.scripts.agent_runtime_cli", "_launcher-loop"]
+    restart: unless-stopped
+    volumes:
+      - runtime_logs:/app/logs
+    networks:
+      - default
+      - memoir-integration
+
+  worker:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    depends_on:
+      register:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.worker", "--worker-id", "${RUNTIME_WORKER_ID:-agent-runtime-worker}"]
+    restart: unless-stopped
+    # Worker 收到 SIGTERM 只置 draining 标记，须等当前节点跨 checkpoint 边界完成后退出；
+    # 媒体节点预算 900s（MEMOIR_MEDIA_NODE_BUDGET_SECONDS），Docker 默认 10s 强杀会
+    # 打断节点执行。给足整个节点预算加余量，兑现"当前节点完成后退出"的合同。
+    stop_grace_period: 16m
+    volumes:
+      - runtime_logs:/app/logs
+    networks:
+      - default
+      - memoir-integration
+
+  reconciler:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    depends_on:
+      register:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.reconciler", "--interval-seconds", "300"]
+    restart: unless-stopped
+    volumes:
+      - runtime_logs:/app/logs
+    networks:
+      - default
+      - memoir-integration
+
+volumes:
+  runtime_logs:
+
+networks:
+  memoir-integration:
+    external: true
+    name: ${MEMOIR_INTEGRATION_NETWORK:?set MEMOIR_INTEGRATION_NETWORK}

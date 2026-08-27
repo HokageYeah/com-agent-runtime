@@ -1,0 +1,52 @@
+# 正式环境只接入运行时私有的外部 MySQL 与 Redis；不得在此文件创建依赖 sidecar。
+# 镜像引用必须显式注入 RUNTIME_IMAGE，支持两种受控模式：
+#
+# 1. 服务器本地构建模式（当前部署工作流使用，与业务仓 couple-diary-doc 同模式）：
+#    RUNTIME_IMAGE 设为服务器本地构建 tag（如 com-agent-runtime:<deploy-tag>），
+#    RUNTIME_PULL_POLICY 保持默认 missing——本地命中即用，不访问 registry。
+#    `docker compose build` 会把构建产物打上该 tag（基础文件继承的 build 段生效）。
+#
+# 2. Registry digest 模式（未来接入 ACR 等镜像仓库后的升级路径）：
+#    RUNTIME_IMAGE 设为 repository@sha256:<verified-digest>，并把
+#    RUNTIME_PULL_POLICY 显式设为 always——digest 引用无法被 build 打 tag
+#    （invalid reference format 直接失败），只能拉取已验证的不可变镜像。
+#
+# 两种模式共用同一 fail-closed 约束：缺 RUNTIME_IMAGE 时 Compose 插值直接报错，
+# 可变兜底 tag（latest / local）无法进入生产。
+services:
+  prepare:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      # 正式库必须由独立 DBA / 基础设施流程预先创建，prepare 只允许迁移既有 Runtime 数据库。
+      DB_AUTO_CREATE: "false"
+
+  register:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
+
+  api:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
+
+  launcher:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
+
+  worker:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
+
+  reconciler:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
