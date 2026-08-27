@@ -138,12 +138,15 @@ def test_process_harness_does_not_inherit_parent_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("RUNTIME_TEST_SHOULD_NOT_ESCAPE", "private")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/test-python-runtime/lib")
     with ProcessHarness() as harness:
         child = harness.start(
             [
                 sys.executable,
                 "-c",
-                "import os, sys; sys.exit(int('RUNTIME_TEST_SHOULD_NOT_ESCAPE' in os.environ))",
+                "import os, sys; "
+                "sys.exit(int('RUNTIME_TEST_SHOULD_NOT_ESCAPE' in os.environ or "
+                "os.environ.get('LD_LIBRARY_PATH') != '/test-python-runtime/lib'))",
             ]
         )
 

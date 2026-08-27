@@ -29,6 +29,13 @@ from app.db.sqlalchemy_db import Base
 from app.runtime.harness_entry import HarnessProcessConfig
 from app.runtime.postgres_harness import PostgresHarnessConfig
 
+_PYTHON_RUNTIME_ENV_ALLOWLIST = (
+    "DYLD_LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "PATH",
+    "SYSTEMROOT",
+)
+
 
 class ProcessHarness(AbstractContextManager["ProcessHarness"]):
     """所有测试子进程均由此对象回收，超时或断言失败也不遗留后台服务。"""
@@ -71,8 +78,16 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         pass_fds: tuple[int, ...] = (),
     ) -> subprocess.Popen[str]:
         project_root = str(Path(__file__).parents[2])
-        # 子进程不继承父环境，防止生产数据库、Provider 或密钥意外进入测试路径。
+        # 只继承 Python/动态链接器运行所需的固定变量；业务配置、Provider 与密钥
+        # 仍全部隔离。GitHub setup-python 的解释器依赖 LD_LIBRARY_PATH 才能加载扩展。
         environment = {"PYTHONPATH": project_root}
+        environment.update(
+            {
+                key: value
+                for key in _PYTHON_RUNTIME_ENV_ALLOWLIST
+                if (value := os.environ.get(key))
+            }
+        )
         if extra_environment is not None:
             environment.update(extra_environment)
         process = subprocess.Popen(
