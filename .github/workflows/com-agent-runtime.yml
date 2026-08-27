@@ -28,8 +28,18 @@ jobs:
       - name: Run Ruff
         run: poetry run ruff check app tests
 
-      - name: Run pytest
-        run: poetry run pytest
+      # 该用例会同时启动 API、Worker 和 Reconciler 子进程。让它在全新的
+      # pytest 进程中运行，避免受全量测试累积的进程/资源状态干扰。
+      - name: Run Runtime process integration test in isolation
+        run: >-
+          poetry run pytest
+          tests/test_runtime_process_harness.py::test_process_harness_starts_api_worker_and_reconciler_with_safe_readiness
+
+      # 精确排除上面已执行的节点：所有测试仍各执行一次。
+      - name: Run remaining pytest suite
+        run: >-
+          poetry run pytest
+          --deselect=tests/test_runtime_process_harness.py::test_process_harness_starts_api_worker_and_reconciler_with_safe_readiness
 
   docker:
     runs-on: ubuntu-latest
