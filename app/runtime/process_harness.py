@@ -105,20 +105,29 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         raise TimeoutError("TEST_HARNESS_COMPLETED_TIMEOUT")
 
     def wait_for_port(
-        self, host: str, port: int, *, timeout_seconds: float | None = None
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout_seconds: float | None = None,
+        process: subprocess.Popen[str] | None = None,
     ) -> None:
-        """健康探针只探测 loopback TCP 端口，超时即让测试失败并触发回收。"""
+        """探测 loopback 端口；子进程提前退出时立即返回固定安全错误码。"""
         if host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("TEST_HARNESS_LOOPBACK_REQUIRED")
         deadline = monotonic() + (
             self._timeout_seconds if timeout_seconds is None else timeout_seconds
         )
         while monotonic() < deadline:
+            if process is not None and process.poll() is not None:
+                raise RuntimeError("TEST_HARNESS_PROCESS_EXITED")
             try:
                 with create_connection((host, port), timeout=0.1):
                     return
             except OSError:
                 pass
+        if process is not None and process.poll() is not None:
+            raise RuntimeError("TEST_HARNESS_PROCESS_EXITED")
         raise TimeoutError("TEST_HARNESS_HEALTH_TIMEOUT")
 
     def start_mock_business(
@@ -130,10 +139,12 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             [
                 sys.executable,
                 "-c",
-                f"from app.runtime.mock_business_server import serve; serve({port}, {identity!r})",
-            ]
+                "from app.runtime.mock_business_server import serve; "
+                f"serve({port}, {identity!r}, announce_ready=True)",
+            ],
+            capture_stdout=True,
         )
-        self.wait_for_port("127.0.0.1", port)
+        self._wait_for_ready(process, "mock_business")
         return process
 
     def start_mock_provider(self, port: int) -> subprocess.Popen[str]:
@@ -141,10 +152,12 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         process = self.start(
             [
                 sys.executable, "-c",
-                f"from app.runtime.mock_provider_server import serve; serve({port}, {self._identity_id!r})",
-            ]
+                "from app.runtime.mock_provider_server import serve; "
+                f"serve({port}, {self._identity_id!r}, announce_ready=True)",
+            ],
+            capture_stdout=True,
         )
-        self.wait_for_port("127.0.0.1", port)
+        self._wait_for_ready(process, "mock_provider")
         return process
 
     def start_api(
@@ -158,7 +171,10 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         # CI 受限 runner 的冷启动可超过调用方给的短超时；与 _wait_for_ready
         # 保持同一 60 秒硬下限，正常启动仍会在端口就绪时立即返回。
         self.wait_for_port(
-            "127.0.0.1", port, timeout_seconds=max(self._timeout_seconds, 60.0)
+            "127.0.0.1",
+            port,
+            timeout_seconds=max(self._timeout_seconds, 60.0),
+            process=process,
         )
         return process
 

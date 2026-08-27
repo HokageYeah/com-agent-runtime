@@ -171,5 +171,9 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
     return _Handler
 
 
-def serve(port: int, identity_id: str) -> None:
-    ThreadingHTTPServer(("127.0.0.1", port), _handler(identity_id)).serve_forever()
+def serve(port: int, identity_id: str, *, announce_ready: bool = False) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", port), _handler(identity_id))
+    if announce_ready:
+        # 固定就绪事件不包含端口、身份或请求内容；父进程无需再发 TCP 自探针。
+        print('{"event":"ready","role":"mock_business"}', flush=True)
+    server.serve_forever()

@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event
 
 
-def serve(port: int, identity_id: str) -> None:
+def serve(port: int, identity_id: str, *, announce_ready: bool = False) -> None:
     state = {"model_blocked": False, "model_started": False, "model_calls": 0}
     mode = {"repair_after_invalid": False}
     release = Event()
@@ -77,4 +77,8 @@ def serve(port: int, identity_id: str) -> None:
         def log_message(self, _format: str, *_args: object) -> None:
             pass
 
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    if announce_ready:
+        # Provider mock 同样只发送固定安全事件，避免探活连接占用后续服务端口。
+        print('{"event":"ready","role":"mock_provider"}', flush=True)
+    server.serve_forever()

@@ -1,6 +1,7 @@
 import socket
 import sys
 from pathlib import Path
+from time import monotonic
 
 import httpx
 import pytest
@@ -124,6 +125,22 @@ def test_process_harness_does_not_inherit_parent_environment(
         assert harness.wait_for_exit(child) == 0
 
 
+def test_wait_for_port_reports_child_exit_without_waiting_for_health_timeout() -> None:
+    """服务进程已退出时必须立即失败，不能继续误报为完整健康探针超时。"""
+    try:
+        port = _available_loopback_port()
+    except PermissionError:
+        pytest.skip("当前受限环境禁止绑定 loopback 端口")
+    with ProcessHarness(timeout_seconds=5) as harness:
+        child = harness.start([sys.executable, "-c", "raise SystemExit(17)"])
+        started_at = monotonic()
+
+        with pytest.raises(RuntimeError, match="TEST_HARNESS_PROCESS_EXITED"):
+            harness.wait_for_port("127.0.0.1", port, process=child)
+
+        assert monotonic() - started_at < 1
+
+
 def test_process_harness_initializes_isolated_sqlite() -> None:
     with ProcessHarness() as harness:
         with harness.sqlite_session_factory()() as session:
@@ -230,11 +247,12 @@ def _available_loopback_port() -> int:
 def test_process_harness_starts_api_worker_and_reconciler_with_safe_readiness() -> None:
     try:
         mock_port = _available_loopback_port()
-        api_port = _available_loopback_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     with ProcessHarness(timeout_seconds=5) as harness:
         harness.start_mock_business(mock_port)
+        # mock 就绪后再分配 API 端口，避免 Linux 把预选端口用作探活连接源端口。
+        api_port = _available_loopback_port()
         harness.start_api(api_port, mock_port=mock_port)
         response = httpx.get(
             f"http://127.0.0.1:{api_port}/api/v1/runtime/health/live", timeout=2
