@@ -35,6 +35,8 @@ _PYTHON_RUNTIME_ENV_ALLOWLIST = (
     "PATH",
     "SYSTEMROOT",
 )
+_SAFE_FAILURE_ROLES = frozenset({"api", "worker", "reconciler"})
+_SAFE_FAILURE_STAGES = frozenset({"dependencies", "api_app", "api_server"})
 
 
 class ProcessHarness(AbstractContextManager["ProcessHarness"]):
@@ -74,6 +76,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         command: list[str],
         *,
         capture_stdout: bool = False,
+        capture_stderr: bool = False,
         extra_environment: dict[str, str] | None = None,
         pass_fds: tuple[int, ...] = (),
     ) -> subprocess.Popen[str]:
@@ -96,7 +99,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             text=True,
             env=environment,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
             pass_fds=pass_fds,
         )
         self._processes.append(process)
@@ -144,15 +147,49 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         )
         while monotonic() < deadline:
             if process is not None and process.poll() is not None:
-                raise RuntimeError("TEST_HARNESS_PROCESS_EXITED")
+                raise RuntimeError(self._safe_process_exit_message(process))
             try:
                 with create_connection((host, port), timeout=0.1):
                     return
             except OSError:
                 pass
         if process is not None and process.poll() is not None:
-            raise RuntimeError("TEST_HARNESS_PROCESS_EXITED")
+            raise RuntimeError(self._safe_process_exit_message(process))
         raise TimeoutError("TEST_HARNESS_HEALTH_TIMEOUT")
+
+    @staticmethod
+    def _safe_process_exit_message(process: subprocess.Popen[str]) -> str:
+        """只从 stderr 提取子进程产生的固定元数据，其余内容全部丢弃。"""
+        return_code = process.poll()
+        if process.stderr is not None:
+            for line in process.stderr.read(8192).splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or set(event) != {
+                    "event",
+                    "role",
+                    "stage",
+                    "error_type",
+                }:
+                    continue
+                role = event.get("role")
+                stage = event.get("stage")
+                error_type = event.get("error_type")
+                if (
+                    event.get("event") == "harness_failed"
+                    and role in _SAFE_FAILURE_ROLES
+                    and stage in _SAFE_FAILURE_STAGES
+                    and isinstance(error_type, str)
+                    and error_type.isidentifier()
+                    and len(error_type) <= 80
+                ):
+                    return (
+                        "TEST_HARNESS_PROCESS_EXITED:"
+                        f"{role}:{stage}:{error_type}:{return_code}"
+                    )
+        return "TEST_HARNESS_PROCESS_EXITED"
 
     def start_mock_business(
         self, port: int, *, identity_id: str | None = None
@@ -273,6 +310,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
                 str(config_path),
             ],
             capture_stdout=ready,
+            capture_stderr=role == "api",
             extra_environment=(
                 {"PGPASSWORD": database_password}
                 if database_password is not None
@@ -294,7 +332,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             selector.register(process.stdout, selectors.EVENT_READ)
             while monotonic() < deadline:
                 if process.poll() is not None:
-                    raise RuntimeError("TEST_HARNESS_PROCESS_EXITED")
+                    raise RuntimeError(self._safe_process_exit_message(process))
                 if not selector.select(timeout=min(0.1, deadline - monotonic())):
                     continue
                 line = process.stdout.readline()

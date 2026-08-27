@@ -1,5 +1,6 @@
 import socket
 import sys
+from os import dup
 from pathlib import Path
 from time import monotonic
 
@@ -8,6 +9,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app.models import AgentDefinition
+from app.runtime import harness_entry
 from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.harness_entry import HarnessProcessConfig, build_dependencies
 from app.runtime.process_harness import ProcessHarness
@@ -86,6 +88,42 @@ def test_harness_process_config_carries_only_api_listener_fd(tmp_path: Path) -> 
             timeout_seconds=1.0,
             socket_fd=9,
         )
+
+
+def test_api_harness_preserves_inherited_ipv4_socket_family(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API 必须按 IPv4 传入预绑定 socket，不得被 Uvicorn 重包装为 Unix socket。"""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    expected_address = listener.getsockname()
+    inherited_fd = dup(listener.fileno())
+    observed: dict[str, object] = {}
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            observed["config"] = config
+
+        def run(self, *, sockets: list[socket.socket]) -> None:
+            observed["family"] = sockets[0].family
+            observed["address"] = sockets[0].getsockname()
+
+    monkeypatch.setattr(harness_entry.uvicorn, "Server", _Server)
+    try:
+        config = HarnessProcessConfig(
+            sqlite_path=tmp_path / "runtime.db",
+            port=12345,
+            mock_port=12346,
+            role="api",
+            identity_id="test-client-123",
+            timeout_seconds=1.0,
+            socket_fd=inherited_fd,
+        )
+        harness_entry.serve_api(object(), config)
+    finally:
+        listener.close()
+
+    assert observed["family"] == socket.AF_INET
+    assert observed["address"] == expected_address
 
 
 def test_harness_process_config_rejects_unexpected_fields(tmp_path: Path) -> None:
@@ -167,6 +205,31 @@ def test_wait_for_port_reports_child_exit_without_waiting_for_health_timeout() -
             harness.wait_for_port("127.0.0.1", port, process=child)
 
         assert monotonic() - started_at < 1
+
+
+def test_wait_for_port_reports_only_safe_structured_child_failure() -> None:
+    """CI 只显示固定启动阶段和异常类型，不得透传子进程 stderr。"""
+    with ProcessHarness(timeout_seconds=5) as harness:
+        child = harness.start(
+            [
+                sys.executable,
+                "-c",
+                "import sys; "
+                "sys.stderr.write('{\"event\":\"harness_failed\",\"role\":\"api\",'"
+                "'\"stage\":\"api_server\",\"error_type\":\"SystemExit\"}\\n'); "
+                "sys.stderr.write('private-value-must-not-escape\\n'); "
+                "raise SystemExit(17)",
+            ],
+            capture_stderr=True,
+        )
+
+        with pytest.raises(RuntimeError) as caught:
+            harness.wait_for_port("127.0.0.1", 12345, process=child)
+
+    assert str(caught.value) == (
+        "TEST_HARNESS_PROCESS_EXITED:api:api_server:SystemExit:17"
+    )
+    assert "private-value-must-not-escape" not in str(caught.value)
 
 
 def test_process_harness_initializes_isolated_sqlite() -> None:

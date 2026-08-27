@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -373,6 +375,48 @@ def _completed(role: _Role, result_code: str) -> None:
     )
 
 
+def _failed(role: _Role, stage: str, error: BaseException) -> None:
+    """向父进程发送固定启动元数据，禁止输出异常消息或配置。"""
+    error_type = type(error).__name__
+    if not error_type.isidentifier() or len(error_type) > 80:
+        error_type = "UnknownError"
+    print(
+        json.dumps(
+            {
+                "event": "harness_failed",
+                "role": role,
+                "stage": stage,
+                "error_type": error_type,
+            },
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def serve_api(app: object, config: HarnessProcessConfig) -> None:
+    """直接使用继承的 IPv4 监听 socket 启动测试 API。
+
+    ``uvicorn.run(fd=...)`` 会使用 ``AF_UNIX`` 重新包装任何继承描述符。
+    Harness 的监听器是 IPv4，因此让 Python 从 fd 自动检测真实 family，
+    再把 socket 对象直接交给 ``Server.run``。
+    """
+    if config.socket_fd is None:
+        raise ValueError("TEST_HARNESS_CONFIG_INVALID")
+    with socket.socket(fileno=config.socket_fd) as listener:
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,  # type: ignore[arg-type]
+                host="127.0.0.1",
+                port=config.port,
+                access_log=False,
+                log_level="warning",
+            )
+        )
+        server.run(sockets=[listener])
+
+
 class _HarnessReconciler:
     """SQLite 仅验证进程装配；真实跨 Session 对账由 PostgreSQL 集成场景覆盖。"""
 
@@ -388,17 +432,23 @@ class _HarnessReconciler:
 
 
 def run(config: HarnessProcessConfig) -> None:
-    dependencies = build_dependencies(config)
+    try:
+        dependencies = build_dependencies(config)
+    except BaseException as exc:
+        if config.role == "api":
+            _failed("api", "dependencies", exc)
+        raise
     if config.role == "api":
-        app = create_runtime_app(dependencies=dependencies)
-        uvicorn.run(
-            app,
-            host="127.0.0.1",
-            port=config.port,
-            fd=config.socket_fd,
-            access_log=False,
-            log_level="warning",
-        )
+        try:
+            app = create_runtime_app(dependencies=dependencies)
+        except BaseException as exc:
+            _failed("api", "api_app", exc)
+            raise
+        try:
+            serve_api(app, config)
+        except BaseException as exc:
+            _failed("api", "api_server", exc)
+            raise
         return
     if config.role == "worker":
         _ready("worker")
