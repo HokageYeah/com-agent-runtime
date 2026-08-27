@@ -226,6 +226,18 @@ docker run --rm --entrypoint id \
 
 服务器私有 env 文件按 `docker/backend/test.env.example` / `production.env.example` 创建，必须包含 `COMPOSE_PROJECT_NAME`、`ENVIRONMENT`、`MEMOIR_INTEGRATION_NETWORK`、`RUNTIME_ENV_FILE`、`AGENT_PACKAGE_VERSION`、当前环境 DB/Redis 与安全配置。test/production 的项目名、网络名、宿主 API 端口必须不同；当前冻结宿主端口分别是 `18002` / `18003`。
 
+腾讯云服务器的 test/production 文件可在本仓库根目录交互创建，该命令不依赖宿主机已安装 Poetry：
+
+```bash
+cd "/usr/HokageYeah/服务端系统/com-agent-runtime"
+./agent-runtime.sh configure-docker test
+./agent-runtime.sh configure-docker production
+```
+
+test/production 的默认目标分别为 `/usr/HokageYeah/服务端系统/env/runtime-test.env` 与 `/usr/HokageYeah/服务端系统/env/runtime-production.env`。脚本不截断已有文件：先创建时间戳 `.bak` 备份，再追加 `#########自动化<environment>创建#########` 配置块并把文件和备份设为 `0600`。Docker env 的同名变量以后出现的值为准，因此重新执行会追加一个新的有效配置块，旧块仅用于人工对照。
+
+test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`，并要求人工输入 Runtime 专用外部 MySQL/Redis、受控 HMAC/Fernet/JWT 密钥与 HTTPS origin；正式密钥不允许留空自动生成。两种模式都不会把密钥打印到终端。
+
 需要配置的 GitHub Secrets（`SERVER_*` 与业务仓同名复用）：
 
 | Secret | 说明 |
