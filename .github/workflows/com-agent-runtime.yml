@@ -2,7 +2,7 @@ name: com-agent-runtime
 
 on:
   # push 不限制 branches / tags：分支 push 跑质量与 Docker 校验；
-  # tag push 额外触发下方 deploy job（仅 *test* / *production* tag 可通过段校验）。
+  # tag push 只有符合 Runtime 发布命名规范时才会进入部署门禁。
   push:
   pull_request:
 
@@ -107,11 +107,84 @@ jobs:
           echo "image uid=${uid}"
           test "${uid}" != "0"
 
+  validate-deploy-tag:
+    name: Validate deployment tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    outputs:
+      is_valid: ${{ steps.validate.outputs.is_valid }}
+
+    steps:
+      - name: Validate Runtime deployment tag
+        id: validate
+        env:
+          DEPLOY_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "${DEPLOY_TAG}" =~ ^runtime-v[0-9]+\.[0-9]+\.[0-9]+-(test|production)\.[0-9]+$ ]]; then
+            echo "is_valid=true" >> "${GITHUB_OUTPUT}"
+            echo "valid deployment tag: ${DEPLOY_TAG}"
+          else
+            echo "is_valid=false" >> "${GITHUB_OUTPUT}"
+            echo "not a deployment tag: ${DEPLOY_TAG}"
+          fi
+
+  deploy-gate:
+    name: Deployment gate
+    needs: [quality, docker, validate-deploy-tag]
+    if: >-
+      always() &&
+      needs.validate-deploy-tag.result == 'success' &&
+      needs.validate-deploy-tag.outputs.is_valid == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_allowed: ${{ steps.gate.outputs.deploy_allowed }}
+
+    steps:
+      - name: Report and enforce deployment gate
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          DOCKER_RESULT: ${{ needs.docker.result }}
+        run: |
+          failed=0
+
+          echo "Deployment gate context"
+          echo "event=${EVENT_NAME}"
+          echo "ref=${REF}"
+          echo "ref_name=${REF_NAME}"
+          echo "sha=${SHA}"
+          echo
+          echo "quality=${QUALITY_RESULT}"
+          echo "docker=${DOCKER_RESULT}"
+          echo
+
+          if [ "${QUALITY_RESULT}" != "success" ]; then
+            echo "deployment gate rejected: quality job did not pass"
+            failed=1
+          fi
+          if [ "${DOCKER_RESULT}" != "success" ]; then
+            echo "deployment gate rejected: docker job did not pass"
+            failed=1
+          fi
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "deploy_allowed=true" >> "${GITHUB_OUTPUT}"
+          echo "deployment gate passed"
+
   deploy:
     name: Deploy Runtime by tag
-    # 仅 tag push 触发；质量与 Docker 校验全部通过后才允许上服务器。
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [quality, docker]
+    # 同时复核 tag ref 与 gate 输出，避免后续改动扩大部署范围。
+    if: >-
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.deploy-gate.result == 'success' &&
+      needs.deploy-gate.outputs.deploy_allowed == 'true'
+    needs: [deploy-gate]
     runs-on: ubuntu-latest
     concurrency:
       group: com-agent-runtime-server-deploy
