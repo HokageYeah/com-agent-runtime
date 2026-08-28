@@ -371,6 +371,24 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
                 if not selector.select(timeout=min(0.1, deadline - monotonic())):
                     continue
                 line = process.stdout.readline()
+                if line == "":
+                    # POSIX selector 会把管道 EOF 标记为可读；此时 poll() 可能仍因
+                    # 极短的退出状态竞态返回 None。有限等待状态落定后读取安全摘要，
+                    # 避免把 stdout EOF 误报为无效 JSON。
+                    try:
+                        process.wait(
+                            timeout=min(1.0, max(0.0, deadline - monotonic()))
+                        )
+                    except subprocess.TimeoutExpired as exc:
+                        raise RuntimeError("TEST_HARNESS_READY_INVALID") from exc
+                    raise RuntimeError(
+                        self._safe_process_exit_message(
+                            process,
+                            fallback_role=(
+                                role if role in _SAFE_FAILURE_ROLES else None
+                            ),
+                        )
+                    )
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError as exc:

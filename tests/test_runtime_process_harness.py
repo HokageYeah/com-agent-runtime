@@ -325,6 +325,32 @@ def test_wait_for_port_reports_only_safe_structured_child_failure() -> None:
     assert "private-value-must-not-escape" not in str(caught.value)
 
 
+def test_wait_for_ready_treats_stdout_eof_as_safe_process_exit() -> None:
+    """stdout EOF 代表子进程已关闭输出，必须转入安全退出诊断而非解析空 JSON。"""
+    with ProcessHarness(timeout_seconds=5) as harness:
+        child = harness.start(
+            [
+                sys.executable,
+                "-c",
+                "import sys; "
+                "sys.stderr.write('{\"event\":\"harness_failed\",\"role\":\"api\",'"
+                "'\"stage\":\"api_server\",\"error_type\":\"OSError\"}\\n'); "
+                "sys.stderr.write('private-value-must-not-escape\\n'); "
+                "raise SystemExit(1)",
+            ],
+            capture_stdout=True,
+            capture_stderr=True,
+        )
+
+        with pytest.raises(RuntimeError) as caught:
+            harness._wait_for_ready(child, "api")
+
+    assert str(caught.value) == (
+        "TEST_HARNESS_PROCESS_EXITED:api:api_server:OSError:1"
+    )
+    assert "private-value-must-not-escape" not in str(caught.value)
+
+
 def test_process_harness_initializes_isolated_sqlite() -> None:
     with ProcessHarness() as harness:
         with harness.sqlite_session_factory()() as session:
