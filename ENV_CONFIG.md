@@ -18,7 +18,7 @@ chmod 600 .env.development.local .env.test.local .env.production.local
 
 Docker 发布合同见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)。正式镜像不复制 `.env*` 或任何密钥文件；production 的数据库、Redis、HMAC、Fernet、JWT、Provider 和对象存储凭据必须由 secret manager 或部署平台在运行时注入，不得使用 Dockerfile `ARG`、镜像 label、tag、命令参数或普通日志传递。
 
-- production 只连接外部且专属于 AgentRuntime 的数据库和 Redis；`DB_NAME` 固定为 `couple_diary_agent_runtime_prod`，`DB_AUTO_CREATE=false`，不部署或复用业务库/业务 Redis sidecar。
+- production 不在 Runtime Compose 中部署 MySQL/Redis sidecar；单 CVM 可通过共享私网复用 Couple Diary 实例，但 `DB_NAME` 固定为 `couple_diary_agent_runtime_prod`、账号只授权该 schema、Redis 固定使用 `/15`且 `DB_AUTO_CREATE=false`。上量后替换为 AgentRuntime 专用腾讯云私网实例。
 - test 必须连接与 development、production 完全隔离的数据库和 Redis；本地默认 Redis DB 为 `/14`，临时依赖和随机凭据在验收结束后删除。
 - API、Worker、launcher、Reconciler 分别运行在独立 workload；`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。
 - Docker 直接注入 JSON 配置时必须注入已经展开的值，不能假设 Compose 会展开 JSON 字符串内的 `${...}`。

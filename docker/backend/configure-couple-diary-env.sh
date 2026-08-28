@@ -172,9 +172,17 @@ expected_key_id="${environment}-v1"
 required_runtime_value runtime_hmac_secret "MEMORY_RUNTIME_SECRET"
 validate_safe_token "MEMORY_RUNTIME_SECRET" "${runtime_hmac_secret}"
 (( ${#runtime_hmac_secret} >= 32 )) || fail "MEMORY_RUNTIME_SECRET 长度不足 32 字符"
-required_runtime_value bucket_name "BUCKET_NAME"
-required_runtime_value oss_endpoint "ENDPOINT"
-media_url_allowed_suffixes="$(build_media_url_allowed_suffixes "${bucket_name}" "${oss_endpoint}")"
+required_runtime_value memoir_media_enabled "MEMOIR_MEDIA_ENABLED"
+[[ "${memoir_media_enabled}" == "true" || "${memoir_media_enabled}" == "false" ]] \
+  || fail "Runtime env 中 MEMOIR_MEDIA_ENABLED 只能是 true 或 false"
+if [[ "${memoir_media_enabled}" == "true" ]]; then
+  required_runtime_value bucket_name "BUCKET_NAME"
+  required_runtime_value oss_endpoint "ENDPOINT"
+  media_url_allowed_suffixes="$(build_media_url_allowed_suffixes "${bucket_name}" "${oss_endpoint}")"
+else
+  # 媒体关闭时明确写空白名单，不为未配置的 OSS 放宽业务发布校验。
+  media_url_allowed_suffixes="[]"
+fi
 
 snapshot_master_key=""
 password_pepper=""

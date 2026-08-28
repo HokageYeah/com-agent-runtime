@@ -1,4 +1,5 @@
-# 正式环境只接入运行时私有的外部 MySQL 与 Redis；不得在此文件创建依赖 sidecar。
+# 正式环境只接入 Compose 外部 MySQL/Redis，不在此文件创建依赖 sidecar。
+# 单 CVM 可经共享私网使用 Couple Diary 实例的独立 schema/user 和 Redis /15。
 # 镜像引用必须显式注入 RUNTIME_IMAGE，支持两种受控模式：
 #
 # 1. 服务器本地构建模式（当前部署工作流使用，与业务仓 couple-diary-doc 同模式）：

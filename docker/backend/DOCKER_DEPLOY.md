@@ -117,11 +117,11 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
 
 ### production
 
-- 数据库和 Redis 必须是 Runtime 专用的外部受控依赖，不在生产 Runtime Compose 中捆绑数据库或 Redis sidecar。
-- 数据库固定为 `couple_diary_agent_runtime_prod`，与 `couple_diary_prod` 业务库物理分离；Runtime 不连接业务数据库。
-- Redis 使用生产专用实例或明确隔离 namespace/DB，供 Runtime 流控和模型 permit 使用；不得复用业务 Redis。
+- 生产 Runtime Compose 不创建 MySQL/Redis sidecar。单 CVM 阶段允许通过 `memoir-integration-production` 复用 Couple Diary production 实例；拆分后改用腾讯云专用私网实例。
+- 数据库固定为 `couple_diary_agent_runtime_prod`，使用独立 `runtime_prod` 账号且不得拥有 `couple_diary_prod` 或 `*.*` 权限；Runtime 不读写业务 schema。
+- 单 CVM Redis 固定使用逻辑 DB `/15`，供 Runtime 流控和模型 permit 使用；上量后迁移专用 Redis。
 - 生产运行账号使用最小权限，`DB_AUTO_CREATE=false`；数据库由 DBA/平台预建，首次迁移仍通过一次性 `prepare production` 执行。
-- `DB_HOST`、`DB_PORT` 和 `RUNTIME_REDIS_URL` 指向外部受控服务，不使用文档中的示例 host，也不依赖容器内 service 名解析。
+- 单 CVM 默认 `DB_HOST=couple-diary-mysql`、`RUNTIME_REDIS_URL=redis://couple-diary-redis:6379/15`；拆分后在脚本中覆盖为腾讯云私网 Host/URL。
 
 ### 与业务仓的同机私有网络
 
@@ -236,7 +236,7 @@ cd "/usr/HokageYeah/服务端系统/com-agent-runtime"
 
 test/production 的默认目标分别为 `/usr/HokageYeah/服务端系统/env/runtime-test.env` 与 `/usr/HokageYeah/服务端系统/env/runtime-production.env`。脚本不截断已有文件：先创建时间戳 `.bak` 备份，再追加 `#########自动化<environment>创建#########` 配置块并把文件和备份设为 `0600`。Docker env 的同名变量以后出现的值为准，因此重新执行会追加一个新的有效配置块，旧块仅用于人工对照。
 
-test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`，并要求人工输入 Runtime 专用外部 MySQL/Redis、受控 HMAC/Fernet/JWT 密钥与 HTTPS origin；正式密钥不允许留空自动生成。两种模式都不会把密钥打印到终端。脚本还会为 `NO_PROXY`/`no_proxy` 保留已有条目并补齐 `runtime-api`、`couple-diary-backend`、MySQL/Redis 别名和私有网段，防止容器间请求误入宿主 HTTP(S) 代理。
+test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`；单 CVM 默认使用共享私网别名，可在提示中覆盖为腾讯云专用私网实例。受控 HMAC/Fernet/JWT 密钥与 HTTPS origin 仍必须人工输入，正式密钥不允许留空自动生成。媒体开启后脚本隐藏读取 OSS/Provider 凭据并写入 Bucket/Endpoint；关闭时不要求 OSS。
 
 Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境的 Runtime 联动配置：
 
@@ -272,7 +272,7 @@ production 环境应在凭据核对和联调验收完成后再使用 `--activate
 
 1. CVM 安装 Git、Docker Engine、Docker Compose v2、curl、Nginx 和 `flock`；安全组只开放 SSH/80/443，不开放 Runtime/MySQL/Redis 宿主端口。
 2. 使用专用部署用户 clone 两仓；在仓库外创建四份 0600 环境文件。
-3. 预建 production Runtime 专库 `couple_diary_agent_runtime_prod` 及最小权限账号，准备 Runtime 专用 Redis；不给 Runtime 业务库权限。
+3. 预建 production Runtime 专库 `couple_diary_agent_runtime_prod` 及最小权限账号；单 CVM 可使用 Couple Diary MySQL 实例和 Redis `/15`，但不给 Runtime 业务 schema 权限。
 4. 在两仓 GitHub 分别配置 `SERVER_*`、项目路径和 test/production env 路径 Secrets，并开启 master/tag 保护与 production environment 审批。
 5. 先部署情侣日记 test 基础服务（memoir worker 保持关闭），再发布 Runtime test tag，最后开启业务 memoir worker 并完成 capabilities/held create/tool/callback 冒烟。
 6. test 验收后备份 production 数据库，按相同顺序发布 production，记录 Git tag/commit、image ID、AgentPackage version 和 Alembic head。

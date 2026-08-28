@@ -17,6 +17,8 @@ usage() {
   - 已有文件不会被覆盖；追加前会先生成时间戳备份。
   - 密码、密钥、私有地址和 Provider JSON 输入都不回显。
   - test 密钥留空时可由 OpenSSL 生成；production 密钥必须从受控密钥管理边界输入。
+  - production 单机默认使用 couple-diary-mysql 与 couple-diary-redis:6379/15，可交互覆盖。
+  - 媒体开启时追加 OSS/Provider 配置；媒体关闭时保持空配置并 fail-closed。
   - 保留已有代理白名单，并补齐共享 Docker 网络别名和私有网段。
 EOF
 }
@@ -156,6 +158,8 @@ else
   db_auto_create="false"
   db_name="couple_diary_agent_runtime_prod"
   default_db_user="runtime_prod"
+  default_db_host="couple-diary-mysql"
+  default_runtime_redis_url="redis://couple-diary-redis:6379/15"
   runtime_id="agent-runtime-production"
   key_id="production-v1"
   tool_allow_private_endpoints="false"
@@ -167,7 +171,8 @@ if [[ "${environment}" == "test" ]]; then
   printf 'test 普通字段可使用默认值，密钥留空则安全随机生成。\n\n'
 else
   printf 'production 不创建数据库/Redis sidecar，也不代你生成正式密钥。\n'
-  printf '请准备 Runtime 专用外部 MySQL/Redis、受控密钥以及两个 HTTPS origin。\n\n'
+  printf '单机默认通过共享私网复用 Couple Diary MySQL/Redis，但必须使用独立库、账号和 Redis DB。\n'
+  printf '若已拆分腾讯云专用实例，在后续提示中覆盖默认地址。\n\n'
 fi
 
 prompt_value runtime_api_host_port "Runtime 宿主回环端口" "${default_api_port}"
@@ -179,7 +184,7 @@ prompt_value agent_package_version "Memoir AgentPackage 版本" "1.0.4"
 [[ "${agent_package_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "AgentPackage 版本必须类似 1.0.4"
 
 if [[ "${environment}" == "production" ]]; then
-  prompt_required_hidden db_host "Runtime production MySQL host"
+  prompt_value db_host "Runtime production MySQL host" "${default_db_host}"
   [[ "${db_host}" =~ ^[A-Za-z0-9._-]+$ ]] || fail "MySQL host 格式不合法"
   prompt_value db_port "Runtime production MySQL port" "3306"
   [[ "${db_port}" =~ ^[0-9]+$ ]] || fail "MySQL port 必须是数字"
@@ -194,7 +199,7 @@ if [[ "${environment}" == "test" ]]; then
 else
   prompt_required_hidden db_password "Runtime production 数据库密码"
   mysql_root_password=""
-  prompt_required_hidden runtime_redis_url "Runtime production 专用 Redis URL"
+  prompt_hidden_value runtime_redis_url "Runtime production Redis URL" "${default_runtime_redis_url}"
   [[ "${runtime_redis_url}" == redis://* || "${runtime_redis_url}" == rediss://* ]] || fail "Runtime production Redis URL 必须以 redis:// 或 rediss:// 开头"
   prompt_required_hidden runtime_hmac_secret "Runtime/Business production 共享 HMAC 密钥"
 fi
@@ -233,6 +238,49 @@ prompt_hidden_value provider_keys_json "MODEL_PROVIDER_API_KEYS_JSON" "{}"
 validate_json_shape "MODEL_PROVIDER_API_KEYS_JSON" "${provider_keys_json}" "{"
 prompt_value memoir_media_enabled "是否启用回忆录媒体生成 (true/false)" "false"
 [[ "${memoir_media_enabled}" == "true" || "${memoir_media_enabled}" == "false" ]] || fail "MEMOIR_MEDIA_ENABLED 只能是 true 或 false"
+
+memoir_media_provider=""
+oss_access_key_id=""
+oss_access_key_secret=""
+oss_bucket_name=""
+oss_region=""
+oss_endpoint=""
+volcano_cv_access_key=""
+volcano_cv_secret_key=""
+volcano_cv_region=""
+if [[ "${memoir_media_enabled}" == "true" ]]; then
+  if [[ "${environment}" == "production" ]]; then
+    default_media_provider="volcano"
+  else
+    default_media_provider="mock"
+  fi
+  prompt_value memoir_media_provider "回忆录图片 Provider (mock/volcano)" "${default_media_provider}"
+  [[ "${memoir_media_provider}" == "mock" || "${memoir_media_provider}" == "volcano" ]] \
+    || fail "MEMOIR_MEDIA_PROVIDER 只能是 mock 或 volcano"
+  prompt_value oss_bucket_name "回忆录 OSS Bucket" "com-agent-runtime"
+  [[ "${oss_bucket_name}" =~ ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$ ]] \
+    || fail "BUCKET_NAME 不是合法的 OSS Bucket 名称"
+  prompt_value oss_region "回忆录 OSS Region" "cn-beijing"
+  validate_token "REGION" "${oss_region}"
+  prompt_value oss_endpoint "回忆录 OSS Endpoint Host" "oss-cn-beijing.aliyuncs.com"
+  oss_endpoint="${oss_endpoint#https://}"
+  oss_endpoint="${oss_endpoint#http://}"
+  oss_endpoint="${oss_endpoint%/}"
+  [[ "${oss_endpoint}" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ && "${oss_endpoint}" == *.* ]] \
+    || fail "ENDPOINT 必须是不含路径和端口的 OSS Host"
+  prompt_required_hidden oss_access_key_id "回忆录 OSS AccessKey ID"
+  prompt_required_hidden oss_access_key_secret "回忆录 OSS AccessKey Secret"
+  validate_token "ACCESS_KEY_ID" "${oss_access_key_id}"
+  validate_token "ACCESS_KEY_SECRET" "${oss_access_key_secret}"
+  if [[ "${memoir_media_provider}" == "volcano" ]]; then
+    prompt_required_hidden volcano_cv_access_key "火山视觉 AccessKey"
+    prompt_required_hidden volcano_cv_secret_key "火山视觉 SecretKey"
+    prompt_value volcano_cv_region "火山视觉 Region" "cn-north-1"
+    validate_token "VOLCANO_CV_ACCESS_KEY" "${volcano_cv_access_key}"
+    validate_token "VOLCANO_CV_SECRET_KEY" "${volcano_cv_secret_key}"
+    validate_token "VOLCANO_CV_REGION" "${volcano_cv_region}"
+  fi
+fi
 
 timestamp="$(date '+%Y%m%d-%H%M%S')"
 backup_file=""
@@ -300,6 +348,15 @@ MODEL_ROUTES_JSON=${model_routes_json}
 MEMOIR_MODEL_NODE_ROUTES_JSON=${memoir_model_routes_json}
 MODEL_PROVIDER_API_KEYS_JSON=${provider_keys_json}
 MEMOIR_MEDIA_ENABLED=${memoir_media_enabled}
+MEMOIR_MEDIA_PROVIDER=${memoir_media_provider}
+ACCESS_KEY_ID=${oss_access_key_id}
+ACCESS_KEY_SECRET=${oss_access_key_secret}
+BUCKET_NAME=${oss_bucket_name}
+REGION=${oss_region}
+ENDPOINT=${oss_endpoint}
+VOLCANO_CV_ACCESS_KEY=${volcano_cv_access_key}
+VOLCANO_CV_SECRET_KEY=${volcano_cv_secret_key}
+VOLCANO_CV_REGION=${volcano_cv_region}
 #########自动化${environment}创建结束#########
 EOF
 

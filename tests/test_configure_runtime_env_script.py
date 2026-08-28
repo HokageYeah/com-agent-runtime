@@ -40,11 +40,11 @@ def _run_configure(
                 "",  # API port
                 "",  # Worker ID
                 "",  # Package version
-                "runtime-mysql.internal",
+                "",  # Single-server MySQL alias
                 "",  # DB port
                 "",  # DB user
                 "d" * 64,
-                "redis://runtime-redis.internal:6379/0",
+                "",  # Single-server Redis logical DB
                 "h" * 64,
                 "A" * 43 + "=",
                 "j" * 64,
@@ -138,9 +138,9 @@ def test_configure_runtime_env_creates_fail_closed_production_block(
     assert "COMPOSE_PROJECT_NAME=com-agent-runtime-production" in content
     assert "RUNTIME_API_HOST_PORT=18003" in content
     assert "DB_AUTO_CREATE=false" in content
-    assert "DB_HOST=runtime-mysql.internal" in content
+    assert "DB_HOST=couple-diary-mysql" in content
     assert "DB_NAME=couple_diary_agent_runtime_prod" in content
-    assert "RUNTIME_REDIS_URL=redis://runtime-redis.internal:6379/0" in content
+    assert "RUNTIME_REDIS_URL=redis://couple-diary-redis:6379/15" in content
     assert "RUNTIME_MYSQL_ROOT_PASSWORD=" not in content
     assert "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false" in content
     assert "MEMORY_RUNTIME_KEY_ID=production-v1" in content
@@ -152,11 +152,11 @@ def test_configure_runtime_env_creates_fail_closed_production_block(
     assert "MODEL_PROVIDER_API_KEYS_JSON=" not in result.stdout
 
 
-def test_configure_runtime_env_rejects_empty_production_secret(
+def test_configure_runtime_env_rejects_empty_production_database_password(
     tmp_path: Path,
 ) -> None:
     output_file = tmp_path / "runtime-production.env"
-    # 前三项使用默认值，随后将必填 MySQL host 留空，必须在写文件前拒绝。
+    # 单机网络地址使用默认值，production 数据库密码仍必须显式输入。
     result = subprocess.run(
         [
             "bash",
@@ -166,7 +166,7 @@ def test_configure_runtime_env_rejects_empty_production_secret(
             "--output",
             str(output_file),
         ],
-        input="\n" * 4,
+        input="\n" * 7,
         text=True,
         capture_output=True,
         check=False,
@@ -174,4 +174,59 @@ def test_configure_runtime_env_rejects_empty_production_secret(
 
     assert result.returncode != 0
     assert not output_file.exists()
-    assert "MySQL host 不能为空" in result.stderr
+    assert "Runtime production 数据库密码" in result.stderr
+    assert "不能为空" in result.stderr
+
+
+def test_configure_runtime_env_writes_enabled_media_oss_config(
+    tmp_path: Path,
+) -> None:
+    output_file = tmp_path / "runtime-test.env"
+    answers = [
+        "",  # API port
+        "",  # Worker ID
+        "",  # Package version
+        "",  # DB user
+        "",  # DB password
+        "",  # MySQL root password
+        "",  # HMAC
+        "",  # Fernet
+        "",  # JWT
+        "",  # Business origin
+        "",  # Model routes
+        "",  # Memoir node routes
+        "",  # Provider keys
+        "true",
+        "",  # Media provider=mock
+        "",  # Bucket=com-agent-runtime
+        "",  # Region=cn-beijing
+        "",  # Endpoint=oss-cn-beijing.aliyuncs.com
+        "test-oss-access-key",
+        "test-oss-secret-key",
+    ]
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "configure-docker",
+            "test",
+            "--output",
+            str(output_file),
+        ],
+        input="\n".join(answers) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    content = output_file.read_text(encoding="utf-8")
+    assert _last_value(content, "MEMOIR_MEDIA_ENABLED") == "true"
+    assert _last_value(content, "MEMOIR_MEDIA_PROVIDER") == "mock"
+    assert _last_value(content, "BUCKET_NAME") == "com-agent-runtime"
+    assert _last_value(content, "REGION") == "cn-beijing"
+    assert _last_value(content, "ENDPOINT") == "oss-cn-beijing.aliyuncs.com"
+    assert _last_value(content, "ACCESS_KEY_ID") == "test-oss-access-key"
+    assert _last_value(content, "ACCESS_KEY_SECRET") == "test-oss-secret-key"
+    assert "test-oss-access-key" not in result.stdout + result.stderr
+    assert "test-oss-secret-key" not in result.stdout + result.stderr

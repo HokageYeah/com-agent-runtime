@@ -309,7 +309,7 @@ com-agent-runtime/
 - 镜像 tag/digest 只标识代码产物和环境；AgentPackage 版本必须另行通过 `register --version` 明确指定，不能从 tag 推导。
 - API、Worker、launcher、Reconciler 是四个独立 workload；Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，四个长期 workload 只在两道门禁都成功后启动。
 - Docker 容器内 Runtime API 固定监听 `8002`；腾讯云宿主回环端口使用 test `18002`、production `18003`，情侣日记仍通过私有别名 `http://runtime-api:8002` 访问。
-- production 只连接外部 Runtime 专用数据库和 Redis，固定 `couple_diary_agent_runtime_prod`，并保持 `DB_AUTO_CREATE=false`；test 使用完全隔离的数据库、Redis namespace/DB 和随机凭据。
+- production 不在 Runtime Compose 内创建 MySQL/Redis；单 CVM 可通过共享私网复用 Couple Diary 实例，但固定独立库 `couple_diary_agent_runtime_prod`、最小权限账号和 Redis `/15`，并保持 `DB_AUTO_CREATE=false`；test 继续使用完全隔离的依赖和凭据。
 - production Compose 强制显式注入 `RUNTIME_IMAGE`（缺失即 fail-closed）：默认服务器本地构建 tag 模式（`RUNTIME_PULL_POLICY` 默认 `missing`），接镜像仓库后可切 `repository@sha256:<digest>` 加 `RUNTIME_PULL_POLICY: always`，可变兜底 tag 无法进入生产；Worker 设置 `stop_grace_period` 覆盖整个节点执行预算，保证 SIGTERM draining 语义不被强杀破坏。
 - 镜像以非 root 用户运行；生产 secret 由 secret manager/部署平台在运行时注入，不能写入镜像、构建参数、日志或进程参数。
 - 当前 Action 为服务器本地 tag 构建；接入 TCR 后才升级为 digest 发布。回滚不自动 downgrade 数据库，上线后必须完成四个 Runtime 探针。

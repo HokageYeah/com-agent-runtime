@@ -82,6 +82,15 @@ def test_runtime_server_env_templates_freeze_distinct_test_and_production_identi
     assert "MEMOIR_INTEGRATION_NETWORK=memoir-integration-production" in production_template
     assert "RUNTIME_API_HOST_PORT=18003" in production_template
     assert "AGENT_PACKAGE_VERSION=1.0.4" in production_template
+    assert "DB_HOST=couple-diary-mysql" in production_template
+    assert (
+        "RUNTIME_REDIS_URL=redis://couple-diary-redis:6379/15"
+        in production_template
+    )
+    for template in (test_template, production_template):
+        assert "MEMOIR_MEDIA_PROVIDER=" in template
+        assert "BUCKET_NAME=" in template
+        assert "ENDPOINT=" in template
 
 
 def test_runtime_host_ports_do_not_change_private_container_contract() -> None:

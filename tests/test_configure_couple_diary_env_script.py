@@ -39,6 +39,7 @@ def _write_runtime_env(path: Path, environment: str = "test") -> None:
                 "MEMORY_RUNTIME_CLIENT_ID=couple-diary",
                 f"MEMORY_RUNTIME_KEY_ID={key_id}",
                 f"MEMORY_RUNTIME_SECRET={environment}-shared-hmac-secret-0123456789",
+                "MEMOIR_MEDIA_ENABLED=true",
                 "BUCKET_NAME=com-agent-runtime",
                 "ENDPOINT=https://oss-cn-beijing.aliyuncs.com/",
                 "",
@@ -241,3 +242,21 @@ def test_configure_couple_diary_env_rejects_invalid_oss_endpoint(
     assert result.returncode != 0
     assert "ENDPOINT" in result.stderr
     assert not output_file.exists()
+
+
+def test_configure_couple_diary_env_allows_media_disabled_without_oss(
+    tmp_path: Path,
+) -> None:
+    runtime_env = tmp_path / "runtime-test.env"
+    output_file = tmp_path / "couple-diary-test.env"
+    _write_runtime_env(runtime_env)
+    content = runtime_env.read_text(encoding="utf-8")
+    content = content.replace("MEMOIR_MEDIA_ENABLED=true", "MEMOIR_MEDIA_ENABLED=false")
+    content = re.sub(r"^(BUCKET_NAME|ENDPOINT)=.*\n", "", content, flags=re.MULTILINE)
+    runtime_env.write_text(content, encoding="utf-8")
+
+    result = _run_configure(runtime_env, output_file)
+
+    assert result.returncode == 0, result.stderr
+    generated = output_file.read_text(encoding="utf-8")
+    assert _last_value(generated, "CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES") == "[]"
