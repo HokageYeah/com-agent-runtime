@@ -18,9 +18,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import Settings
 from app.db.sqlalchemy_db import Base
-from app.main import create_runtime_app
 from app.models import AgentDefinition
 from app.reconciler import ReconcilerRunner
+from app.runtime.api_app_factory import create_runtime_app
 from app.runtime.test_harness import (
     LoopbackTestTransport,
     RuntimeDependencies,

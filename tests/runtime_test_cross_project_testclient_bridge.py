@@ -27,8 +27,8 @@ from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401 - register all Runtime tables
 from app.core.config import settings
-from app.main import create_runtime_app
 from app.models import AgentDefinition, AgentRun, AgentToolCall
+from app.runtime.api_app_factory import create_runtime_app
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.interfaces import LeaseContext
 from app.runtime.planner import StaticPlanner

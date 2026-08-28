@@ -113,8 +113,8 @@ def test_runtime_app_uses_environment_gate(monkeypatch: pytest.MonkeyPatch) -> N
             del sys.modules[mod]
 
     try:
-        from app.api.api import api_router  # 重新导入会按新 ENVIRONMENT 构造
-        paths = _route_paths(api_router)
+        main = importlib.import_module("app.main")
+        paths = set(main.app.openapi()["paths"])
         for fragment in _BUSINESS_PATH_FRAGMENTS:
             _assert_no_path_starts_with(paths, fragment)
         for fragment in _PROVIDER_PATH_FRAGMENTS:

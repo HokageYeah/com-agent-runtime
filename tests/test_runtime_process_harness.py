@@ -132,6 +132,22 @@ def test_bootstrap_import_failure_emits_only_safe_metadata(
     }
 
 
+def test_harness_entry_import_ignores_empty_global_fernet_environment() -> None:
+    """Harness 入口只能依赖显式 TestSettings，不得导入全局生产应用。"""
+    with ProcessHarness(timeout_seconds=5) as harness:
+        child = harness.start(
+            [
+                sys.executable,
+                "-c",
+                "import sys; import app.runtime.harness_entry; "
+                "raise SystemExit(int('app.main' in sys.modules))",
+            ],
+            extra_environment={"MEMORY_SNAPSHOT_FERNET_KEY": ""},
+        )
+
+        assert harness.wait_for_exit(child) == 0
+
+
 def test_api_harness_preserves_inherited_ipv4_socket_family(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

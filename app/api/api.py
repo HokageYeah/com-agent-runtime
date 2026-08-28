@@ -41,15 +41,6 @@ _BUSINESS_ROUTERS: tuple[tuple[APIRouter, str, list[str]], ...] = (
 )
 
 
-def _resolve_default_environment() -> str:
-    """读取 settings.ENVIRONMENT；测试等无 settings 场景回落到 development。"""
-    try:
-        from app.core.config import settings  # 延迟导入避免循环依赖
-        return settings.ENVIRONMENT
-    except Exception:  # pragma: no cover - 配置缺失时仍允许模块加载
-        return "development"
-
-
 def build_api_router(environment: str) -> APIRouter:
     """根据环境构造聚合 router。
 
@@ -78,8 +69,3 @@ def build_api_router(environment: str) -> APIRouter:
             router.include_router(sub_router, prefix=prefix, tags=tags)
 
     return router
-
-
-# 模块级全局：兼容现有 `from app.api.api import api_router` 写法。
-# 默认按当前 settings.ENVIRONMENT 决定路由表，production 自动收紧。
-api_router = build_api_router(_resolve_default_environment())

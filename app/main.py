@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any
 
 import httpx
 from fastapi import FastAPI, status
@@ -15,7 +13,7 @@ from fastapi.exceptions import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.api import api_router
+from app.api.api import build_api_router
 from app.api.endpoints.health_api import RuntimeHealth
 from app.core.config import settings
 from app.core.logging_uru import setup_logging, shutdown_logging
@@ -26,7 +24,6 @@ from app.middleware.exception_handlers import (
     response_validation_error_handler,
 )
 from app.middleware.request_logging import request_logging_middleware
-from app.runtime.test_harness import RuntimeDependencies
 from app.services.memoir.memory_agent_adapter import (
     MemoryAgentAdapter,
     MemoryRuntimeClientConfig,
@@ -99,34 +96,9 @@ app.add_exception_handler(RequestValidationError, request_validation_error_handl
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(ResponseValidationError, response_validation_error_handler)
 app.middleware("http")(request_logging_middleware)
-app.include_router(api_router, prefix=application_config.api_prefix)
-
-
-def create_runtime_app(
-    *,
-    runtime_settings: Any | None = None,
-    session_factory: Callable[[], Any] | None = None,
-    dependencies: RuntimeDependencies | None = None,
-) -> FastAPI:
-    """创建仅供进程 harness 注入依赖的 Runtime API，绝不改写全局环境配置。"""
-    if dependencies is not None:
-        runtime_settings, session_factory = (
-            dependencies.settings,
-            dependencies.session_factory,
-        )
-    if runtime_settings is None or session_factory is None:
-        raise ValueError("RUNTIME_DEPENDENCIES_REQUIRED")
-    test_app = FastAPI(title="AgentRuntime test harness")
-    test_app.state.settings = runtime_settings
-    test_app.state.session_factory = session_factory
-    test_app.state.memory_snapshot_cipher = FernetSnapshotCipher(
-        runtime_settings.MEMORY_SNAPSHOT_FERNET_KEY.encode()
-    )
-    test_app.state.runtime_health = RuntimeHealth(
-        runtime_settings, database_ready=lambda: (True, {"database": "ready"})
-    )
-    test_app.include_router(api_router, prefix=runtime_settings.application.api_prefix)
-    return test_app
+app.include_router(
+    build_api_router(settings.ENVIRONMENT), prefix=application_config.api_prefix
+)
 
 
 @app.get("/")
