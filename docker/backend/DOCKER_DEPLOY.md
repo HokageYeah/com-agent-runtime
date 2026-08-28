@@ -238,6 +238,25 @@ test/production 的默认目标分别为 `/usr/HokageYeah/服务端系统/env/ru
 
 test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`，并要求人工输入 Runtime 专用外部 MySQL/Redis、受控 HMAC/Fernet/JWT 密钥与 HTTPS origin；正式密钥不允许留空自动生成。两种模式都不会把密钥打印到终端。
 
+Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境的 Runtime 联动配置：
+
+```bash
+./agent-runtime.sh configure-couple-diary test
+./agent-runtime.sh configure-couple-diary production
+```
+
+该命令默认读取 `/usr/HokageYeah/服务端系统/env/runtime-<environment>.env`，并将配置块追加到同目录的 `couple-diary-<environment>.env`。脚本从 Runtime 环境文件提取网络名、客户端 ID、Key ID 和 HMAC Secret，不会 `source` 环境文件，也不会在输出中打印密钥。写入前会创建备份，并将目标文件及备份权限设置为 `0600`。
+
+Snapshot AES-GCM Master Key 和回忆录访问密码 Pepper 属于 `couple-diary-doc`，不会复用 Runtime Fernet Key 或 HMAC Secret。test 环境缺失时自动生成；production 环境缺失时通过终端隐藏输入。重复执行会沿用目标文件中最后一组有效值。
+
+默认保持 worker 和 Package 回调门禁关闭。完成基础部署和连通性检查后，再显式激活：
+
+```bash
+./agent-runtime.sh configure-couple-diary test --activate
+```
+
+production 环境应在凭据核对和联调验收完成后再使用 `--activate`。如需覆盖默认路径，可使用 `--runtime-env /path/to/runtime.env` 和 `--output /path/to/couple-diary.env`。
+
 需要配置的 GitHub Secrets（`SERVER_*` 与业务仓同名复用）：
 
 | Secret | 说明 |

@@ -11,4 +11,10 @@ if [[ "${1:-}" == "configure-docker" ]]; then
   exec "${SCRIPT_DIR}/docker/backend/configure-runtime-env.sh" "$@"
 fi
 
+# Couple Diary 联动配置同样只依赖 Bash/OpenSSL，服务器无需安装 Poetry。
+if [[ "${1:-}" == "configure-couple-diary" ]]; then
+  shift
+  exec "${SCRIPT_DIR}/docker/backend/configure-couple-diary-env.sh" "$@"
+fi
+
 exec poetry run python -m app.scripts.agent_runtime_cli "$@"

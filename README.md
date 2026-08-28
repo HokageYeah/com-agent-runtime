@@ -468,6 +468,9 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
 
 | 命令 | 作用 | 会修改什么 | 适用环境 |
 |---|---|---|---|
+| `configure-docker <test\|production>` | 交互创建服务器 Runtime Docker 环境配置 | 备份并追加 `runtime-<environment>.env` | test/production |
+| `configure-couple-diary <test\|production>` | 从 Runtime 配置生成情侣日记联动配置，默认关闭联动门禁 | 备份并追加 `couple-diary-<environment>.env` | test/production |
+| `configure-couple-diary <test\|production> --activate` | 生成情侣日记联动配置并启用 worker 与 Package 回调 | 备份并追加 `couple-diary-<environment>.env` | test/production 联调验收 |
 | `configure <env>` | 交互生成本机私有配置和随机密钥 | 新建 `.env.development.local` 或 `.env.test.local` | development/test |
 | `configure <env> --force` | 覆盖已有本机配置 | 替换本机密钥和配置，可能使旧加密数据不可读 | 仅确认旧配置废弃后使用 |
 | `doctor <env>` | 无内容检查配置完整性、安全性和固定库名 | 不连接数据库，不打印配置值 | 全环境 |
