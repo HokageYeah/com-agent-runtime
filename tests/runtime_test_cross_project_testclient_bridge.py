@@ -32,7 +32,11 @@ from app.runtime.api_app_factory import create_runtime_app
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
 from app.runtime.interfaces import LeaseContext
 from app.runtime.planner import StaticPlanner
-from app.runtime.test_harness import LoopbackTestTransport, RuntimeHarnessConfig
+from app.runtime.test_harness import (
+    LoopbackTestTransport,
+    RuntimeDependencies,
+    RuntimeHarnessConfig,
+)
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.schemas.agent_package import AgentPackage
 from app.services.agent_package_service import AgentPackageService
@@ -54,6 +58,23 @@ def _skip_unless_business_venv_present() -> None:
     """
     if not _BUSINESS_PYTHON.is_file():
         pytest.skip("跨仓 bridge 需要业务仓独立 venv")
+
+
+def _runtime_dependencies(factory: sessionmaker) -> RuntimeDependencies:
+    harness = RuntimeHarnessConfig(
+        factory,
+        {"test": {"keys": {"test": "test-agent-tool-secret"}}},
+        "couple-diary-test",
+        "http://127.0.0.1:8765",
+    )
+    return RuntimeDependencies(
+        settings,
+        factory,
+        None,
+        None,
+        None,
+        LoopbackTestTransport(harness),
+    )
 
 
 # The child owns both its SQLite session and TestClient for its whole lifetime.
@@ -270,7 +291,7 @@ def test_historical_1_0_0_cross_repo_single_persistent_chain(monkeypatch: Any) -
     factory = sessionmaker(bind=engine)
     session = factory()
     run = _runtime_run(session, _package_100(), monkeypatch)
-    runtime_app = create_runtime_app(runtime_settings=settings, session_factory=factory)
+    runtime_app = create_runtime_app(_runtime_dependencies(factory))
     with TestClient(runtime_app) as runtime_client:
         bridge = _PersistentBusinessBridge(runtime_client)
         try:
@@ -363,7 +384,7 @@ def test_1_0_3_cross_repo_publish_media_document(monkeypatch: Any) -> None:
     run_id = "cross-repo-media-1-0-3"
     package = AgentPackageService(Path(__file__).parents[1] / "app" / "agents").load("memoir_agent", "1.0.3")
     run = _runtime_run(session, package, monkeypatch, run_id=run_id)
-    runtime_app = create_runtime_app(runtime_settings=settings, session_factory=factory)
+    runtime_app = create_runtime_app(_runtime_dependencies(factory))
     with TestClient(runtime_app) as runtime_client:
         bridge = _PersistentBusinessBridge(runtime_client, run_id=run_id,
             identity="memoir_agent:1.0.3:couple_memory")

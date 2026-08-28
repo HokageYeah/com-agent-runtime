@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
-
 from fastapi import FastAPI
 
 from app.api.api import build_api_router
@@ -14,19 +11,11 @@ from app.services.memoir.memory_archive_service import FernetSnapshotCipher
 
 
 def create_runtime_app(
-    *,
-    runtime_settings: Any | None = None,
-    session_factory: Callable[[], Any] | None = None,
-    dependencies: RuntimeDependencies | None = None,
+    dependencies: RuntimeDependencies,
 ) -> FastAPI:
-    """使用显式 Runtime 依赖创建 API，不读取全局 settings 或数据库。"""
-    if dependencies is not None:
-        runtime_settings, session_factory = (
-            dependencies.settings,
-            dependencies.session_factory,
-        )
-    if runtime_settings is None or session_factory is None:
-        raise ValueError("RUNTIME_DEPENDENCIES_REQUIRED")
+    """使用唯一显式 Runtime 依赖集创建 API，不读全局配置。"""
+    runtime_settings = dependencies.settings
+    session_factory = dependencies.session_factory
 
     runtime_app = FastAPI(title="AgentRuntime test harness")
     runtime_app.state.settings = runtime_settings

@@ -449,7 +449,7 @@ def run(config: HarnessProcessConfig) -> None:
         raise
     if config.role == "api":
         try:
-            app = create_runtime_app(dependencies=dependencies)
+            app = create_runtime_app(dependencies)
         except BaseException as exc:
             _failed("api", "api_app", exc)
             raise
