@@ -1,3 +1,4 @@
+import json
 import socket
 import sys
 from os import dup
@@ -9,7 +10,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app.models import AgentDefinition
-from app.runtime import harness_entry
+from app.runtime import harness_bootstrap, harness_entry
 from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.harness_entry import HarnessProcessConfig, build_dependencies
 from app.runtime.process_harness import ProcessHarness
@@ -90,6 +91,47 @@ def test_harness_process_config_carries_only_api_listener_fd(tmp_path: Path) -> 
         )
 
 
+def test_api_listener_uses_kernel_port_and_is_listening_before_handoff() -> None:
+    """API 最终 socket 直接绑定系统端口，交接前已可接受连接。"""
+    with ProcessHarness() as harness:
+        listener = harness._create_api_listener()
+        try:
+            host, port = listener.getsockname()
+            assert listener.family == socket.AF_INET
+            assert host == "127.0.0.1"
+            assert 1 <= port <= 65535
+            assert listener.get_inheritable() is True
+            with socket.create_connection((host, port), timeout=1):
+                accepted, _ = listener.accept()
+                accepted.close()
+        finally:
+            listener.close()
+
+
+def test_bootstrap_import_failure_emits_only_safe_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """harness_entry 未导入时也必须输出可诊断且无敏感值的摘要。"""
+
+    def _fail_import(_module_name: str) -> object:
+        raise ImportError("private-value-must-not-escape")
+
+    monkeypatch.setattr(harness_bootstrap.importlib, "import_module", _fail_import)
+
+    with pytest.raises(SystemExit) as caught:
+        harness_bootstrap.bootstrap_entry("api", tmp_path / "api.json")
+
+    assert caught.value.code == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "event": "harness_failed",
+        "role": "api",
+        "stage": "bootstrap",
+        "error_type": "ImportError",
+    }
+
+
 def test_api_harness_preserves_inherited_ipv4_socket_family(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -107,7 +149,7 @@ def test_api_harness_preserves_inherited_ipv4_socket_family(
             observed["family"] = sockets[0].family
             observed["address"] = sockets[0].getsockname()
 
-    monkeypatch.setattr(harness_entry.uvicorn, "Server", _Server)
+    monkeypatch.setattr(harness_entry, "_HarnessApiServer", _Server)
     try:
         config = HarnessProcessConfig(
             sqlite_path=tmp_path / "runtime.db",
@@ -172,6 +214,27 @@ def test_process_harness_reclaims_child_and_temporary_directory() -> None:
     assert child.poll() is not None and not path.exists()
 
 
+def test_health_timeout_reclaims_child_and_temporary_directory() -> None:
+    """健康探针超时也必须走同一有限回收路径。"""
+    try:
+        port = _available_loopback_port()
+    except PermissionError:
+        pytest.skip("当前受限环境禁止绑定 loopback 端口")
+
+    with pytest.raises(TimeoutError, match="TEST_HARNESS_HEALTH_TIMEOUT"):
+        with ProcessHarness(timeout_seconds=1) as harness:
+            path = harness.path
+            child = harness.start(
+                [sys.executable, "-c", "import time; time.sleep(30)"]
+            )
+            harness.wait_for_port(
+                "127.0.0.1", port, timeout_seconds=0.05, process=child
+            )
+
+    assert child.poll() is not None
+    assert not path.exists()
+
+
 def test_process_harness_does_not_inherit_parent_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -201,10 +264,40 @@ def test_wait_for_port_reports_child_exit_without_waiting_for_health_timeout() -
         child = harness.start([sys.executable, "-c", "raise SystemExit(17)"])
         started_at = monotonic()
 
-        with pytest.raises(RuntimeError, match="TEST_HARNESS_PROCESS_EXITED"):
-            harness.wait_for_port("127.0.0.1", port, process=child)
+        with pytest.raises(RuntimeError) as caught:
+            harness.wait_for_port(
+                "127.0.0.1", port, process=child, fallback_role="api"
+            )
 
         assert monotonic() - started_at < 1
+        assert str(caught.value) == (
+            "TEST_HARNESS_PROCESS_EXITED:api:bootstrap:ProcessExit:17"
+        )
+
+
+def test_bootstrap_subprocess_import_failure_reaches_safe_parent_message() -> None:
+    """真实 bootstrap 子进程导入失败时，父进程只收到固定摘要。"""
+    with ProcessHarness(timeout_seconds=5) as harness:
+        child = harness.start(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; "
+                "from app.runtime import harness_bootstrap as bootstrap; "
+                "bootstrap._ENTRY_MODULE='app.runtime.missing_harness_entry'; "
+                "bootstrap.bootstrap_entry('api', Path('/unused'))",
+            ],
+            capture_stderr=True,
+        )
+
+        with pytest.raises(RuntimeError) as caught:
+            harness.wait_for_port(
+                "127.0.0.1", 12345, process=child, fallback_role="api"
+            )
+
+    assert str(caught.value) == (
+        "TEST_HARNESS_PROCESS_EXITED:api:bootstrap:ModuleNotFoundError:1"
+    )
 
 
 def test_wait_for_port_reports_only_safe_structured_child_failure() -> None:
@@ -342,9 +435,8 @@ def test_process_harness_starts_api_worker_and_reconciler_with_safe_readiness() 
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     with ProcessHarness(timeout_seconds=5) as harness:
         harness.start_mock_business(mock_port)
-        # mock 就绪后再分配 API 端口，避免 Linux 把预选端口用作探活连接源端口。
-        api_port = _available_loopback_port()
-        harness.start_api(api_port, mock_port=mock_port)
+        # API 端口由最终 listening socket 用 bind(0) 原子分配。
+        api_process, api_port = harness.start_api(mock_port=mock_port)
         response = httpx.get(
             f"http://127.0.0.1:{api_port}/api/v1/runtime/health/live", timeout=2
         )
@@ -359,3 +451,7 @@ def test_process_harness_starts_api_worker_and_reconciler_with_safe_readiness() 
         reconciler = harness.start_reconciler(mock_port=mock_port)
         assert harness.wait_for_completed(reconciler, "reconciler") == "completed"
         assert harness.wait_for_exit(reconciler) == 0
+    assert api_process.stderr is not None
+    api_stderr = api_process.stderr.read()
+    assert harness.identity_id not in api_stderr
+    assert "harness-only-" not in api_stderr

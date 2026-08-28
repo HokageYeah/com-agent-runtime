@@ -28,8 +28,8 @@ jobs:
       - name: Run Ruff
         run: poetry run ruff check app tests
 
-      # 该用例会同时启动 API、Worker 和 Reconciler 子进程。让它在全新的
-      # pytest 进程中运行，避免受全量测试累积的进程/资源状态干扰。
+      # 该用例会同时启动 API、Worker 和 Reconciler 子进程。单独运行可让
+      # bootstrap、readiness 或进程回收失败在 CI 中保持聚焦的安全日志。
       - name: Run Runtime process integration test in isolation
         run: >-
           poetry run pytest

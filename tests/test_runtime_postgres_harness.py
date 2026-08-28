@@ -571,7 +571,7 @@ def test_postgres_processes_share_held_bind_start_publish_callback_and_reconcile
     if not url:
         pytest.skip("未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN")
     try:
-        mock_port, api_port = _available_port(), _available_port()
+        mock_port = _available_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     config = PostgresHarnessConfig(url, f"agent_runtime_test_{uuid4().hex[:12]}", 10)
@@ -582,7 +582,7 @@ def test_postgres_processes_share_held_bind_start_publish_callback_and_reconcile
     ):
         assert database.session_factory is not None
         processes.start_mock_business(mock_port)
-        processes.start_api(api_port, mock_port=mock_port)
+        _, api_port = processes.start_api(mock_port=mock_port)
         archive_id, snapshot_id = _create_bound_archive(database.session_factory)
         create_path = "/api/v1/runtime/agent-runs"
         create_body = json.dumps(
@@ -678,7 +678,7 @@ def test_postgres_real_worker_audits_revoked_authorization_and_missing_target() 
     if not url:
         pytest.skip("未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN")
     try:
-        mock_port, api_port = _available_port(), _available_port()
+        mock_port = _available_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     config = PostgresHarnessConfig(url, f"agent_runtime_test_{uuid4().hex[:12]}", 10)
@@ -689,7 +689,7 @@ def test_postgres_real_worker_audits_revoked_authorization_and_missing_target() 
     ):
         assert database.session_factory is not None
         processes.start_mock_business(mock_port)
-        processes.start_api(api_port, mock_port=mock_port)
+        _, api_port = processes.start_api(mock_port=mock_port)
         run_ids: list[str] = []
         for index in range(2):
             archive_id, snapshot_id = _create_bound_archive(
@@ -756,7 +756,7 @@ def test_postgres_late_publish_after_cancel_and_purge_cannot_restore_private_sta
     if not url:
         pytest.skip("未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN")
     try:
-        mock_port, api_port = _available_port(), _available_port()
+        mock_port = _available_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     config = PostgresHarnessConfig(url, f"agent_runtime_test_{uuid4().hex[:12]}", 10)
@@ -767,7 +767,7 @@ def test_postgres_late_publish_after_cancel_and_purge_cannot_restore_private_sta
     ):
         assert database.session_factory is not None
         processes.start_mock_business(mock_port)
-        processes.start_api(api_port, mock_port=mock_port)
+        _, api_port = processes.start_api(mock_port=mock_port)
         archive_id, snapshot_id = _create_bound_archive(database.session_factory)
         run_id = _create_and_start_run(
             api_port, processes.identity_id, archive_id, snapshot_id, database.session_factory,
@@ -825,7 +825,7 @@ def test_postgres_delayed_model_response_after_cancel_and_purge_stays_contentles
     if not url or not redis_url:
         pytest.skip("未显式提供 PostgreSQL 与隔离 Redis harness")
     try:
-        mock_port, provider_port, api_port = _available_port(), _available_port(), _available_port()
+        mock_port, provider_port = _available_port(), _available_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     config = PostgresHarnessConfig(url, f"agent_runtime_test_{uuid4().hex[:12]}", 10)
@@ -837,8 +837,8 @@ def test_postgres_delayed_model_response_after_cancel_and_purge_stays_contentles
         assert database.session_factory is not None
         processes.start_mock_business(mock_port)
         processes.start_mock_provider(provider_port)
-        processes.start_api(
-            api_port, mock_port=mock_port, provider_port=provider_port
+        _, api_port = processes.start_api(
+            mock_port=mock_port, provider_port=provider_port
         )
         archive_id, snapshot_id = _create_bound_archive(database.session_factory)
         run_id = _create_and_start_run(
@@ -895,11 +895,7 @@ def test_postgres_delayed_repair_response_after_cancel_and_purge_stays_contentle
     if not url or not redis_url:
         pytest.skip("未显式提供 PostgreSQL 与隔离 Redis harness")
     try:
-        mock_port, provider_port, api_port = (
-            _available_port(),
-            _available_port(),
-            _available_port(),
-        )
+        mock_port, provider_port = _available_port(), _available_port()
     except PermissionError:
         pytest.skip("当前受限环境禁止绑定 loopback 端口")
     config = PostgresHarnessConfig(
@@ -919,8 +915,7 @@ def test_postgres_delayed_repair_response_after_cancel_and_purge_stays_contentle
         assert database.session_factory is not None
         processes.start_mock_business(mock_port)
         processes.start_mock_provider(provider_port)
-        processes.start_api(
-            api_port,
+        _, api_port = processes.start_api(
             mock_port=mock_port,
             provider_port=provider_port,
         )

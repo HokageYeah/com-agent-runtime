@@ -36,7 +36,9 @@ _PYTHON_RUNTIME_ENV_ALLOWLIST = (
     "SYSTEMROOT",
 )
 _SAFE_FAILURE_ROLES = frozenset({"api", "worker", "reconciler"})
-_SAFE_FAILURE_STAGES = frozenset({"dependencies", "api_app", "api_server"})
+_SAFE_FAILURE_STAGES = frozenset(
+    {"bootstrap", "dependencies", "api_app", "api_server"}
+)
 
 
 class ProcessHarness(AbstractContextManager["ProcessHarness"]):
@@ -138,6 +140,7 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         *,
         timeout_seconds: float | None = None,
         process: subprocess.Popen[str] | None = None,
+        fallback_role: str | None = None,
     ) -> None:
         """探测 loopback 端口；子进程提前退出时立即返回固定安全错误码。"""
         if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -147,18 +150,24 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         )
         while monotonic() < deadline:
             if process is not None and process.poll() is not None:
-                raise RuntimeError(self._safe_process_exit_message(process))
+                raise RuntimeError(
+                    self._safe_process_exit_message(process, fallback_role=fallback_role)
+                )
             try:
                 with create_connection((host, port), timeout=0.1):
                     return
             except OSError:
                 pass
         if process is not None and process.poll() is not None:
-            raise RuntimeError(self._safe_process_exit_message(process))
+            raise RuntimeError(
+                self._safe_process_exit_message(process, fallback_role=fallback_role)
+            )
         raise TimeoutError("TEST_HARNESS_HEALTH_TIMEOUT")
 
     @staticmethod
-    def _safe_process_exit_message(process: subprocess.Popen[str]) -> str:
+    def _safe_process_exit_message(
+        process: subprocess.Popen[str], *, fallback_role: str | None = None
+    ) -> str:
         """只从 stderr 提取子进程产生的固定元数据，其余内容全部丢弃。"""
         return_code = process.poll()
         if process.stderr is not None:
@@ -189,6 +198,11 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
                         "TEST_HARNESS_PROCESS_EXITED:"
                         f"{role}:{stage}:{error_type}:{return_code}"
                     )
+        if fallback_role in _SAFE_FAILURE_ROLES:
+            return (
+                "TEST_HARNESS_PROCESS_EXITED:"
+                f"{fallback_role}:bootstrap:ProcessExit:{return_code}"
+            )
         return "TEST_HARNESS_PROCESS_EXITED"
 
     def start_mock_business(
@@ -221,20 +235,33 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
         self._wait_for_ready(process, "mock_provider")
         return process
 
-    def start_api(
-        self, port: int, *, mock_port: int, provider_port: int | None = None
-    ) -> subprocess.Popen[str]:
-        """通过父进程预绑定 socket 启动 API，消除分配与 Uvicorn 绑定间的竞态。"""
+    @staticmethod
+    def _create_api_listener() -> socket:
+        """创建已监听的最终 IPv4 socket，端口由内核原子分配。"""
         listener = socket(AF_INET, SOCK_STREAM)
         listener.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
         try:
-            listener.bind(("127.0.0.1", port))
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(128)
             listener.set_inheritable(True)
+            return listener
+        except BaseException:
+            listener.close()
+            raise
+
+    def start_api(
+        self, *, mock_port: int, provider_port: int | None = None
+    ) -> tuple[subprocess.Popen[str], int]:
+        """通过父进程最终 listening socket 启动 API，不预选或重新绑定端口。"""
+        listener = self._create_api_listener()
+        port = int(listener.getsockname()[1])
+        try:
             socket_fd = listener.fileno()
             process = self._start_role(
                 "api",
                 port=port,
                 mock_port=mock_port,
+                ready=True,
                 provider_port=provider_port,
                 socket_fd=socket_fd,
             )
@@ -249,8 +276,9 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             port,
             timeout_seconds=max(self._timeout_seconds, 60.0),
             process=process,
+            fallback_role="api",
         )
-        return process
+        return process, port
 
     def start_worker(self, *, mock_port: int, provider_port: int | None = None) -> subprocess.Popen[str]:
         """Worker 仅跑一轮并以固定 ready 摘要通知父进程。"""
@@ -305,7 +333,9 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             [
                 sys.executable,
                 "-m",
-                "app.runtime.harness_entry",
+                "app.runtime.harness_bootstrap",
+                "--role",
+                role,
                 "--config",
                 str(config_path),
             ],
@@ -332,7 +362,12 @@ class ProcessHarness(AbstractContextManager["ProcessHarness"]):
             selector.register(process.stdout, selectors.EVENT_READ)
             while monotonic() < deadline:
                 if process.poll() is not None:
-                    raise RuntimeError(self._safe_process_exit_message(process))
+                    raise RuntimeError(
+                        self._safe_process_exit_message(
+                            process,
+                            fallback_role=role if role in _SAFE_FAILURE_ROLES else None,
+                        )
+                    )
                 if not selector.select(timeout=min(0.1, deadline - monotonic())):
                     continue
                 line = process.stdout.readline()

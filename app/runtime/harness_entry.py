@@ -395,6 +395,15 @@ def _failed(role: _Role, stage: str, error: BaseException) -> None:
     )
 
 
+class _HarnessApiServer(uvicorn.Server):
+    """Uvicorn 完成 lifespan 与 asyncio server 启动后才通知父进程。"""
+
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        await super().startup(sockets=sockets)
+        if self.started:
+            _ready("api")
+
+
 def serve_api(app: object, config: HarnessProcessConfig) -> None:
     """直接使用继承的 IPv4 监听 socket 启动测试 API。
 
@@ -405,7 +414,7 @@ def serve_api(app: object, config: HarnessProcessConfig) -> None:
     if config.socket_fd is None:
         raise ValueError("TEST_HARNESS_CONFIG_INVALID")
     with socket.socket(fileno=config.socket_fd) as listener:
-        server = uvicorn.Server(
+        server = _HarnessApiServer(
             uvicorn.Config(
                 app,  # type: ignore[arg-type]
                 host="127.0.0.1",
