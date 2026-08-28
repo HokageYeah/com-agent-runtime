@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "agent-runtime.sh"
+REQUIRED_NO_PROXY_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "mysql",
+    "redis",
+    "runtime-api",
+    "couple-diary-backend",
+}
+
+
+def _last_value(content: str, key: str) -> str:
+    matches = re.findall(rf"^{re.escape(key)}=(.*)$", content, flags=re.MULTILINE)
+    assert matches, key
+    return matches[-1]
 
 
 def _run_configure(
@@ -68,6 +87,8 @@ def test_configure_runtime_env_creates_private_test_block(tmp_path: Path) -> Non
     assert "DB_NAME=couple_diary_agent_runtime_test" in content
     assert "RUNTIME_REDIS_URL=redis://redis:6379/14" in content
     assert "MEMORY_RUNTIME_BASE_URL=http://runtime-api:8002" in content
+    assert set(_last_value(content, "NO_PROXY").split(",")) == REQUIRED_NO_PROXY_HOSTS
+    assert _last_value(content, "no_proxy") == _last_value(content, "NO_PROXY")
     assert "change_me" not in content
     assert stat.S_IMODE(output_file.stat().st_mode) == 0o600
     assert "MEMORY_RUNTIME_SECRET=" not in result.stdout
@@ -77,7 +98,11 @@ def test_configure_runtime_env_appends_and_backs_up_existing_file(
     tmp_path: Path,
 ) -> None:
     output_file = tmp_path / "runtime-test.env"
-    original = "EXISTING_VALUE=keep-me\n"
+    original = (
+        "EXISTING_VALUE=keep-me\n"
+        "NO_PROXY=metadata.internal,runtime-api\n"
+        "no_proxy=legacy.internal\n"
+    )
     output_file.write_text(original, encoding="utf-8")
     os.chmod(output_file, 0o644)
 
@@ -85,6 +110,14 @@ def test_configure_runtime_env_appends_and_backs_up_existing_file(
 
     assert result.returncode == 0, result.stderr
     assert output_file.read_text(encoding="utf-8").startswith(original)
+    merged_no_proxy = _last_value(
+        output_file.read_text(encoding="utf-8"), "NO_PROXY"
+    ).split(",")
+    assert set(merged_no_proxy) == REQUIRED_NO_PROXY_HOSTS | {
+        "metadata.internal",
+        "legacy.internal",
+    }
+    assert len(merged_no_proxy) == len(set(merged_no_proxy))
     backups = list(tmp_path.glob("runtime-test.env.*.bak"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == original
@@ -112,6 +145,8 @@ def test_configure_runtime_env_creates_fail_closed_production_block(
     assert "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false" in content
     assert "MEMORY_RUNTIME_KEY_ID=production-v1" in content
     assert "MEMORY_RUNTIME_BASE_URL=https://runtime.example.com" in content
+    assert set(_last_value(content, "NO_PROXY").split(",")) == REQUIRED_NO_PROXY_HOSTS
+    assert _last_value(content, "no_proxy") == _last_value(content, "NO_PROXY")
     assert "change_me" not in content
     assert stat.S_IMODE(output_file.stat().st_mode) == 0o600
     assert "MODEL_PROVIDER_API_KEYS_JSON=" not in result.stdout

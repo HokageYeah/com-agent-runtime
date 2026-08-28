@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly DEFAULT_ENV_DIR="/usr/HokageYeah/服务端系统/env"
+readonly REQUIRED_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,mysql,redis,runtime-api,couple-diary-backend"
 
 usage() {
   cat <<'EOF'
@@ -16,12 +17,44 @@ usage() {
   - 已有文件不会被覆盖；追加前会先生成时间戳备份。
   - 密码、密钥、私有地址和 Provider JSON 输入都不回显。
   - test 密钥留空时可由 OpenSSL 生成；production 密钥必须从受控密钥管理边界输入。
+  - 保留已有代理白名单，并补齐共享 Docker 网络别名和私有网段。
 EOF
 }
 
 fail() {
   printf '错误：%s\n' "$1" >&2
   exit 1
+}
+
+last_env_value() {
+  local file="$1" key="$2"
+  awk -v key="${key}" '
+    index($0, key "=") == 1 { value = substr($0, length(key) + 2) }
+    END { sub(/\r$/, "", value); printf "%s", value }
+  ' "${file}"
+}
+
+merge_csv_values() {
+  local existing="$1" required="$2" item kept_item merged="" duplicate
+  local -a items kept_items
+  # Bash 3.2 在 set -u 下展开空数组会报错；保留一个空哨兵保证跨平台。
+  kept_items=("")
+  [[ "${existing}" != *$'\r'* && "${existing}" != *$'\n'* ]] \
+    || fail "已有代理白名单不能包含换行"
+  IFS=',' read -r -a items <<< "${existing},${required}"
+  for item in "${items[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ -n "${item}" ]] || continue
+    duplicate="false"
+    for kept_item in "${kept_items[@]}"; do
+      if [[ "${kept_item}" == "${item}" ]]; then duplicate="true"; break; fi
+    done
+    [[ "${duplicate}" == "false" ]] || continue
+    kept_items+=("${item}")
+  done
+  for item in "${kept_items[@]}"; do merged="${merged:+${merged},}${item}"; done
+  printf '%s' "${merged}"
 }
 
 prompt_value() {
@@ -93,6 +126,12 @@ fi
 command -v openssl >/dev/null 2>&1 || fail "服务器缺少 openssl"
 umask 077
 mkdir -p "$(dirname "${output_file}")"
+
+existing_no_proxy=""
+if [[ -f "${output_file}" ]]; then
+  existing_no_proxy="$(last_env_value "${output_file}" "NO_PROXY"),$(last_env_value "${output_file}" "no_proxy")"
+fi
+merged_no_proxy="$(merge_csv_values "${existing_no_proxy}" "${REQUIRED_NO_PROXY}")"
 
 if [[ "${environment}" == "test" ]]; then
   default_api_port="18002"
@@ -241,6 +280,9 @@ RUNTIME_EXTERNAL_EXPORTER_ENABLED=false
 RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=${tool_allow_private_endpoints}
 BACKEND_CORS_ORIGINS=${backend_cors_origins}
 DEBUG=false
+# Python urllib/httpx 访问共享 Docker 网络别名时必须绕过宿主 HTTP(S) 代理。
+NO_PROXY=${merged_no_proxy}
+no_proxy=${merged_no_proxy}
 
 RUNTIME_TRUSTED_CLIENTS_JSON={"couple-diary":{"tenant_id":"couple-diary","keys":{"${key_id}":"${runtime_hmac_secret}"},"agent_ids":["memoir_agent"],"business_types":["couple_memory"],"callback_target_ids":["memory_callback"],"connector_ids":["couple_diary_backend"],"data_domains":["couple_memory"],"authorization_version":1,"model_data_residency":"private"}}
 RUNTIME_BUSINESS_CONNECTORS_JSON={"couple_diary_backend":{"enabled":true,"base_url":"${business_base_url}","runtime_id":"couple-diary","key_id":"${key_id}","secret":"${runtime_hmac_secret}"}}

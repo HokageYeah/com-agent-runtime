@@ -236,7 +236,7 @@ cd "/usr/HokageYeah/服务端系统/com-agent-runtime"
 
 test/production 的默认目标分别为 `/usr/HokageYeah/服务端系统/env/runtime-test.env` 与 `/usr/HokageYeah/服务端系统/env/runtime-production.env`。脚本不截断已有文件：先创建时间戳 `.bak` 备份，再追加 `#########自动化<environment>创建#########` 配置块并把文件和备份设为 `0600`。Docker env 的同名变量以后出现的值为准，因此重新执行会追加一个新的有效配置块，旧块仅用于人工对照。
 
-test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`，并要求人工输入 Runtime 专用外部 MySQL/Redis、受控 HMAC/Fernet/JWT 密钥与 HTTPS origin；正式密钥不允许留空自动生成。两种模式都不会把密钥打印到终端。
+test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`，并要求人工输入 Runtime 专用外部 MySQL/Redis、受控 HMAC/Fernet/JWT 密钥与 HTTPS origin；正式密钥不允许留空自动生成。两种模式都不会把密钥打印到终端。脚本还会为 `NO_PROXY`/`no_proxy` 保留已有条目并补齐 `runtime-api`、`couple-diary-backend`、MySQL/Redis 别名和私有网段，防止容器间请求误入宿主 HTTP(S) 代理。
 
 Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境的 Runtime 联动配置：
 
@@ -245,7 +245,7 @@ Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境�
 ./agent-runtime.sh configure-couple-diary production
 ```
 
-该命令默认读取 `/usr/HokageYeah/服务端系统/env/runtime-<environment>.env`，并将配置块追加到同目录的 `couple-diary-<environment>.env`。脚本从 Runtime 环境文件提取网络名、客户端 ID、Key ID 和 HMAC Secret，不会 `source` 环境文件，也不会在输出中打印密钥。写入前会创建备份，并将目标文件及备份权限设置为 `0600`。
+该命令默认读取 `/usr/HokageYeah/服务端系统/env/runtime-<environment>.env`，并将配置块追加到同目录的 `couple-diary-<environment>.env`。脚本从 Runtime 环境文件提取网络名、客户端 ID、Key ID 和 HMAC Secret，不会 `source` 环境文件，也不会在输出中打印密钥。它还会保留并补齐 `CD_DOCKER_NO_PROXY`，Compose 再将其同时注入业务 backend/worker 的 `NO_PROXY` 与 `no_proxy`。写入前会创建备份，并将目标文件及备份权限设置为 `0600`。
 
 Snapshot AES-GCM Master Key 和回忆录访问密码 Pepper 属于 `couple-diary-doc`，不会复用 Runtime Fernet Key 或 HMAC Secret。test 环境缺失时自动生成；production 环境缺失时通过终端隐藏输入。重复执行会沿用目标文件中最后一组有效值。
 

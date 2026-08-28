@@ -8,6 +8,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "agent-runtime.sh"
+REQUIRED_NO_PROXY_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "mysql",
+    "redis",
+    "runtime-api",
+    "couple-diary-backend",
+}
 
 
 def _write_runtime_env(path: Path, environment: str = "test") -> None:
@@ -27,6 +39,8 @@ def _write_runtime_env(path: Path, environment: str = "test") -> None:
                 "MEMORY_RUNTIME_CLIENT_ID=couple-diary",
                 f"MEMORY_RUNTIME_KEY_ID={key_id}",
                 f"MEMORY_RUNTIME_SECRET={environment}-shared-hmac-secret-0123456789",
+                "BUCKET_NAME=com-agent-runtime",
+                "ENDPOINT=https://oss-cn-beijing.aliyuncs.com/",
                 "",
             )
         ),
@@ -88,6 +102,14 @@ def test_configure_couple_diary_env_creates_private_test_block(
         "CD_MEMORY_RUNTIME_SECRET=test-shared-hmac-secret-0123456789" in content
     )
     assert "CD_MEMORY_RUNTIME_PACKAGE_ENABLED=false" in content
+    assert (
+        _last_value(content, "CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES")
+        == '["com-agent-runtime.oss-cn-beijing.aliyuncs.com"]'
+    )
+    assert (
+        set(_last_value(content, "CD_DOCKER_NO_PROXY").split(","))
+        == REQUIRED_NO_PROXY_HOSTS
+    )
     assert re.fullmatch(
         r"[0-9a-f]{64}", _last_value(content, "CD_MEMORY_SNAPSHOT_MASTER_KEY")
     )
@@ -107,6 +129,7 @@ def test_configure_couple_diary_env_reuses_business_secrets_and_backs_up(
     original = "\n".join(
         (
             "EXISTING_VALUE=keep-me",
+            "CD_DOCKER_NO_PROXY=metadata.internal,runtime-api",
             f"CD_MEMORY_SNAPSHOT_MASTER_KEY={'a' * 64}",
             f"CD_MEMORY_ACCESS_PASSWORD_PEPPER={'b' * 64}",
             "",
@@ -122,6 +145,9 @@ def test_configure_couple_diary_env_reuses_business_secrets_and_backs_up(
     assert content.startswith(original)
     assert _last_value(content, "CD_MEMORY_SNAPSHOT_MASTER_KEY") == "a" * 64
     assert _last_value(content, "CD_MEMORY_ACCESS_PASSWORD_PEPPER") == "b" * 64
+    merged_no_proxy = _last_value(content, "CD_DOCKER_NO_PROXY").split(",")
+    assert set(merged_no_proxy) == REQUIRED_NO_PROXY_HOSTS | {"metadata.internal"}
+    assert len(merged_no_proxy) == len(set(merged_no_proxy))
     backups = list(tmp_path.glob("couple-diary-test.env.*.bak"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == original
@@ -165,6 +191,10 @@ def test_configure_couple_diary_env_requires_hidden_production_business_secrets(
     content = output_file.read_text(encoding="utf-8")
     assert _last_value(content, "CD_MEMORY_SNAPSHOT_MASTER_KEY") == "c" * 64
     assert _last_value(content, "CD_MEMORY_ACCESS_PASSWORD_PEPPER") == "d" * 64
+    assert (
+        set(_last_value(content, "CD_DOCKER_NO_PROXY").split(","))
+        == REQUIRED_NO_PROXY_HOSTS
+    )
     assert "c" * 64 not in result.stdout + result.stderr
     assert "d" * 64 not in result.stdout + result.stderr
 
@@ -191,4 +221,23 @@ def test_configure_couple_diary_env_rejects_missing_runtime_identity(
 
     assert result.returncode != 0
     assert "MEMORY_RUNTIME_CLIENT_ID" in result.stderr
+    assert not output_file.exists()
+
+
+def test_configure_couple_diary_env_rejects_invalid_oss_endpoint(
+    tmp_path: Path,
+) -> None:
+    runtime_env = tmp_path / "runtime-test.env"
+    output_file = tmp_path / "couple-diary-test.env"
+    _write_runtime_env(runtime_env)
+    content = runtime_env.read_text(encoding="utf-8").replace(
+        "ENDPOINT=https://oss-cn-beijing.aliyuncs.com/",
+        "ENDPOINT=https://oss-cn-beijing.aliyuncs.com/private-path",
+    )
+    runtime_env.write_text(content, encoding="utf-8")
+
+    result = _run_configure(runtime_env, output_file)
+
+    assert result.returncode != 0
+    assert "ENDPOINT" in result.stderr
     assert not output_file.exists()

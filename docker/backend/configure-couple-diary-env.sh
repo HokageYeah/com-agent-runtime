@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly DEFAULT_ENV_DIR="/usr/HokageYeah/服务端系统/env"
+readonly REQUIRED_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,mysql,redis,runtime-api,couple-diary-backend"
 
 usage() {
   cat <<'EOF'
@@ -18,6 +19,8 @@ usage() {
   - 默认追加到 couple-diary-<environment>.env，追加前创建 0600 备份。
   - 默认保持 Runtime Worker/Package 门禁关闭；只有 --activate 才开启。
   - test 缺失业务 Snapshot key/pepper 时自动生成；production 必须隐藏输入。
+  - 保留已有 CD_DOCKER_NO_PROXY，并补齐共享 Docker 网络别名和私有网段。
+  - 从 Runtime BUCKET_NAME + ENDPOINT 生成 Couple Diary 媒体 URL 精确 Host 白名单。
   - 不执行（source）env 文件，不回显任何密钥。
 EOF
 }
@@ -33,6 +36,29 @@ last_env_value() {
     index($0, key "=") == 1 { value = substr($0, length(key) + 2) }
     END { sub(/\r$/, "", value); printf "%s", value }
   ' "${file}"
+}
+
+merge_csv_values() {
+  local existing="$1" required="$2" item kept_item merged="" duplicate
+  local -a items kept_items
+  # Bash 3.2 在 set -u 下展开空数组会报错；保留一个空哨兵保证跨平台。
+  kept_items=("")
+  [[ "${existing}" != *$'\r'* && "${existing}" != *$'\n'* ]] \
+    || fail "已有代理白名单不能包含换行"
+  IFS=',' read -r -a items <<< "${existing},${required}"
+  for item in "${items[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ -n "${item}" ]] || continue
+    duplicate="false"
+    for kept_item in "${kept_items[@]}"; do
+      if [[ "${kept_item}" == "${item}" ]]; then duplicate="true"; break; fi
+    done
+    [[ "${duplicate}" == "false" ]] || continue
+    kept_items+=("${item}")
+  done
+  for item in "${kept_items[@]}"; do merged="${merged:+${merged},}${item}"; done
+  printf '%s' "${merged}"
 }
 
 required_runtime_value() {
@@ -63,6 +89,23 @@ validate_safe_token() {
 validate_hex_key() {
   local label="$1" value="$2"
   [[ "${value}" =~ ^[0-9a-fA-F]{64}$ ]] || fail "${label} 必须是 32 字节 hex（64 字符）"
+}
+
+build_media_url_allowed_suffixes() {
+  local bucket_name="$1" endpoint="$2" endpoint_host
+  [[ "${bucket_name}" =~ ^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$ ]] \
+    || fail "Runtime env 中 BUCKET_NAME 不是合法的 OSS Bucket 名称"
+  case "${endpoint}" in
+    https://*) endpoint_host="${endpoint#https://}" ;;
+    http://*) endpoint_host="${endpoint#http://}" ;;
+    *://*) fail "Runtime env 中 ENDPOINT 只允许 http/https 协议" ;;
+    *) endpoint_host="${endpoint}" ;;
+  esac
+  endpoint_host="${endpoint_host%/}"
+  # 业务端校验的是精确公开 Host，这里拒绝路径、端口和宽泛后缀。
+  [[ "${endpoint_host}" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ && "${endpoint_host}" == *.* ]] \
+    || fail "Runtime env 中 ENDPOINT 必须是不含路径和端口的 OSS Host"
+  printf '["%s.%s"]' "${bucket_name}" "${endpoint_host}"
 }
 
 environment="${1:-}"
@@ -129,13 +172,19 @@ expected_key_id="${environment}-v1"
 required_runtime_value runtime_hmac_secret "MEMORY_RUNTIME_SECRET"
 validate_safe_token "MEMORY_RUNTIME_SECRET" "${runtime_hmac_secret}"
 (( ${#runtime_hmac_secret} >= 32 )) || fail "MEMORY_RUNTIME_SECRET 长度不足 32 字符"
+required_runtime_value bucket_name "BUCKET_NAME"
+required_runtime_value oss_endpoint "ENDPOINT"
+media_url_allowed_suffixes="$(build_media_url_allowed_suffixes "${bucket_name}" "${oss_endpoint}")"
 
 snapshot_master_key=""
 password_pepper=""
+existing_no_proxy=""
 if [[ -f "${output_file}" ]]; then
   snapshot_master_key="$(last_env_value "${output_file}" "CD_MEMORY_SNAPSHOT_MASTER_KEY")"
   password_pepper="$(last_env_value "${output_file}" "CD_MEMORY_ACCESS_PASSWORD_PEPPER")"
+  existing_no_proxy="$(last_env_value "${output_file}" "CD_DOCKER_NO_PROXY")"
 fi
+merged_no_proxy="$(merge_csv_values "${existing_no_proxy}" "${REQUIRED_NO_PROXY}")"
 
 if [[ -z "${snapshot_master_key}" ]]; then
   if [[ "${environment}" == "test" ]]; then
@@ -176,6 +225,8 @@ cat >"${block_file}" <<EOF
 # Runtime 来源 AgentPackage: ${agent_package_version}；Runtime 身份: ${runtime_id}。
 # 同名变量以本文件中最后一次出现为准。
 MEMOIR_INTEGRATION_NETWORK=${integration_network}
+# Compose 将该值同时注入 backend/worker 的 NO_PROXY 与 no_proxy。
+CD_DOCKER_NO_PROXY=${merged_no_proxy}
 CD_MEMORY_RUNTIME_WORKER_ENABLED=${activate}
 CD_MEMORY_RUNTIME_BASE_URL=http://runtime-api:8002
 CD_MEMORY_RUNTIME_CLIENT_ID=${runtime_client_id}
@@ -183,6 +234,8 @@ CD_MEMORY_RUNTIME_KEY_ID=${runtime_key_id}
 CD_MEMORY_RUNTIME_SECRET=${runtime_hmac_secret}
 CD_MEMORY_RUNTIME_TIMEOUT_SECONDS=5.0
 CD_MEMORY_RUNTIME_PACKAGE_ENABLED=${activate}
+# 从 Runtime OSS Bucket + Endpoint 派生精确公开 Host，供业务发布接口校验媒体 URL。
+CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES=${media_url_allowed_suffixes}
 CD_MEMORY_SNAPSHOT_MASTER_KEY=${snapshot_master_key}
 CD_MEMORY_SNAPSHOT_KEY_ID=1
 CD_MEMORY_ACCESS_PASSWORD_PEPPER=${password_pepper}
