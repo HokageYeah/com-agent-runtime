@@ -9,6 +9,7 @@ usage() {
 用法：
   ./agent-runtime.sh configure-docker test
   ./agent-runtime.sh configure-docker production
+  ./agent-runtime.sh configure-docker production --replace-db-password
   ./agent-runtime.sh configure-docker <test|production> --output /absolute/path/runtime.env
 
 说明：
@@ -16,7 +17,11 @@ usage() {
   - production 默认追加到 /usr/HokageYeah/服务端系统/env/runtime-production.env。
   - 已有文件不会被覆盖；追加前会先生成时间戳备份。
   - 密码、密钥、私有地址和 Provider JSON 输入都不回显。
-  - test 密钥留空时可由 OpenSSL 生成；production 密钥必须从受控密钥管理边界输入。
+  - test/production 缺失 HMAC、Fernet、JWT 时由 OpenSSL 独立生成；重复执行沿用旧值。
+  - production origin 优先读取已有文件或 RUNTIME_PRODUCTION_HTTPS_ORIGIN /
+    COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN；Runtime origin 首次仍缺失时只询问一次。
+  - production CORS 默认由 Runtime HTTPS origin 自动生成。
+  - production 数据库密码默认沿用；轮换 MySQL 账号密码后用 --replace-db-password 隐藏替换。
   - production 单机默认使用 couple-diary-mysql 与 couple-diary-redis:6379/15，可交互覆盖。
   - 媒体开启时追加 OSS/Provider 配置；媒体关闭时保持空配置并 fail-closed。
   - 保留已有代理白名单，并补齐共享 Docker 网络别名和私有网段。
@@ -100,6 +105,12 @@ validate_json_shape() {
   [[ "${value}" != *$'\r'* && "${value}" != *$'\n'* ]] || fail "${label} 不能包含换行"
 }
 
+validate_https_origin() {
+  local label="$1" value="$2"
+  [[ "${value}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] \
+    || fail "${label} 必须是不带路径的 https:// origin"
+}
+
 environment="${1:-}"
 case "${environment}" in
   test|production) ;;
@@ -108,6 +119,7 @@ esac
 shift
 
 output_file="${DEFAULT_ENV_DIR}/runtime-${environment}.env"
+replace_db_password="false"
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --output)
@@ -115,10 +127,18 @@ while [[ "$#" -gt 0 ]]; do
       output_file="$2"
       shift 2
       ;;
+    --replace-db-password)
+      replace_db_password="true"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage; fail "未知参数: $1" ;;
   esac
 done
+
+if [[ "${replace_db_password}" == "true" && "${environment}" != "production" ]]; then
+  fail "--replace-db-password 只能用于 production"
+fi
 
 [[ "${output_file}" == /* ]] || fail "--output 必须是绝对路径"
 [[ ! -L "${output_file}" ]] || fail "拒绝写入符号链接: ${output_file}"
@@ -130,8 +150,25 @@ umask 077
 mkdir -p "$(dirname "${output_file}")"
 
 existing_no_proxy=""
+existing_db_password=""
+existing_runtime_hmac_secret=""
+existing_snapshot_fernet_key=""
+existing_jwt_secret=""
+existing_runtime_origin=""
+existing_business_origin=""
+existing_cors_origins=""
 if [[ -f "${output_file}" ]]; then
   existing_no_proxy="$(last_env_value "${output_file}" "NO_PROXY"),$(last_env_value "${output_file}" "no_proxy")"
+  existing_db_password="$(last_env_value "${output_file}" "DB_PASSWORD")"
+  existing_runtime_hmac_secret="$(last_env_value "${output_file}" "MEMORY_RUNTIME_SECRET")"
+  existing_snapshot_fernet_key="$(last_env_value "${output_file}" "MEMORY_SNAPSHOT_FERNET_KEY")"
+  existing_jwt_secret="$(last_env_value "${output_file}" "USER_AUTH_JWT_SECRET")"
+  existing_runtime_origin="$(last_env_value "${output_file}" "RUNTIME_PUBLIC_HTTPS_ORIGIN")"
+  if [[ -z "${existing_runtime_origin}" ]]; then
+    existing_runtime_origin="$(last_env_value "${output_file}" "MEMORY_RUNTIME_BASE_URL")"
+  fi
+  existing_business_origin="$(last_env_value "${output_file}" "COUPLE_DIARY_PUBLIC_HTTPS_ORIGIN")"
+  existing_cors_origins="$(last_env_value "${output_file}" "BACKEND_CORS_ORIGINS")"
 fi
 merged_no_proxy="$(merge_csv_values "${existing_no_proxy}" "${REQUIRED_NO_PROXY}")"
 
@@ -170,7 +207,8 @@ printf '目标文件: %s\n' "${output_file}"
 if [[ "${environment}" == "test" ]]; then
   printf 'test 普通字段可使用默认值，密钥留空则安全随机生成。\n\n'
 else
-  printf 'production 不创建数据库/Redis sidecar，也不代你生成正式密钥。\n'
+  printf 'production 不创建数据库/Redis sidecar。\n'
+  printf 'HMAC/Fernet/JWT 缺失时安全生成，已存在时自动沿用，不输出密钥。\n'
   printf '单机默认通过共享私网复用 Couple Diary MySQL/Redis，但必须使用独立库、账号和 Redis DB。\n'
   printf '若已拆分腾讯云专用实例，在后续提示中覆盖默认地址。\n\n'
 fi
@@ -197,11 +235,19 @@ if [[ "${environment}" == "test" ]]; then
   prompt_secret mysql_root_password "Runtime test MySQL root 密码" "$(openssl rand -hex 32)"
   prompt_secret runtime_hmac_secret "Runtime/Business test 共享 HMAC 密钥" "$(openssl rand -hex 32)"
 else
-  prompt_required_hidden db_password "Runtime production 数据库密码"
+  if [[ "${replace_db_password}" == "true" ]]; then
+    prompt_required_hidden db_password "Runtime production 新数据库密码"
+  elif [[ -n "${existing_db_password}" ]]; then
+    db_password="${existing_db_password}"
+    printf '[自动] 沿用已有 Runtime production 数据库密码。\n'
+  else
+    # 外部 MySQL 账号已在 Runtime 之外建立，首次必须输入与 ALTER/CREATE USER 一致的值。
+    prompt_required_hidden db_password "Runtime production 数据库密码"
+  fi
   mysql_root_password=""
   prompt_hidden_value runtime_redis_url "Runtime production Redis URL" "${default_runtime_redis_url}"
   [[ "${runtime_redis_url}" == redis://* || "${runtime_redis_url}" == rediss://* ]] || fail "Runtime production Redis URL 必须以 redis:// 或 rediss:// 开头"
-  prompt_required_hidden runtime_hmac_secret "Runtime/Business production 共享 HMAC 密钥"
+  runtime_hmac_secret="${existing_runtime_hmac_secret:-$(openssl rand -hex 32)}"
 fi
 validate_token "Runtime 数据库密码" "${db_password}"
 if [[ -n "${mysql_root_password}" ]]; then validate_token "MySQL root 密码" "${mysql_root_password}"; fi
@@ -212,8 +258,8 @@ if [[ "${environment}" == "test" ]]; then
   prompt_secret snapshot_fernet_key "Runtime test Fernet 密钥" "${generated_fernet_key}"
   prompt_secret jwt_secret "Runtime test JWT 密钥" "$(openssl rand -hex 32)"
 else
-  prompt_required_hidden snapshot_fernet_key "Runtime production Fernet 密钥"
-  prompt_required_hidden jwt_secret "Runtime production JWT 密钥"
+  snapshot_fernet_key="${existing_snapshot_fernet_key:-${generated_fernet_key}}"
+  jwt_secret="${existing_jwt_secret:-$(openssl rand -hex 32)}"
 fi
 [[ "${snapshot_fernet_key}" =~ ^[A-Za-z0-9_-]{43}=$ ]] || fail "Runtime Fernet 密钥必须是 URL-safe Base64 编码的 32-byte key"
 validate_token "JWT 密钥" "${jwt_secret}"
@@ -223,11 +269,16 @@ if [[ "${environment}" == "test" ]]; then
   [[ "${business_base_url}" =~ ^http://[A-Za-z0-9._-]+:[0-9]+$ ]] || fail "test 业务后端 origin 必须类似 http://couple-diary-backend:8008，不带路径"
   backend_cors_origins="http://127.0.0.1:${runtime_api_host_port}"
 else
-  prompt_required_hidden runtime_base_url "Runtime production HTTPS origin"
-  prompt_required_hidden business_base_url "业务后端 production HTTPS origin"
-  prompt_required_hidden backend_cors_origins "Runtime production CORS origins"
-  [[ "${runtime_base_url}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || fail "Runtime production origin 必须是不带路径的 https:// origin"
-  [[ "${business_base_url}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || fail "业务后端 production origin 必须是不带路径的 https:// origin"
+  runtime_base_url="${RUNTIME_PRODUCTION_HTTPS_ORIGIN:-${existing_runtime_origin}}"
+  if [[ -z "${runtime_base_url}" ]]; then
+    read -r -p "Runtime production HTTPS origin（首次必填，后续自动沿用）: " runtime_base_url
+  fi
+  # Couple Diary 前端 production 配置中的正式 API origin；可用部署变量覆盖。
+  business_base_url="${COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN:-${existing_business_origin:-https://xdsz-api.hokage-yeah.online}}"
+  backend_cors_origins="${RUNTIME_PRODUCTION_CORS_ORIGINS:-${existing_cors_origins:-${runtime_base_url}}}"
+  validate_https_origin "Runtime production origin" "${runtime_base_url}"
+  validate_https_origin "Couple Diary backend production origin" "${business_base_url}"
+  validate_https_origin "Runtime production CORS origin" "${backend_cors_origins}"
 fi
 
 prompt_hidden_value model_routes_json "MODEL_ROUTES_JSON" "[]"
@@ -326,6 +377,9 @@ RUNTIME_ID=${runtime_id}
 RUNTIME_AUDIT_SINK_CONFIGURED=true
 RUNTIME_EXTERNAL_EXPORTER_ENABLED=false
 RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=${tool_allow_private_endpoints}
+# 非密钥的部署元数据；重复执行 configure-docker production 时用于自动沿用。
+RUNTIME_PUBLIC_HTTPS_ORIGIN=${runtime_base_url}
+COUPLE_DIARY_PUBLIC_HTTPS_ORIGIN=${business_base_url}
 BACKEND_CORS_ORIGINS=${backend_cors_origins}
 DEBUG=false
 # Python urllib/httpx 访问共享 Docker 网络别名时必须绕过宿主 HTTP(S) 代理。

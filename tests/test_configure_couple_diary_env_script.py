@@ -171,33 +171,27 @@ def test_configure_couple_diary_env_requires_explicit_activation(
     assert _last_value(content, "CD_MEMORY_RUNTIME_PACKAGE_ENABLED") == "true"
 
 
-def test_configure_couple_diary_env_requires_hidden_production_business_secrets(
+def test_configure_couple_diary_env_generates_production_business_secrets(
     tmp_path: Path,
 ) -> None:
     runtime_env = tmp_path / "runtime-production.env"
     output_file = tmp_path / "couple-diary-production.env"
     _write_runtime_env(runtime_env, "production")
 
-    missing = _run_configure(runtime_env, output_file, "production")
-    assert missing.returncode != 0
-    assert not output_file.exists()
-
-    result = _run_configure(
-        runtime_env,
-        output_file,
-        "production",
-        input_text=f"{'c' * 64}\n{'d' * 64}\n",
-    )
+    result = _run_configure(runtime_env, output_file, "production")
     assert result.returncode == 0, result.stderr
     content = output_file.read_text(encoding="utf-8")
-    assert _last_value(content, "CD_MEMORY_SNAPSHOT_MASTER_KEY") == "c" * 64
-    assert _last_value(content, "CD_MEMORY_ACCESS_PASSWORD_PEPPER") == "d" * 64
+    snapshot_key = _last_value(content, "CD_MEMORY_SNAPSHOT_MASTER_KEY")
+    password_pepper = _last_value(content, "CD_MEMORY_ACCESS_PASSWORD_PEPPER")
+    assert re.fullmatch(r"[0-9a-f]{64}", snapshot_key)
+    assert re.fullmatch(r"[0-9a-f]{64}", password_pepper)
+    assert snapshot_key != password_pepper
     assert (
         set(_last_value(content, "CD_DOCKER_NO_PROXY").split(","))
         == REQUIRED_NO_PROXY_HOSTS
     )
-    assert "c" * 64 not in result.stdout + result.stderr
-    assert "d" * 64 not in result.stdout + result.stderr
+    assert snapshot_key not in result.stdout + result.stderr
+    assert password_pepper not in result.stdout + result.stderr
 
 
 def test_configure_couple_diary_env_rejects_missing_runtime_identity(

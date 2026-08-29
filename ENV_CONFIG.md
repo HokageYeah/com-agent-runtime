@@ -18,6 +18,8 @@ chmod 600 .env.development.local .env.test.local .env.production.local
 
 Docker 发布合同见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)。正式镜像不复制 `.env*` 或任何密钥文件；production 的数据库、Redis、HMAC、Fernet、JWT、Provider 和对象存储凭据必须由 secret manager 或部署平台在运行时注入，不得使用 Dockerfile `ARG`、镜像 label、tag、命令参数或普通日志传递。
 
+单 CVM Docker 部署时，`configure-docker production` 属于服务器本地部署边界：它可用 OpenSSL 生成缺失的 HMAC/Fernet/JWT，只写入仓库外的 `0600` env 文件，并在重复执行时沿用旧值。这不改变“不进镜像、不进 Git、不进日志”的边界；上量后仍应迁移到专用 secret manager。
+
 - production 不在 Runtime Compose 中部署 MySQL/Redis sidecar；单 CVM 可通过共享私网复用 Couple Diary 实例，但 `DB_NAME` 固定为 `couple_diary_agent_runtime_prod`、账号只授权该 schema、Redis 固定使用 `/15`且 `DB_AUTO_CREATE=false`。上量后替换为 AgentRuntime 专用腾讯云私网实例。
 - test 必须连接与 development、production 完全隔离的数据库和 Redis；本地默认 Redis DB 为 `/14`，临时依赖和随机凭据在验收结束后删除。
 - API、Worker、launcher、Reconciler 分别运行在独立 workload；`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。

@@ -18,7 +18,7 @@ usage() {
   - 默认从同目录 runtime-<environment>.env 读取 Runtime 共享身份。
   - 默认追加到 couple-diary-<environment>.env，追加前创建 0600 备份。
   - 默认保持 Runtime Worker/Package 门禁关闭；只有 --activate 才开启。
-  - test 缺失业务 Snapshot key/pepper 时自动生成；production 必须隐藏输入。
+  - test/production 缺失业务 Snapshot key/pepper 时独立生成，重复执行沿用旧值。
   - 保留已有 CD_DOCKER_NO_PROXY，并补齐共享 Docker 网络别名和私有网段。
   - 从 Runtime BUCKET_NAME + ENDPOINT 生成 Couple Diary 媒体 URL 精确 Host 白名单。
   - 不执行（source）env 文件，不回显任何密钥。
@@ -70,14 +70,6 @@ required_runtime_value() {
   [[ "${value}" != *$'\r'* && "${value}" != *$'\n'* ]] \
     || fail "Runtime env 中 ${key} 不能包含换行"
   printf -v "${variable_name}" '%s' "${value}"
-}
-
-prompt_required_hidden() {
-  local variable_name="$1" label="$2" input_value
-  read -r -s -p "${label}（必填，输入不回显）: " input_value || true
-  printf '\n'
-  [[ -n "${input_value}" ]] || fail "${label} 不能为空"
-  printf -v "${variable_name}" '%s' "${input_value}"
 }
 
 validate_safe_token() {
@@ -195,18 +187,10 @@ fi
 merged_no_proxy="$(merge_csv_values "${existing_no_proxy}" "${REQUIRED_NO_PROXY}")"
 
 if [[ -z "${snapshot_master_key}" ]]; then
-  if [[ "${environment}" == "test" ]]; then
-    snapshot_master_key="$(openssl rand -hex 32)"
-  else
-    prompt_required_hidden snapshot_master_key "Couple Diary production Snapshot master key"
-  fi
+  snapshot_master_key="$(openssl rand -hex 32)"
 fi
 if [[ -z "${password_pepper}" ]]; then
-  if [[ "${environment}" == "test" ]]; then
-    password_pepper="$(openssl rand -hex 32)"
-  else
-    prompt_required_hidden password_pepper "Couple Diary production password pepper"
-  fi
+  password_pepper="$(openssl rand -hex 32)"
 fi
 validate_hex_key "CD_MEMORY_SNAPSHOT_MASTER_KEY" "${snapshot_master_key}"
 validate_hex_key "CD_MEMORY_ACCESS_PASSWORD_PEPPER" "${password_pepper}"

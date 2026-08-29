@@ -29,34 +29,30 @@ def _last_value(content: str, key: str) -> str:
 
 
 def _run_configure(
-    output_file: Path, environment: str = "test"
+    output_file: Path,
+    environment: str = "test",
+    *,
+    inject_production_origins: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     # 普通字段和密钥全部留空，覆盖默认值与安全随机生成分支。
     if environment == "test":
         prompt_answers = "\n" * 14
     else:
-        prompt_answers = "\n".join(
-            (
-                "",  # API port
-                "",  # Worker ID
-                "",  # Package version
-                "",  # Single-server MySQL alias
-                "",  # DB port
-                "",  # DB user
-                "d" * 64,
-                "",  # Single-server Redis logical DB
-                "h" * 64,
-                "A" * 43 + "=",
-                "j" * 64,
-                "https://runtime.example.com",
-                "https://business.example.com",
-                "https://runtime.example.com",
-                "",  # Model routes
-                "",  # Memoir node routes
-                "",  # Provider keys
-                "",  # Media disabled
-            )
-        ) + "\n"
+        answers = ["", "", "", "", "", ""]
+        if not output_file.exists():
+            answers.append("d" * 64)  # First-run external MySQL password
+        answers.extend(("", "", "", "", ""))
+        prompt_answers = "\n".join(answers) + "\n"
+    command_environment = os.environ.copy()
+    command_environment.pop("RUNTIME_PRODUCTION_HTTPS_ORIGIN", None)
+    command_environment.pop("COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN", None)
+    if environment == "production" and inject_production_origins:
+        command_environment.update(
+            {
+                "RUNTIME_PRODUCTION_HTTPS_ORIGIN": "https://runtime.example.com",
+                "COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN": "https://business.example.com",
+            }
+        )
     return subprocess.run(
         [
             "bash",
@@ -70,6 +66,7 @@ def _run_configure(
         text=True,
         capture_output=True,
         check=False,
+        env=command_environment,
     )
 
 
@@ -145,6 +142,22 @@ def test_configure_runtime_env_creates_fail_closed_production_block(
     assert "RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false" in content
     assert "MEMORY_RUNTIME_KEY_ID=production-v1" in content
     assert "MEMORY_RUNTIME_BASE_URL=https://runtime.example.com" in content
+    assert "RUNTIME_PUBLIC_HTTPS_ORIGIN=https://runtime.example.com" in content
+    assert (
+        "COUPLE_DIARY_PUBLIC_HTTPS_ORIGIN=https://business.example.com" in content
+    )
+    assert _last_value(content, "BACKEND_CORS_ORIGINS") == (
+        "https://runtime.example.com"
+    )
+    hmac_secret = _last_value(content, "MEMORY_RUNTIME_SECRET")
+    fernet_key = _last_value(content, "MEMORY_SNAPSHOT_FERNET_KEY")
+    jwt_secret = _last_value(content, "USER_AUTH_JWT_SECRET")
+    assert re.fullmatch(r"[0-9a-f]{64}", hmac_secret)
+    assert re.fullmatch(r"[A-Za-z0-9_-]{43}=", fernet_key)
+    assert re.fullmatch(r"[0-9a-f]{64}", jwt_secret)
+    assert len({hmac_secret, fernet_key, jwt_secret}) == 3
+    for secret in (hmac_secret, fernet_key, jwt_secret):
+        assert secret not in result.stdout + result.stderr
     assert set(_last_value(content, "NO_PROXY").split(",")) == REQUIRED_NO_PROXY_HOSTS
     assert _last_value(content, "no_proxy") == _last_value(content, "NO_PROXY")
     assert "change_me" not in content
@@ -176,6 +189,74 @@ def test_configure_runtime_env_rejects_empty_production_database_password(
     assert not output_file.exists()
     assert "Runtime production 数据库密码" in result.stderr
     assert "不能为空" in result.stderr
+
+
+def test_configure_runtime_env_reuses_production_secrets_and_origins(
+    tmp_path: Path,
+) -> None:
+    output_file = tmp_path / "runtime-production.env"
+    first = _run_configure(output_file, "production")
+    assert first.returncode == 0, first.stderr
+    first_content = output_file.read_text(encoding="utf-8")
+    preserved = {
+        key: _last_value(first_content, key)
+        for key in (
+            "MEMORY_RUNTIME_SECRET",
+            "MEMORY_SNAPSHOT_FERNET_KEY",
+            "USER_AUTH_JWT_SECRET",
+            "RUNTIME_PUBLIC_HTTPS_ORIGIN",
+            "COUPLE_DIARY_PUBLIC_HTTPS_ORIGIN",
+        )
+    }
+
+    second = _run_configure(
+        output_file, "production", inject_production_origins=False
+    )
+
+    assert second.returncode == 0, second.stderr
+    second_content = output_file.read_text(encoding="utf-8")
+    assert {key: _last_value(second_content, key) for key in preserved} == preserved
+
+
+def test_configure_runtime_env_can_replace_existing_production_db_password(
+    tmp_path: Path,
+) -> None:
+    output_file = tmp_path / "runtime-production.env"
+    first = _run_configure(output_file, "production")
+    assert first.returncode == 0, first.stderr
+    replacement = "e" * 64
+    answers = ["", "", "", "", "", "", replacement, "", "", "", "", ""]
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "configure-docker",
+            "production",
+            "--output",
+            str(output_file),
+            "--replace-db-password",
+        ],
+        input="\n".join(answers) + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "RUNTIME_PRODUCTION_HTTPS_ORIGIN",
+                "COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN",
+            }
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _last_value(output_file.read_text(encoding="utf-8"), "DB_PASSWORD") == (
+        replacement
+    )
+    assert replacement not in result.stdout + result.stderr
 
 
 def test_configure_runtime_env_writes_enabled_media_oss_config(

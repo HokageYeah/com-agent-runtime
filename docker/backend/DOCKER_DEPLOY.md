@@ -236,7 +236,11 @@ cd "/usr/HokageYeah/服务端系统/com-agent-runtime"
 
 test/production 的默认目标分别为 `/usr/HokageYeah/服务端系统/env/runtime-test.env` 与 `/usr/HokageYeah/服务端系统/env/runtime-production.env`。脚本不截断已有文件：先创建时间戳 `.bak` 备份，再追加 `#########自动化<environment>创建#########` 配置块并把文件和备份设为 `0600`。Docker env 的同名变量以后出现的值为准，因此重新执行会追加一个新的有效配置块，旧块仅用于人工对照。
 
-test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`；单 CVM 默认使用共享私网别名，可在提示中覆盖为腾讯云专用私网实例。受控 HMAC/Fernet/JWT 密钥与 HTTPS origin 仍必须人工输入，正式密钥不允许留空自动生成。媒体开启后脚本隐藏读取 OSS/Provider 凭据并写入 Bucket/Endpoint；关闭时不要求 OSS。
+test 密码和密钥输入不回显，留空可由 OpenSSL 生成。production 不生成数据库/Redis sidecar，强制 `DB_AUTO_CREATE=false`；单 CVM 默认使用共享私网别名，可在提示中覆盖为腾讯云专用私网实例。production 缺失 HMAC/Fernet/JWT 时由服务器 OpenSSL 独立生成，已有目标文件则沿用最后一组值，整个过程不回显密钥。媒体开启后脚本隐藏读取 OSS/Provider 凭据并写入 Bucket/Endpoint；关闭时不要求 OSS。
+
+Runtime 的正式 HTTPS origin 是 DNS/证书/Nginx 部署资源，不能用随机值代替。首次可在服务器会话中提前设置 `RUNTIME_PRODUCTION_HTTPS_ORIGIN=https://<runtime 正式域名>`，或在脚本提示时输入一次；脚本会把它写为 `RUNTIME_PUBLIC_HTTPS_ORIGIN` 并在后续执行时自动沿用。Couple Diary 正式 API origin 默认读取已有值，首次默认为项目前端 production 已声明的 `https://xdsz-api.hokage-yeah.online`，可用 `COUPLE_DIARY_PRODUCTION_HTTPS_ORIGIN` 覆盖。`BACKEND_CORS_ORIGINS` 默认与 Runtime origin 相同，可用 `RUNTIME_PRODUCTION_CORS_ORIGINS` 显式覆盖。
+
+production 数据库密码首次必须与 DBA 创建的 MySQL 账号一致，后续默认沿用。执行 `ALTER USER` 轮换后，用 `./agent-runtime.sh configure-docker production --replace-db-password` 隐藏输入新值，不要把密码放在命令参数或 shell history 中。
 
 Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境的 Runtime 联动配置：
 
@@ -247,7 +251,7 @@ Runtime 环境文件生成后，可继续为 `couple-diary-doc` 追加同环境�
 
 该命令默认读取 `/usr/HokageYeah/服务端系统/env/runtime-<environment>.env`，并将配置块追加到同目录的 `couple-diary-<environment>.env`。脚本从 Runtime 环境文件提取网络名、客户端 ID、Key ID 和 HMAC Secret，不会 `source` 环境文件，也不会在输出中打印密钥。它还会保留并补齐 `CD_DOCKER_NO_PROXY`，Compose 再将其同时注入业务 backend/worker 的 `NO_PROXY` 与 `no_proxy`。写入前会创建备份，并将目标文件及备份权限设置为 `0600`。
 
-Snapshot AES-GCM Master Key 和回忆录访问密码 Pepper 属于 `couple-diary-doc`，不会复用 Runtime Fernet Key 或 HMAC Secret。test 环境缺失时自动生成；production 环境缺失时通过终端隐藏输入。重复执行会沿用目标文件中最后一组有效值。
+Snapshot AES-GCM Master Key 和回忆录访问密码 Pepper 属于 `couple-diary-doc`，不会复用 Runtime Fernet Key 或 HMAC Secret。test/production 环境缺失时均在服务器上独立生成，重复执行会沿用目标文件中最后一组有效值。
 
 默认保持 worker 和 Package 回调门禁关闭。完成基础部署和连通性检查后，再显式激活：
 
