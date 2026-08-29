@@ -21,6 +21,7 @@ pnpm-debug.log*
 lerna-debug.log*
 pnpm-lock.yaml
 sub_logs/*
+# !sub_logs/腾讯云服务器双环境日志查看说明.md
 
 node_modules
 .DS_Store
