@@ -18,6 +18,9 @@ services:
   prepare:
     image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
     pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    # 单 CVM 生产环境的 MySQL/Redis 别名只发布在双方共享的私有网络中。
+    networks:
+      - memoir-integration
     environment:
       # 正式库必须由独立 DBA / 基础设施流程预先创建，prepare 只允许迁移既有 Runtime 数据库。
       DB_AUTO_CREATE: "false"
@@ -25,6 +28,9 @@ services:
   register:
     image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
     pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    # Package 注册同样需要访问生产 Runtime 专库，必须与 prepare 使用相同网络。
+    networks:
+      - memoir-integration
     environment:
       DB_AUTO_CREATE: "false"
 

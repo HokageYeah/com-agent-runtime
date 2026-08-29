@@ -323,7 +323,13 @@ jobs:
             docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" build api
 
             echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动四个长期 workload）..."
-            docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" up -d --no-build
+            if ! docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" up -d --no-build; then
+              echo "Runtime 启动门禁失败，输出 prepare/register 状态与最近日志："
+              # 只输出固定诊断和应用日志；Runtime doctor 不回显数据库密码或 DSN。
+              docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps -a prepare register || true
+              docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" logs --tail=200 prepare register || true
+              exit 1
+            fi
 
             echo "API 健康冒烟（等待数据库、身份注册表与 Runtime 治理依赖就绪）..."
             API_ENDPOINT="$(docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" port api 8002)"

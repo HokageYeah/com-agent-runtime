@@ -44,8 +44,14 @@ def test_runtime_overlays_cover_register_service() -> None:
     production_services = _compose("docker-compose.production.yml")["services"]
 
     assert test_services["register"]["environment"]["DB_HOST"] == "mysql"
+    assert "networks" not in test_services["prepare"]
+    assert "networks" not in test_services["register"]
     assert "register" in production_services
     assert production_services["register"]["environment"]["DB_AUTO_CREATE"] == "false"
+    for service_name in ("prepare", "register"):
+        assert production_services[service_name]["networks"] == [
+            "memoir-integration"
+        ]
 
 
 def test_runtime_deploy_workflow_serializes_and_verifies_complete_runtime() -> None:
@@ -61,6 +67,8 @@ def test_runtime_deploy_workflow_serializes_and_verifies_complete_runtime() -> N
     assert 'export RUNTIME_IMAGE_TAG="${DEPLOY_TAG}"' in workflow
     assert '--env-file "${ENV_FILE}" build api' in workflow
     assert '--env-file "${ENV_FILE}" up -d --no-build' in workflow
+    assert 'ps -a prepare register' in workflow
+    assert 'logs --tail=200 prepare register' in workflow
     for service_name in ("api", "launcher", "worker", "reconciler"):
         assert f'grep -qx "{service_name}"' in workflow
 

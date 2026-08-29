@@ -117,7 +117,7 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
 
 ### production
 
-- 生产 Runtime Compose 不创建 MySQL/Redis sidecar。单 CVM 阶段允许通过 `memoir-integration-production` 复用 Couple Diary production 实例；拆分后改用腾讯云专用私网实例。
+- 生产 Runtime Compose 不创建 MySQL/Redis sidecar。单 CVM 阶段允许通过 `memoir-integration-production` 复用 Couple Diary production 实例；一次性 `prepare` 与 `register` 也加入该网络，才能解析 `couple-diary-mysql` 等环境内别名。拆分后改用腾讯云专用私网实例。
 - 数据库固定为 `couple_diary_agent_runtime_prod`，使用独立 `runtime_prod` 账号且不得拥有 `couple_diary_prod` 或 `*.*` 权限；Runtime 不读写业务 schema。
 - 单 CVM Redis 固定使用逻辑 DB `/15`，供 Runtime 流控和模型 permit 使用；上量后迁移专用 Redis。
 - 生产运行账号使用最小权限，`DB_AUTO_CREATE=false`；数据库由 DBA/平台预建，首次迁移仍通过一次性 `prepare production` 执行。
@@ -221,7 +221,7 @@ docker run --rm --entrypoint id \
 1. 按 tag 段选择 env 文件与 Compose 组合：test 用 `-f docker-compose.yml -f docker-compose.test.yml`，production 用 `-f docker-compose.yml -f docker-compose.production.yml`。
 2. 强制 `COMPOSE_PROJECT_NAME=com-agent-runtime-<environment>`，确保并创建 `memoir-integration-<environment>` 私有网络。
 3. 同时设置 `RUNTIME_IMAGE_REPOSITORY=com-agent-runtime`、`RUNTIME_IMAGE_TAG=<deploy-tag>` 和 `RUNTIME_IMAGE=com-agent-runtime:<deploy-tag>`，只执行 `build api` 生成所有 Runtime 服务共享的唯一发布镜像。
-4. `up -d --no-build` 按 `prepare -> register --dry-run -> register -> 四个长期 workload` 执行硬门禁，并保证启动阶段不会产生与发布 tag 不同的临时镜像。
+4. `up -d --no-build` 按 `prepare -> register --dry-run -> register -> 四个长期 workload` 执行硬门禁，并保证启动阶段不会产生与发布 tag 不同的临时镜像；门禁失败时工作流自动输出 `prepare/register` 状态与最近 200 行安全日志。
 5. 重试检查四个 API 探针，并确认 API/Worker/launcher/Reconciler 全部 running。工作流不再对整台服务器执行全局 `docker image prune -f`。
 
 服务器私有 env 文件按 `docker/backend/test.env.example` / `production.env.example` 创建，必须包含 `COMPOSE_PROJECT_NAME`、`ENVIRONMENT`、`MEMOIR_INTEGRATION_NETWORK`、`RUNTIME_ENV_FILE`、`AGENT_PACKAGE_VERSION`、当前环境 DB/Redis 与安全配置。test/production 的项目名、网络名、宿主 API 端口必须不同；当前冻结宿主端口分别是 `18002` / `18003`。
