@@ -1,5 +1,7 @@
 # AgentRuntime 后端 Implementation Plan
 
+> **2026-08-31 未来设计，尚未实现：** 本计划新增通用 `bounded_loop` 静态 DAG 节点与 `memoir_agent@1.0.5` 动态回忆录生成任务。它们不改变当前已部署 `memoir_agent@1.0.4` 的事实，也不得据本文把代码、fixture 或验证状态标记为已完成。完整设计见 [`../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
+
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 的 CREATE USER 密码已改为仅经 mysql stdin 传递；bootstrap/guard `28 passed` 覆盖 argv、调用日志、stdout/stderr 无密码与失败补偿。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，专用 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint 重放与 conflicting fingerprint 冲突，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
 > **2026-08-06 跨项目校准：** Runtime 只保留公共 Run/Worker/Tool/Callback 责任；本仓库现存回忆录 Archive、Snapshot、密码、播放文档和关系解绑实现属于迁移证据，目标归属为 `couple-diary-b`。公共 API 以当前代码 `/api/v1/runtime/health/*`、`/api/v1/runtime/capabilities`、`/api/v1/runtime/agent-runs` 为准。`memoir_agent@1.0.0` 输入不得携带 owner/space/关系段等业务身份字段。历史本地 revision 0 的来源派生统计只用于迁移盘点，目标 revision 0 采用情侣日记计划冻结的通用安全 baseline。
@@ -1000,6 +1002,8 @@ unique(client_id, idempotency_key, scope)
 - [✅] 实现素材引用 grounding evaluator。
 - [✅] 实现场景长度和空作品 completeness evaluator。
 - [✅] 校验 MemoirAgent MVP 正常场景数 3～8、契约硬上限 16 和单卡主体文案 80 字上限；越界进入裁剪、fallback 或拒绝发布。
+- [✅] **版本校准：** 上一项只描述 `memoir_agent@1.0.0`～`1.0.3` 的历史规则；`1.0.4` 已改为场景数仅保留 `>=3`、`body` 无字数上限，也不存在“超过 16 场景 fallback”的当前规则。
+- [ ] 为 AgentPackage 内部 schema 增加通用 `bounded_loop.loop_policy`；首版只允许 `budget_profile=inherit_run_limits_v1`，按 Run 剩余 `max_model_calls/max_tokens/max_model_cost/max_run_seconds` 与 ContextManager 公式导出有限上限，必要预算缺失/耗尽即 fail closed，Package/业务请求不得自选数值。evaluator/policy 在每轮前后校验，循环结果只允许 `continue|complete|partial|failed`，不得把循环体扩展为动态工具规划器。
 - [✅] 校验 Scene type/safety level 和完整 Action enum、order/duration/reference；当前 `focus_image/play_tts` 在 capability 关闭时进入安全 fallback。
 - [✅] 实现敏感字段和情绪安全 guardrails。
 - [✅] 实现 step/tool/model/token/cost/time/retry 硬限制；`max_model_calls/max_estimated_cost` 按实际或可能已发出的物理 attempt 统计，aborted_before_send 不计，已观察 usage 使用实际估算成本，running/outcome_unknown 使用预留成本，同一行不重复相加。
@@ -1033,6 +1037,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
 - [✅] 修正 `WorkflowExecutor` checkpoint 输入：仅投影路由进度、fallback 标记、副作用稳定逻辑键/安全结果引用与 digest，禁止 Snapshot/tool payload、`sanitized_material`、prompt/模型中间文本、Scene 和 PlaybackDocument 进入密文。**（2026-08-11 第四次最小收口 ✅：`executor.py` `_SAFE_CHECKPOINT_KEYS` 白名单（`fallback_flags/completed_node_ids/completed_steps/resume_from_node_id`）+ 非白名单键 `CHECKPOINT_STATE_INVALID` 拒绝；`test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_and_playback` 五类正文哨兵 + legacy 拒绝 purge 测试为证）**
 - [✅] 修正 resume：按当前 privacy/authorization 重取 Snapshot 并重算无副作用内容节点，已发布等副作用只按稳定键 query-after-commit；为旧完整状态 checkpoint 增加版本拒绝、撤销/purge 与防复活回归。**（2026-08-11 第三次最终收口 ✅：= P1 query-after-commit digest 修复 + P2 safe_to_rerun legacy 识别 + P3 authorization/privacy 防复活 + legacy purge 跨 Session finish() commit 持久化 + 日志隐私 + fail-closed；`runtime_test_workflow_executor.py` 28 passed 为证）**
+- [ ] `bounded_loop` 中途不写 checkpoint；每轮只写无内容 audit 计数、`continue|complete|partial|failed` 和原因码，禁止保存游标、素材正文、prompt、模型原文、已生成 Scene 正文或 source refs。只有整个循环节点完成边界写安全路由 checkpoint；节点中途 crash/resume 必须重取 Snapshot 并从循环节点起点确定性全量重算，发布副作用继续采用稳定键 query-after-commit。
 
 ### Task 11: Callback Dispatcher 与 Public Trace
 
@@ -1122,6 +1127,10 @@ unique(client_id, idempotency_key, scope)
 - [✅] 第一版预留 `enabled=false` 的 `memory.enqueue_tts` 契约；`enqueue_media_tasks` 在 capability 关闭时确定性返回 `skipped(CAPABILITY_DISABLED)`，不创建媒体任务或触网。业务 callback 只推进未发布内容运行/失败态，发布工具独占 `content_status=succeeded + published_revision`，enhancement 保持 `disabled`。
 - [✅] 测试无素材、只有日记、只有赌局、`source_refs_json` 丢失或含已删除/未知/跨 owner/跨关系段引用、强制拉黑表达、缺失/非法 `media_manifest` 被拒绝、媒体关闭时空 `media_manifest` 被接受、digest 不一致、发布与删除/新一轮生成竞态及原子回滚。
 - [ ] 增补 Snapshot Tool v1 五类 canonical material、legacy `bet` 单向归一化、同一 Snapshot 新旧赌约引用混用拒绝，以及发布 payload 不含 `bet:<id>` 的契约测试。
+- [ ] 新建不可变 `memoir_agent@1.0.5` 包：`prepare_scene_batches -> generate_scene_batches(bounded_loop) -> finalize_scenes`；五类合格素材按类型内稳定顺序、类型间轮转扫描全部安全摘要，单轮切片由模型上下文与既有通用预算计算，不再使用固定全局 refs 输入上限。
+- [ ] `memoir_agent@1.0.5` 由模型按素材密度决定主题、表现形式和场景数；最终文档只保留 `>=3` 下限，不增加业务场景数、单卡字数或整本配图数上限。每个 Scene 均独立生成一项媒体动作/manifest 预期，媒体调用仍位于 `bounded_loop` 外部。
+- [ ] 建立五类覆盖 evaluator：当前 Snapshot 中每个实际存在的合格素材类型，最终至少有一个 Scene 携带该类型真实 source_ref；Business 必须提供安全 `text_digest`，缺失时契约 fail closed，不得用无来源卡或编造引用凑覆盖。
+- [ ] 建立 partial 收口：预算耗尽或局部批次失败时，若 `>=3` 且实际存在类型覆盖完成则循环结果为 `partial` 并发布；缺类型只允许一次经相同 ModelGateway/预算/guardrail 的 repair，输入使用对应安全 digest 与真实 source_ref；无剩余许可/预算或仍缺失则 `failed`，Runtime 不用 deterministic 模板补写 Scene。媒体失败只降低 enhancement，不回滚已发布文本作品。
 
 ### Task 13: 最小评测集与端到端测试
 
@@ -1143,7 +1152,9 @@ unique(client_id, idempotency_key, scope)
 - [✅] 跑完整 `held create -> 业务绑定 -> start -> dispatch -> lease claim -> execute -> atomic publish -> callback` 流程。
 - [✅] 断言 baseline 在 AI 完成前可播放，原子发布后只切换完整 `published_revision`，Artifact 只保存摘要/digest/业务引用。
 - [✅] 断言 public_trace 安全、callback 幂等、fallback 可播放，第一版媒体节点 skipped。
-- [✅] 断言详细 RuntimeEvent 到 callback 的映射稳定且不泄露内部数据，并覆盖 3～8 张正常作品、16 张硬上限和 80 字单卡边界。
+- [✅] 断言详细 RuntimeEvent 到 callback 的映射稳定且不泄露内部数据，并覆盖 `memoir_agent@1.0.0`～`1.0.3` 的 3～8 张正常作品、16 张硬上限和 80 字单卡边界。
+- [ ] 增加 `memoir_agent@1.0.4` 无 8/16 场景上限、无 80 字上限的回归，防止旧 evaluator/fixture 重新成为当前限制。
+- [ ] 增加 `memoir_agent@1.0.5` 五类摘要全扫描、类型轮转批处理、场景数由模型决定、每场景媒体动作、预算耗尽 partial、缺摘要 fail closed、带真实 source_ref repair、从循环节点起点全量重算及旧包行为不变的评测与端到端测试。
 - [✅] 增加 worker 失联/旧 fencing、dispatch/callback dead letter、purge 迟到结果、package/authorization 撤销和 injection fixtures。
 - [✅] 增加 provider permit 并发、acquired/started TTL、共享 Retry-After、fail-closed、permit 等待期间撤权/取消/失租，以及模型请求发出后 Worker 崩溃/usage outcome unknown fixtures；同时覆盖 side effect ToolCall 先落库后崩溃/请求 digest 冲突。
 - [✅] 输出 schema/语义校验通过率、素材引用正确率、编造率、情绪安全通过率、fallback 率，以及按 execution/model attempt 聚合的 aborted_before_send、实际成本、预留成本、未知结果和耗时。
@@ -1152,6 +1163,24 @@ unique(client_id, idempotency_key, scope)
 - [✅] 断言 RuntimeTrafficEvent 在 SQLite 的唯一窗口、并发聚合、阈值首次告警与 Redis fail-closed 下均不保存敏感字段；PostgreSQL harness 使用同一 UPSERT 契约验证聚合。
 - [✅] 外部 OTel/LangSmith/调试样本 exporter 默认关闭；启用配置必须显式声明数据分级、采样字段、区域/跨境、保留期、审计权限和 privacy purge 删除能力，并测试脱敏失败时拒绝导出。
 - [✅] 运行 `ruff check .`、`mypy app`、`pytest`。
+
+### Task 14 / R5: 通用受控循环与 Memoir 动态生成（未来实现）
+
+**Files:**
+- Modify: AgentPackage schema/loader、workflow executor、policy/evaluator、checkpoint projection 与审计事件映射
+- Create: `app/agents/memoir_agent/1.0.5/*`
+- Test: package loader、bounded loop runner、budget/partial/recompute、Memoir 1.0.5 节点与端到端回归
+
+**Interfaces:**
+- Produces: `begin_loop(loop_node,state,lease_context) -> LoopContext`、`run_loop_iteration(loop_context) -> LoopIterationResult`、`finalize_loop(loop_context,iteration_result) -> LoopResult`；iteration/final result 只允许 `continue|complete|partial|failed`，并只暴露安全原因与计数，内部处理位置不得进入公开 trace/callback。
+- Consumes: 当前静态 DAG、PolicyEngine、ModelGateway、CheckpointStore、AuditService、fencing/privacy/authorization 边界；不新增动态工具发现、动态边或循环内副作用权限。
+
+- [ ] loader fail-closed 校验 `loop_policy.budget_profile=inherit_run_limits_v1`、循环体节点 allowlist、确定性 merge 策略、错误/预算耗尽动作；Run 必要预算缺失/耗尽、未知字段、循环内 Tool/副作用节点一律拒绝注册。
+- [ ] runner 每轮前复核 fencing/privacy/authorization/cancel 与剩余预算，每次模型发送前复核 provider permit 和累计预算；每轮后写无内容 audit 计数并判断 `continue|complete|partial|failed`。
+- [ ] 审计仅记录 run/package/node/iteration、输入条数、预算使用、受控 result/error code 与重算原因；禁止记录 source refs、摘要正文、prompt、模型原文、Scene 正文和媒体 URL。
+- [ ] 循环中途不写 checkpoint；resume/retry 重取当前授权 Snapshot 并从循环节点起点全量重算无副作用内容。只有发布/媒体等循环外副作用通过稳定逻辑键 query-after-commit，旧 execution/lease 结果不得推进新 execution。
+- [ ] 发布并显式注册 `memoir_agent@1.0.5`，保持 `1.0.0`～`1.0.4` 包及其 digest 不变；若 wire 字段未变化，Runtime/播放文档仍为 `1.0.0`、Business Tool wire 仍协商 `1.1.0`。
+- [ ] 部署顺序：先上线支持 `bounded_loop` 的 Runtime loader/runner 与兼容测试，再注册 `1.0.5`，最后由 Business 切换创建版本；任一阶段失败均可回退到新建 Run 使用 `1.0.4`，不得篡改已创建 Run 的锁定版本。
 
 ## 6. 第一版不做
 
@@ -1183,6 +1212,10 @@ unique(client_id, idempotency_key, scope)
 | 已合法创建 Run 的空核心素材 Snapshot | Runtime 生成基础卡或模板卡；业务侧门槛与 Archive 创建由 `couple-diary-b` 单独验收 |
 | 只有日记 | 生成日记统计和高光 |
 | 只有赌局 | 生成赌局统计和高光 |
+| `memoir_agent@1.0.4` 生成超过 8/16 场景或单卡超过 80 字 | 按 1.0.4 当前规则正常通过；不得被旧 evaluator/fixture 截断（待补回归） |
+| `memoir_agent@1.0.5` 五类均有合格素材 | 全部安全摘要经类型轮转批处理，五类至少各有一个真实 source_ref，场景数由模型按素材决定（待实现） |
+| `memoir_agent@1.0.5` 预算耗尽或局部批次失败 | 满足最少场景与实际类型覆盖时循环结果为 partial 并发布；缺类带真实引用 repair 后仍缺失则 failed（待实现） |
+| `bounded_loop` resume/retry | 重新读取当前授权 Snapshot 并从循环节点起点全量重算；发布/媒体副作用仅 query-after-commit（待实现） |
 | 模型输出脏 JSON | repair 成功或进入 fallback |
 | 多 Worker 并发请求同一 provider/model | 共享 permit 保证并发、RPM/TPM 不超限，各进程不能用本地计数绕过 |
 | permit 持有 Worker 崩溃 | acquired permit 的 TTL 回收并回滚未发送 RPM/TPM 预留；started permit 只回收并发槽并保留速率预留到窗口过期 |

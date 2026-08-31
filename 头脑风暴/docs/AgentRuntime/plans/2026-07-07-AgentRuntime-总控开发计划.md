@@ -2,6 +2,12 @@
 
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 已把 CREATE USER 密码从 mysql argv 移至 stdin；离线 bootstrap/guard `28 passed` 证明密码不进入 fake mysql argv、调用日志或 stdout/stderr，且失败补偿未回退。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，隔离 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint、conflicting fingerprint 三项，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
+> **2026-08-31 后续开发块（未实现）：** 新增公共 `bounded_loop` 静态 DAG
+> 节点与 `memoir_agent@1.0.5` 五类动态生成。当前代码最新仍为 `1.0.4`；
+> 不得把本计划新增 `[ ]`、新 Package、版本登记或生产切流表述为已完成。
+> 设计入口：
+> [通用受控循环与 Memoir 动态生成设计说明](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
+
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
 
 > **2026-08-13 历史代码闭合记录：** MySQL 运行时观测曾待显式隔离 DSN，且旧的 `2 passed, 47 deselected` 是凭据边界改动前的历史证据。修改后已重跑完整三项 `3 passed, 47 deselected`；以页首 **M3 COMPLETE / M4 GO** 为准。fixture SHA：v1.0 `04a0c12594e0ee1ca062b40842d1d4140aaad52d7f63b9a6c8dc03f9cba1b929`、v1.1 `7500539a671d13e58d688c95b78eaf8d74c06c80bc146142b64dda40907553c4`。
@@ -38,6 +44,7 @@
 - 回忆录技术探索总入口：[../../回忆录技术探索/00-README.md](../../回忆录技术探索/00-README.md)
 - 情侣日记后端集成参考：[../../回忆录技术探索/06-后端接口与AgentRuntime集成.md](../../回忆录技术探索/06-后端接口与AgentRuntime集成.md)
 - 业务 Agent 接入规范：[../../回忆录技术探索/15-业务Agent接入规范.md](../../回忆录技术探索/15-业务Agent接入规范.md)
+- 通用受控循环与 Memoir 动态生成设计：[./2026-08-31-通用受控循环与Memoir动态生成设计说明.md](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md)
 
 ## 2. 核心原则
 
@@ -379,6 +386,13 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] Tool manifest 冻结 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明状态路径和覆盖 trusted 控制字段的映射在注册期拒绝。
 - [✅] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。**（2026-08-11 第六次收口 P1 实证：1.0.0 在 620f44a 被改动加 `safe_to_rerun` 违反此铁律——同版本改内容属非法；故恢复 1.0.0 缺键原貌 + 另发 1.0.1。`test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages` 证明两版本 digest 不同且各自合法 load，`contract_version` 都 1.0.0；同版本改内容→必须升版本的规则被真实触发并按规则处置）**
 - [✅] Package active/deprecated/revoked 变化记录操作者、原因、时间并写 RuntimeAuditEvent。
+- [ ] 扩展 AgentPackage schema/loader 支持 `node_type=bounded_loop` 与冻结
+  `loop_policy`；首版 `budget_profile=inherit_run_limits_v1`，按剩余
+  `max_model_calls/max_tokens/max_model_cost/max_run_seconds` 和 ContextManager 公式导出
+  循环/批次上限，不允许 Package 或业务请求自选数值；拒绝必要预算缺失/耗尽、未知 merge/error 策略、含 Business Tool/
+  媒体/发布副作用循环体或企图放宽 Runtime 全局预算的 Package。
+- [ ] 新建不可变 `memoir_agent@1.0.5` 并冻结 digest；不得覆盖
+  `1.0.0`～`1.0.4`，未完成 provider/consumer 与部署登记前不得用于新 Run。
 
 **Checkpoint:** Runtime 可以加载指定版本 AgentPackage，不能自动使用最新版。
 
@@ -595,6 +609,13 @@ Runtime 侧：
 - [✅] 共享流量控制 Redis 在 preflight/acquire 异常时统一返回 `capability_disabled(MODEL_TRAFFIC_UNAVAILABLE)`，不触网、不保留 usage/permit，并由节点走显式模板 fallback。
 - [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计仅输出或持久化受控 ID、状态、错误码、计数、预算与版本摘要；完整 prompt、模型原文/隐藏推理、工具 payload、签名 URL、checkpoint 正文和密钥一律拒绝、投影剥离或在 privacy purge 中清除。
 - [✅] RuntimeTrafficEvent 将 permit 拒绝、Retry-After、熔断开闭、Redis fail-closed 与提示/语义拒绝原子聚合到唯一分钟窗口；阈值安全告警只在首次跨越时写入无内容审计。
+- [ ] 实现 `bounded_loop` Runner：静态 DAG 内按冻结输入顺序/policy 有限循环，
+  每轮与每次模型发送前复核全局/节点预算、deadline、取消、Package、privacy/
+  authorization、lease/fencing；物理模型调用逐次计量，不能借单一 Step 绕过治理。
+- [ ] 循环中途不写 Checkpoint；每轮审计只保存 iteration、计数、usage id、耗时、
+  `continue|complete|partial|failed` 和 reason code，不保存 source ref、摘要、prompt、
+  候选、Scene 或播放文档。仅在整个循环节点完成边界写安全路由 Checkpoint；节点中途
+  crash/resume 从同一 Snapshot、循环节点起点全量重算，发布仍 query-after-commit。
 
 **Checkpoint:** 模型节点输出可控、可评价、可降级，成本可记录。
 
@@ -614,6 +635,9 @@ Runtime 侧：
 - [✅] 接入 ModelGateway 后实现模型版 `generate_scenes`，仅接受已校验的 summary Scene 与可信素材引用；失败时保留模板 fallback。
 - [✅] 实现规则版 `generate_actions`：每个 Scene 生成 `show_card` 与固定 3000ms 时长，不包含正文。
 - [✅] MemoirAgent MVP 正常生成 3～8 张场景卡，单卡主体文案不超过 80 字；发布审核允许最多 16 张，越界、禁用情绪文案或不合法 Action 时回退三张无引用基础卡。
+- [✅] 上一条仅是 `1.0.0`～`1.0.3` 的历史冻结完成事实；`1.0.4` 已取消
+  Scene 总数、16 张发布门和 80 字上限，只保留至少 3 Scene，并按最终每个
+  Scene 尝试配图。不得再把历史限制写成当前全局规则。
 - [✅] 实现 `safety_review`：校验模板 Scene/Action 的结构、引用和时长；不合法时回退为无素材引用的基础卡片。
 - [✅] 构建包含 scenes/actions/`media_manifest` 的完整 playback document，并实现 `publish_playback_document` 原子发布；媒体能力关闭时提交必填空清单。
 - [✅] legacy 基线已证明发布请求以 `{"input":{...}}` 携带 `run_id/snapshot_id/generation_epoch`、snake_case 完整 `document` 和稳定逻辑幂等键，业务后端复核快照归属、active Run、epoch，并对补默认值前的原始 `document` 以 UTF-8/不 ASCII 转义/键排序/紧凑分隔符规范 JSON 复核 `content_digest`；只有成功后才允许 run 终止为 succeeded/partial。本勾选只证明发布与 digest 行为，不代表冻结 `ToolRequest/ToolResult` envelope 已完成；后者仍以 Task 7 未完成项为准。
@@ -770,6 +794,30 @@ Runtime 侧：
 
 **Checkpoint:** Runtime 不只是能跑，还能被排查、评测和持续优化。
 
+### Task 14 / R5: `bounded_loop` 与 `memoir_agent@1.0.5` 动态生成
+
+**Plan:** [2026-08-31 专题设计](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md) + 后端计划 Task 14。
+
+- [ ] 先实现并验证公共 `bounded_loop` Package/Executor/Policy/Audit/Resume 能力；
+  循环体只允许 model/deterministic，所有副作用留在循环外。
+- [ ] `1.0.5` 以 `prepare_scene_batches -> generate_scene_batches(bounded_loop)
+  -> finalize_scenes` 替代全局固定 refs/1～3 章裁剪；五类合格素材按类型交错扫描，
+  单轮切片由模型上下文与既有通用预算计算，不作为总素材上限。
+- [ ] 模型决定每批 Scene 数、主题和跨类型叙事；产品只保留至少 3 Scene，不设
+  Scene/图片总数上限。确定性收尾保证每个存在的安全素材类型至少被引用一次。
+- [ ] 循环结果统一为 `continue|complete|partial|failed`：全量处理并覆盖为
+  `complete`；预算/批次失败但类型覆盖完整为 `partial`；缺类只允许一次经相同
+  ModelGateway/预算/guardrail 的 repair，输入使用该类型安全 digest 与真实 source_ref；
+  无剩余许可/预算或仍缺失则 `failed`，Runtime 不用 deterministic 模板补写 Scene。
+  实际存在类型缺安全 digest 时契约 fail closed，不以无来源 fallback 冒充覆盖。
+- [ ] 媒体继续在循环外逐场景串行执行；单图失败或 900 秒预算耗尽只降级文字卡，
+  不改变文本内容 succeeded/partial 判定。
+- [ ] 完成 Package digest、Tool wire/capabilities、部署模板、Business 显式版本及
+  双仓 fixture/behavior 测试后，按“Business 接收 → Runtime 注册 → Business 切流”上线；
+  旧 Run 继续使用冻结版本。
+
+**Checkpoint:** 五类动态生成在资源、恢复、隐私和发布边界内可控；当前尚未完成。
+
 ## 5. 跨模块职责表
 
 | 能力 | AgentRuntime | 情侣日记后端 | uni-app 前端 |
@@ -866,7 +914,9 @@ Runtime 侧：
 | 媒体 capability 关闭 | 节点 skipped，文本卡片静音播放 |
 | 未知播放契约 major | 前端停止动态 Action，降级基础静态卡 |
 | snapshot 为旧版本或未知未来 major | 旧版本由服务层单向迁移；未知未来 major 拒绝旧服务写回覆盖 |
-| MemoirAgent 场景数或单卡长度越界 | MVP 裁剪/fallback 到 3～8 张且单卡不超过 80 字，绝不发布超过 16 张的作品 |
+| `memoir_agent@1.0.0`～`1.0.3` 场景数或单卡长度越界 | 按冻结合同回退到 3～8 张且单卡不超过 80 字 |
+| `memoir_agent@1.0.4` 多场景或长正文 | 只校验至少 3 Scene、结构、引用与安全内容，不因超过 8/16 Scene 或 80 字整批回退 |
+| `memoir_agent@1.0.5` 循环预算耗尽（待实现） | 类型覆盖完整则循环结果为 partial 并原子发布；缺类仅允许一次受同一 ModelGateway/预算/guardrail 治理、携带安全 digest 与真实 source_ref 的 repair；无许可/预算或仍缺失则 failed，不以 deterministic/无来源卡冒充覆盖 |
 | 小程序页面进入后台 | 停止状态轮询、Action 计时和音频；回到前台按当前状态恢复 |
 | `actions` 为空或设备进入低性能模式 | 默认轮播 scenes 或展示静态卡，不出现空白页和并发计时器 |
 | `scenes` 为空 | 展示 baseline 封面与总结空态，不执行 Action |
