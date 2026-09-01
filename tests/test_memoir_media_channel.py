@@ -1676,3 +1676,12 @@ def test_tool_wire_version_registers_1_0_4() -> None:
     """wire 版本表：1.0.4 必须登记，否则 load_snapshot 无日志瞬时失败。"""
     assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.4"] == "1.1.0"
     assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.3"] == "1.1.0"
+
+
+def test_tool_wire_version_registers_1_0_5() -> None:
+    """M7：1.0.5（bounded_loop 动态生成）Tool 合同零变更，必须登记 v1.1.0。
+
+    未登记时 Worker 发包前以 TOOL_WIRE_VERSION_INVALID 瞬时失败（无日志、
+    无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
+    """
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.5"] == "1.1.0"

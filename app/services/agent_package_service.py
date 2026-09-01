@@ -213,6 +213,7 @@ class AgentPackageService:
             and policy.waiting_human_fallback_node not in node_ids
         ):
             raise AgentPackageValidationError("waiting_human fallback 节点不存在")
+        self._validate_bounded_loop_body_refs(nodes)
         optional_positions = [index for index, node in enumerate(nodes) if node.optional]
         if optional_positions:
             publish_positions = [
@@ -221,6 +222,28 @@ class AgentPackageService:
             ]
             if len(publish_positions) != 1 or min(optional_positions) <= publish_positions[0]:
                 raise AgentPackageValidationError("可选节点必须位于 publish_document 之后")
+
+    @staticmethod
+    def _validate_bounded_loop_body_refs(nodes: list[WorkflowNodeDefinition]) -> None:
+        """bounded_loop 循环体引用必须落在同包 workflow_nodes 内的确定性/模型节点上。
+
+        只允许 deterministic/model 两类：tool 节点副作用不可在循环内安全重放
+        （幂等性由 Gateway 一次性契约保证，循环重放会放大外部副作用）；guardrail/
+        fallback 属于主链防护语义，不进入循环体，否则额度耗尽前的护栏时序不可审计。
+        """
+        node_types = {node.node_id: node.node_type for node in nodes}
+        for node in nodes:
+            if node.loop_policy is None:
+                continue
+            for body_id in node.loop_policy.body_node_ids:
+                if body_id not in node_types:
+                    raise AgentPackageValidationError(
+                        f"bounded_loop 节点 {node.node_id} 的循环体节点不存在: {body_id}"
+                    )
+                if node_types[body_id] not in {"deterministic", "model"}:
+                    raise AgentPackageValidationError(
+                        f"bounded_loop 循环体节点 {body_id} 只允许 deterministic/model"
+                    )
 
     def _validate_prompts(self, package_dir: Path, prompts: list[str]) -> list[str]:
         for prompt_ref in prompts:

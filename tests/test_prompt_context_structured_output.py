@@ -91,6 +91,8 @@ def test_context_manager_uses_node_cap_and_keeps_tool_summary_inside_the_same_wi
     assert manager.node_token_budget("extract_highlights", 1_000) == 256
     assert manager.node_token_budget("plan_chapters", 300) == 300
     assert manager.node_token_budget("generate_scenes", 1_000) == 512
+    # M7 覆盖修复节点与循环体同族，cap 取一致值（只会收紧可信输入窗口）。
+    assert manager.node_token_budget("repair_coverage_gaps", 1_000) == 512
     with pytest.raises(ValueError, match="MODEL_NODE_BUDGET_UNAVAILABLE"):
         manager.node_token_budget("untrusted_node", 1_000)
 

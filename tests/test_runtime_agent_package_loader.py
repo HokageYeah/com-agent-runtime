@@ -5,10 +5,24 @@ from shutil import copytree, rmtree
 
 import pytest
 
+from app.schemas.agent_package import WorkflowNodeDefinition
 from app.services.agent_package_service import (
     AgentPackageService,
     AgentPackageValidationError,
 )
+
+# M7 bounded_loop 冻结契约：唯一预算策略 inherit_run_limits_v1（继承 Run 级额度，
+# 缺失/零值 fail closed）；合并策略 append_unique_by_key + merge_key；迭代级错误
+# 只允许 continue；额度耗尽允许 partial（部分发布）或 failed；循环体节点由
+# body_node_ids 显式引用且只允许 deterministic/model 两类。
+FROZEN_LOOP_POLICY = {
+    "budget_strategy": "inherit_run_limits_v1",
+    "merge_strategy": "append_unique_by_key",
+    "merge_key": "scene_id",
+    "on_iteration_error": "continue",
+    "on_budget_exhausted": "partial",
+    "body_node_ids": ["generate_scene_batch"],
+}
 
 
 def test_loads_frozen_memoir_agent_package() -> None:
@@ -122,3 +136,107 @@ def test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages() -> No
     # contract_version 不随 Agent 版本升级（P1 第7条铁律）。
     assert package_100.contract_version == "1.0.0"
     assert package_101.contract_version == "1.0.0"
+
+
+def test_bounded_loop_schema_accepts_frozen_policy() -> None:
+    """bounded_loop 节点必须携带冻结 loop_policy，schema 接受该组合。
+
+    M7 铁律：仅 node_type="bounded_loop" 可声明 loop_policy；策略取值全部
+    Literal 冻结，不接受任何自由字符串；body_node_ids 非空。
+    """
+    node = WorkflowNodeDefinition.model_validate(
+        {
+            "node_id": "generate_scene_batches",
+            "node_type": "bounded_loop",
+            "safe_to_rerun": True,
+            "loop_policy": FROZEN_LOOP_POLICY,
+        }
+    )
+
+    assert node.node_type == "bounded_loop"
+    assert node.loop_policy is not None
+    assert node.loop_policy.budget_strategy == "inherit_run_limits_v1"
+    assert node.loop_policy.merge_strategy == "append_unique_by_key"
+    assert node.loop_policy.merge_key == "scene_id"
+    assert node.loop_policy.on_iteration_error == "continue"
+    assert node.loop_policy.on_budget_exhausted == "partial"
+    assert node.loop_policy.body_node_ids == ["generate_scene_batch"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # loop_policy 绝不允许出现在非 bounded_loop 节点上。
+        {
+            "node_id": "generate_scenes",
+            "node_type": "model",
+            "safe_to_rerun": False,
+            "loop_policy": FROZEN_LOOP_POLICY,
+        },
+        # bounded_loop 缺 loop_policy 必须拒绝：循环额度语义无法静态审计。
+        {
+            "node_id": "generate_scene_batches",
+            "node_type": "bounded_loop",
+            "safe_to_rerun": False,
+        },
+        # 未知预算策略拒绝：不允许 Package 自带任意预算语义。
+        {
+            "node_id": "generate_scene_batches",
+            "node_type": "bounded_loop",
+            "safe_to_rerun": False,
+            "loop_policy": {**FROZEN_LOOP_POLICY, "budget_strategy": "unlimited"},
+        },
+        # 循环体引用为空拒绝：空循环体没有可审计语义。
+        {
+            "node_id": "generate_scene_batches",
+            "node_type": "bounded_loop",
+            "safe_to_rerun": False,
+            "loop_policy": {**FROZEN_LOOP_POLICY, "body_node_ids": []},
+        },
+        # 非 safe-to-rerun 拒绝：循环中间产物不落 checkpoint，崩溃后必须整节点
+        # 重算，False 会让 resume 跳过半途循环，违反"崩溃后重算"契约。
+        {
+            "node_id": "generate_scene_batches",
+            "node_type": "bounded_loop",
+            "safe_to_rerun": False,
+            "loop_policy": FROZEN_LOOP_POLICY,
+        },
+    ],
+)
+def test_bounded_loop_schema_rejects_out_of_contract_policy(payload: dict) -> None:
+    """越界 loop_policy 组合一律 fail closed，不接受静默降级。"""
+    with pytest.raises(ValueError):
+        WorkflowNodeDefinition.model_validate(payload)
+
+
+def test_loads_memoir_agent_1_0_5_with_frozen_bounded_loop_dag() -> None:
+    """1.0.5 是独立不可变包：bounded_loop DAG + 冻结策略 + digest 独立。
+
+    M7 动态生成：1.0.5 引入受控 bounded_loop 节点（场景批量生成），
+    必须满足：唯一 bounded_loop 节点、策略逐字段冻结、与 1.0.0–1.0.4
+    digest 全部不同、contract_version 仍为 1.0.0。
+    """
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    package = service.load("memoir_agent", "1.0.5")
+
+    loop_nodes = [
+        node for node in package.workflow_nodes if node.node_type == "bounded_loop"
+    ]
+    assert len(loop_nodes) == 1
+    loop_node = loop_nodes[0]
+    assert loop_node.loop_policy is not None
+    assert loop_node.loop_policy.budget_strategy == "inherit_run_limits_v1"
+    assert loop_node.loop_policy.merge_strategy == "append_unique_by_key"
+    assert loop_node.loop_policy.merge_key == "scene_id"
+    assert loop_node.loop_policy.on_iteration_error == "continue"
+    assert loop_node.loop_policy.on_budget_exhausted in {"partial", "failed"}
+    # 循环体只能引用 deterministic/model 节点。
+    node_types = {node.node_id: node.node_type for node in package.workflow_nodes}
+    for body_id in loop_node.loop_policy.body_node_ids:
+        assert node_types[body_id] in {"deterministic", "model"}
+    # digest 与历史版本全部不同，且契约版本不随 Agent 版本升级。
+    for version in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"):
+        assert package.package_digest != service.load("memoir_agent", version).package_digest
+    assert package.contract_version == "1.0.0"

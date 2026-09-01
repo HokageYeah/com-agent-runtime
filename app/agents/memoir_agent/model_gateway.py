@@ -21,6 +21,12 @@ _PROMPT_REFS = {
     "extract_highlights": ("highlight-extract", "v1"),
     "plan_chapters": ("chapter-plan", "v1"),
     "generate_scenes": ("scene-generate", "v1"),
+    # M7 bounded_loop 节点 generate_scene_batches 的循环体节点：
+    # 每个批次一次模型调用，prompt 使用 1.0.5 包内 scene-batch-generate v1。
+    "generate_scene_batch": ("scene-batch-generate", "v1"),
+    # M7 覆盖修复节点：循环后唯一一次 repair 模型调用，prompt 使用 1.0.5
+    # 包内 coverage-repair v1（缺键会让该节点模型能力整体不可用）。
+    "repair_coverage_gaps": ("coverage-repair", "v1"),
 }
 _REPAIR_PROMPT_REF = ("structured-output-repair", "v1")
 _MAX_REPAIR_CANDIDATE_CHARS = 2048

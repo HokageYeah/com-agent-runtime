@@ -63,10 +63,54 @@ def test_compute_stats_uses_snapshot_counts_and_empty_fallback():
     run = type("Run", (), {"run_id": "r"})()
     state = AgentState(snapshot={"diaries": [{"content": "私密 1"}, {"content": "私密 2"}], "bets": [{"title": "私密"}]})
     assert runner.run_node({"node_id": "compute_stats"}, run, state) == {"node_id": "compute_stats", "stats_ready": True}
-    assert state.stats == {"diary_count": 2, "bet_count": 1, "has_material": True}
+    # M7：stats 同时产出 available_material_types（legacy 形状按素材槽等价推导）。
+    assert state.stats == {
+        "diary_count": 2, "bet_count": 1, "has_material": True,
+        "available_material_types": ["diary", "completed_bet"],
+    }
     empty = AgentState(snapshot={})
     runner.run_node({"node_id": "compute_stats"}, run, empty)
-    assert empty.stats == {"diary_count": 0, "bet_count": 0, "has_material": False}
+    assert empty.stats == {
+        "diary_count": 0, "bet_count": 0, "has_material": False,
+        "available_material_types": [],
+    }
+
+
+def test_compute_stats_produces_available_material_types_canonical():
+    """M7 覆盖判定输入：canonical materials 的真实类型 ∩ 五类全集，按固定类型序输出。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(snapshot={"materials": [
+        {"material_type": "bucket_list_completion", "source_ref": "bucket_list_completion:c1", "sanitized_payload": {}},
+        {"material_type": "diary", "source_ref": "diary:d1", "sanitized_payload": {}},
+        {"material_type": "matured_wish", "source_ref": "matured_wish:w1", "sanitized_payload": {}},
+        # 未知类型不进 available_material_types（与五类全集求交）。
+        {"material_type": "unknown_kind", "source_ref": "unknown_kind:x1", "sanitized_payload": {}},
+    ]})
+
+    runner.run_node({"node_id": "compute_stats"}, run, state)
+
+    assert state.stats["available_material_types"] == [
+        "diary", "matured_wish", "bucket_list_completion",
+    ]
+
+
+def test_compute_stats_available_material_types_legacy_shape():
+    """legacy 形状：五类素材槽（含 ref-only 三类）按现有兼容分支等价推导。"""
+    runner = MemoirNodeRunner(object())
+    run = type("Run", (), {"run_id": "r"})()
+    state = AgentState(snapshot={
+        "handbook_notes": [{"id": "n1"}],
+        "bucket_list_completions": [{"id": "c1"}],
+        # 空列表 = 无真实素材，类型不算实际存在。
+        "diary_items": [],
+    })
+
+    runner.run_node({"node_id": "compute_stats"}, run, state)
+
+    assert state.stats["available_material_types"] == [
+        "handbook_note", "bucket_list_completion",
+    ]
 
 
 def test_snapshot_envelope_is_consumed_without_copying_control_fields():
@@ -89,7 +133,10 @@ def test_snapshot_envelope_is_consumed_without_copying_control_fields():
     runner.run_node({"node_id": "compute_stats"}, run, state)
     runner.run_node({"node_id": "sanitize_materials"}, run, state)
 
-    assert state.stats == {"diary_count": 1, "bet_count": 1, "has_material": True}
+    assert state.stats == {
+        "diary_count": 1, "bet_count": 1, "has_material": True,
+        "available_material_types": ["diary", "completed_bet"],
+    }
     # R2 后 legacy bet_items 经 legacy reader 单向归一化为 completed_bet 前缀，
     # 不再向 sanitized_material / 下游 allowlist 回写 bet: 形状。
     assert [item["source_ref"] for item in state.sanitized_material["materials"]] == [
@@ -405,7 +452,10 @@ def test_compute_stats_prefers_canonical_materials_without_double_counting() -> 
 
     runner.run_node({"node_id": "compute_stats"}, run, state)
 
-    assert state.stats == {"diary_count": 2, "bet_count": 1, "has_material": True}
+    assert state.stats == {
+        "diary_count": 2, "bet_count": 1, "has_material": True,
+        "available_material_types": ["diary", "completed_bet"],
+    }
 
 
 def test_sanitize_materials_consumes_canonical_materials_contract() -> None:

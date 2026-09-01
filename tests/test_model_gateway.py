@@ -305,6 +305,109 @@ def test_memoir_adapter_forwards_deployment_prompt_definition_to_usage_boundary(
     })
 
 
+def test_memoir_adapter_registers_m7_bounded_loop_scene_batch_prompt() -> None:
+    """M7 bounded_loop 循环体节点 generate_scene_batch 必须解析到部署内 prompt。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id = "memoir_agent"
+    # 循环体 prompt scene-batch-generate 只随 1.0.5 包发布。
+    run.agent_version = "1.0.5"
+    # 权威 Step 的 step_name 必须就是循环体 node_id，否则上下文装配拒绝。
+    step.step_name = "generate_scene_batch"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.prompt: PromptDefinition | None = None
+
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 300
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            assert route_id == "summary"
+            self.prompt = prompt
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"generate_scene_batch": "summary"}, lease,  # type: ignore[arg-type]
+    ).call("run-1", "generate_scene_batch", {})
+
+    # _PROMPT_REFS 缺 generate_scene_batch 键时，这里返回 route_not_allowed。
+    assert result.status == "succeeded"
+    assert gateway.prompt is not None
+    assert (gateway.prompt.prompt_id, gateway.prompt.version) == (
+        "scene-batch-generate", "v1",
+    )
+
+
+def test_memoir_adapter_registers_m7_coverage_repair_prompt() -> None:
+    """M7 覆盖修复节点 repair_coverage_gaps 必须解析到部署内 coverage-repair v1。"""
+    session, lease = _run_session()
+    run = session.scalar(select(AgentRun).where(AgentRun.run_id == "run-1"))
+    step = session.scalar(select(AgentStep).where(AgentStep.step_id == "step-1"))
+    assert run is not None and step is not None
+    run.agent_id = "memoir_agent"
+    # 覆盖修复 prompt 只随 1.0.5 包发布。
+    run.agent_version = "1.0.5"
+    # 权威 Step 的 step_name 必须就是修复节点 node_id，否则上下文装配拒绝。
+    step.step_name = "repair_coverage_gaps"
+    session.commit()
+
+    class RecordingGateway:
+        def __init__(self) -> None:
+            self.prompt: PromptDefinition | None = None
+
+        @staticmethod
+        def context_token_budget(_route_id: str, _prompt: PromptDefinition) -> int:
+            return 300
+
+        @staticmethod
+        def capability_available(
+            _route_id: str, _prompt: PromptDefinition, _estimated_input_tokens: int,
+        ) -> bool:
+            return True
+
+        def call(
+            self,
+            context: ModelCallContext,
+            route_id: str,
+            request: object,
+            *,
+            prompt: PromptDefinition | None = None,
+        ) -> object:
+            self.prompt = prompt
+            return type("Result", (), {"status": "succeeded", "data": {}})()
+
+    gateway = RecordingGateway()
+    result = MemoirModelGatewayAdapter(
+        session, gateway, {"repair_coverage_gaps": "summary"}, lease,  # type: ignore[arg-type]
+    ).call("run-1", "repair_coverage_gaps", {})
+
+    # _PROMPT_REFS 缺 repair_coverage_gaps 键时，这里返回 route_not_allowed。
+    assert result.status == "succeeded"
+    assert gateway.prompt is not None
+    assert (gateway.prompt.prompt_id, gateway.prompt.version) == (
+        "coverage-repair", "v1",
+    )
+
+
 def test_memoir_adapter_uses_versioned_repair_prompt_and_untrusted_data_slot() -> None:
     """原始候选只能短暂进入 repair 的 human data 槽，不能覆盖可信 Prompt。"""
     session, lease = _run_session()

@@ -14,9 +14,28 @@ class PackageSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class LoopPolicySchema(PackageSchema):
+    """M7 受控循环策略：全部取值 Literal 冻结，Package 不得自带任意预算语义。"""
+
+    # 预算策略：唯一取值，循环额度继承 Run 级限额（缺失/零值由 executor fail closed）。
+    budget_strategy: Literal["inherit_run_limits_v1"]
+    # 合并策略：迭代产物按键去重后追加，禁止覆盖式合并。
+    merge_strategy: Literal["append_unique_by_key"]
+    # 去重键：当前唯一合法键为场景 ID。
+    merge_key: Literal["scene_id"]
+    # 迭代级错误处理：只允许跳过该迭代继续。
+    on_iteration_error: Literal["continue"]
+    # 额度耗尽策略：允许部分发布（partial）或整体失败（failed）。
+    on_budget_exhausted: Literal["partial", "failed"]
+    # 循环体节点引用：必须指向同 workflow 内 deterministic/model 节点。
+    body_node_ids: list[str] = Field(min_length=1)
+
+
 class WorkflowNodeDefinition(PackageSchema):
     node_id: str = Field(min_length=1)
-    node_type: Literal["deterministic", "tool", "model", "guardrail", "fallback"]
+    node_type: Literal[
+        "deterministic", "tool", "model", "guardrail", "fallback", "bounded_loop"
+    ]
     next_nodes: list[str] = Field(default_factory=list)
     prompt_ref: str | None = None
     can_wait_for_human: bool = False
@@ -28,6 +47,28 @@ class WorkflowNodeDefinition(PackageSchema):
     # 与重算；False（默认）表示副作用幂等性未知，resume 时已完成则跳过，只执行
     # 未完成节点，避免对非幂等副作用盲目重放（保护非 memoir Agent）。
     safe_to_rerun: bool = False
+    # 受控循环策略：仅 bounded_loop 节点可声明；与 node_type 的双向强制
+    # （⟺）由下方 validator 保证，其它节点类型携带即拒绝。
+    loop_policy: LoopPolicySchema | None = None
+
+    @model_validator(mode="after")
+    def loop_policy_requires_bounded_loop(self) -> WorkflowNodeDefinition:
+        # 双向校验：非 bounded_loop 带 loop_policy 拒绝（策略语义只属于受控循环）；
+        # bounded_loop 缺 loop_policy 拒绝（循环额度语义必须可静态审计）。
+        if self.loop_policy is not None and self.node_type != "bounded_loop":
+            raise ValueError("loop_policy 仅允许出现在 bounded_loop 节点上")
+        if self.node_type == "bounded_loop" and self.loop_policy is None:
+            raise ValueError("bounded_loop 节点必须声明 loop_policy")
+        # bounded_loop 必须 safe_to_rerun=True：循环中间正文/场景/图片不落
+        # checkpoint，崩溃后只能整节点重算（resume 强制重算语义）；False 意味着
+        # resume 可能跳过半途循环，与"崩溃后重算"契约冲突。safe_to_rerun 默认
+        # False，故 bounded_loop 缺省声明该键会被补成 False 而拒绝——这是期望的
+        # fail closed，不允许静默依赖默认值获得 False 语义。
+        if self.node_type == "bounded_loop" and not self.safe_to_rerun:
+            raise ValueError(
+                "bounded_loop 节点必须 safe_to_rerun=True（崩溃后整节点重算）"
+            )
+        return self
 
 
 class ToolManifest(PackageSchema):

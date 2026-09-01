@@ -371,14 +371,14 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 ### 10.1 默认关闭与降级行为
 
-`MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的三个模型节点退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
+`MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的五个模型节点（含 1.0.5 bounded_loop 循环体 generate_scene_batch 与覆盖修复 repair_coverage_gaps）退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
 
 ### 10.2 三个配置键
 
 | 字段 | 作用 | 要求 |
 |---|---|---|
 | `MODEL_ROUTES_JSON` | 部署预注册的路由数组（route_id、provider、model、endpoint、限流、价格、capabilities、allowlist） | 只从部署配置读取；业务请求、Package 和 prompt 不能覆盖 provider/model/endpoint/价格 |
-| `MEMOIR_MODEL_NODE_ROUTES_JSON` | Memoir 三个模型节点（extract_highlights/plan_chapters/generate_scenes）到 route_id 的映射 | 键必须恰好覆盖这三个节点；值必须是已注册的 route_id |
+| `MEMOIR_MODEL_NODE_ROUTES_JSON` | Memoir 五个模型节点（extract_highlights/plan_chapters/generate_scenes/generate_scene_batch/repair_coverage_gaps）到 route_id 的映射 | 键必须恰好覆盖这五个节点；值必须是已注册的 route_id |
 | `MODEL_PROVIDER_API_KEYS_JSON` | route_id 到 Provider API Key 的映射 | 只进入请求头 `Authorization: Bearer`；不写入 route JSON、日志、trace、响应或 Git |
 
 ### 10.3 openai_compatible Provider 与密钥占位

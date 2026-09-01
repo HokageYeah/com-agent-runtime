@@ -256,9 +256,14 @@ def build_dependencies(config: HarnessProcessConfig) -> RuntimeDependencies:
             '"allowed_model_policies":["balanced","emotional_writing","strict"]}]'
             if config.provider_port is not None else "[]"
         ),
+        # M7：generate_scene_batch（bounded_loop 循环体）与 repair_coverage_gaps
+        # （循环后覆盖修复）两个模型节点须与 worker 侧精确门禁基准同步列全，
+        # 否则 provider 模式下集合不匹配、模型网关被禁用。
         MEMOIR_MODEL_NODE_ROUTES_JSON=(
             '{"extract_highlights":"harness-model","plan_chapters":"harness-model",'
-            '"generate_scenes":"harness-model"}' if config.provider_port is not None else "{}"
+            '"generate_scenes":"harness-model","generate_scene_batch":"harness-model",'
+            '"repair_coverage_gaps":"harness-model"}'
+            if config.provider_port is not None else "{}"
         ),
     )
     harness_config = RuntimeHarnessConfig(

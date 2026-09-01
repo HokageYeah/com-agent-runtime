@@ -11,6 +11,11 @@ _NODE_TOKEN_CAPS = {
     "extract_highlights": 256,
     "plan_chapters": 384,
     "generate_scenes": 512,
+    # M7 bounded_loop 循环体节点：单批场景卡生成，与 generate_scenes 同族，
+    # cap 取一致值（节点 cap 只会收紧 route/policy 计算出的可信输入窗口）。
+    "generate_scene_batch": 512,
+    # M7 覆盖修复节点：输入仅为缺失类型素材摘要，与循环体同族，cap 一致。
+    "repair_coverage_gaps": 512,
 }
 
 

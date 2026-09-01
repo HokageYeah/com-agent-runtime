@@ -115,3 +115,47 @@ def test_static_plan_can_be_persisted() -> None:
     assert [step["node_id"] for step in record.steps_json] == [
         step["node_id"] for step in plan.steps
     ]
+
+
+def test_plan_freezes_bounded_loop_policy_into_steps() -> None:
+    """M7：bounded_loop 节点的 loop_policy 必须完整冻结进 plan steps。
+
+    Executor 只按已冻结计划执行；loop_policy 若在 Planner 冻结时被丢弃，
+    受控循环就会退化成不可审计的自由循环。策略逐字段断言防静默降级。
+    """
+    plan = StaticPlanner().create_plan_from_definition(
+        "run_bounded_loop",
+        {
+            "workflow_nodes": [
+                {
+                    "node_id": "load_snapshot",
+                    "node_type": "tool",
+                    "safe_to_rerun": True,
+                },
+                {
+                    "node_id": "generate_scene_batches",
+                    "node_type": "bounded_loop",
+                    "safe_to_rerun": True,
+                    "loop_policy": {
+                        "budget_strategy": "inherit_run_limits_v1",
+                        "merge_strategy": "append_unique_by_key",
+                        "merge_key": "scene_id",
+                        "on_iteration_error": "continue",
+                        "on_budget_exhausted": "partial",
+                        "body_node_ids": ["generate_scene_batch"],
+                    },
+                },
+            ]
+        },
+    )
+
+    loop_step = next(
+        step for step in plan.steps if step["node_id"] == "generate_scene_batches"
+    )
+    frozen_policy = loop_step["loop_policy"]
+    assert frozen_policy["budget_strategy"] == "inherit_run_limits_v1"
+    assert frozen_policy["merge_strategy"] == "append_unique_by_key"
+    assert frozen_policy["merge_key"] == "scene_id"
+    assert frozen_policy["on_iteration_error"] == "continue"
+    assert frozen_policy["on_budget_exhausted"] == "partial"
+    assert frozen_policy["body_node_ids"] == ["generate_scene_batch"]

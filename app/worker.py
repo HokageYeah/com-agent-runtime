@@ -207,8 +207,18 @@ class BootstrapExecutor:
         return self.run(run_id, lease_context)
 
 
+# 模型网关装配的精确门禁基准：env 里 MEMOIR_MODEL_NODE_ROUTES_JSON 的键集合
+# 必须与这里完全一致，缺键即整体禁用模型网关走模板 fallback。
+# generate_scene_batch 是 M7 bounded_loop 的循环体模型节点；
+# repair_coverage_gaps 是 M7 循环后的覆盖修复模型节点，须一并登记。
 _MEMOIR_MODEL_NODES = frozenset(
-    {"extract_highlights", "plan_chapters", "generate_scenes"}
+    {
+        "extract_highlights",
+        "plan_chapters",
+        "generate_scenes",
+        "generate_scene_batch",
+        "repair_coverage_gaps",
+    }
 )
 
 

@@ -8,23 +8,27 @@ import logging
 import re
 import uuid as uuid_module
 from collections.abc import Mapping
+from itertools import zip_longest
 from pathlib import Path
 from typing import Literal, Protocol
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.core.logging_uru import log_success
 from app.models import AgentRun
+from app.runtime.bounded_loop import InheritedLoopBudget, LoopIterationResult
 from app.runtime.context_manager import ContextManager
 from app.runtime.evaluator import MemoirPlaybackEvaluator
 from app.runtime.guardrails import MemoirGuardrails
 from app.runtime.interfaces import LeaseContext
+from app.runtime.json_repair import parse_json_once
 from app.runtime.material_schema import (
     detect_envelope_mixing,
 )
 from app.runtime.prompt_registry import PromptRegistry
+from app.runtime.semantic_validation import SemanticValidator
 from app.runtime.state import AgentState
 from app.runtime.structured_output import StructuredOutputParser
 from app.runtime.tool_gateway import ToolErrorRejected, ToolGateway
@@ -132,6 +136,57 @@ class _ScenePlanOutput(BaseModel):
         return self
 
 
+class _BatchSceneOutput(BaseModel):
+    """M7 循环体单批场景条目；与 1.0.5 scene-batch-generate 契约对齐。
+
+    body 为必填（单批场景是最终播放卡正文，缺失会发布空白卡）；
+    title_word 可省略，长度语义与 generate_scenes 路径一致（≤6 汉字）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scene_id: str
+    scene_type: Literal["summary", "cover", "stats", "diary_highlight", "bet_highlight", "milestone"]
+    source_refs: list[str]
+    body: str
+    title_word: str | None = None
+
+
+class _SceneBatchPlanOutput(BaseModel):
+    """单批模型输出的顶层契约：{"scenes": [...]}，允许空数组（本批不值得成卡）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scenes: list[_BatchSceneOutput]
+
+
+class _CoverageRepairSceneOutput(BaseModel):
+    """M7 覆盖修复单场景契约；与 coverage-repair.v1.md prompt 逐字段对齐。
+
+    - scene_id 必须以 "r1-" 前缀（只允许一次 repair，r1 即修复第 1 次），
+      与生成批次的 s{batch_index}- 命名空间隔离；
+    - scene_type 封闭四枚举：cover/summary 由生成批次固定，修复只补中间场景；
+    - body 必填（修复场景同样是最终播放卡，缺失会发布空白卡）；
+    - title_word 可省略，长度语义与生成路径一致（≤6 汉字）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scene_id: str
+    scene_type: Literal["stats", "diary_highlight", "bet_highlight", "milestone"]
+    source_refs: list[str]
+    body: str
+    title_word: str | None = None
+
+
+class _CoverageRepairOutput(BaseModel):
+    """覆盖修复模型输出的顶层契约：{"scenes": [...]}，允许空数组（素材不足以成卡）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scenes: list[_CoverageRepairSceneOutput]
+
+
 # 模板兜底场景的固定安全正文：模型不可用或输出被拒时，前端播放卡渲染 scene.body，
 # 缺失正文会发布出三张空白卡。文案为字面量（不含用户素材），每条均满足
 # _is_safe_playback 的 80 字上限与 MemoirGuardrails 的敏感词/情绪风险拦截。
@@ -169,6 +224,25 @@ _SCENE_ACTION_RULES: dict[str, str] = {
     "summary": "show_card",
     "image": "type_text",
 }
+
+# ---- M7 bounded_loop 循环三段接口的冻结常量（仅 1.0.5+ 图可达）----
+# 循环体节点：所有 memoir 图中唯一的 bounded_loop body（1.0.5 冻结声明）。
+_LOOP_BODY_NODE_ID = "generate_scene_batch"
+# 批内素材条数上限：与模型网关素材通道 _candidate_materials 的 8 条上限对齐，
+# 超过 8 条的素材会在网关侧被静默丢弃（模型看不到正文却仍被允许引用）。
+_LOOP_BATCH_MAX_MATERIALS = 8
+# 网关未暴露 route 级 context_token_budget 时的保守回退值（token）：
+# 素材文本已被 sanitize 截断（text ≤200 字 → ≤50 token/条），8 条上限下
+# 素材侧至多 ~400 token，该回退值只作为缺失兜底，绝不放大预算。
+_LOOP_BATCH_TOKEN_FALLBACK = 4096
+# 五类素材类型的冻结顺序：与业务仓 MATERIAL_TYPE_ORDER 严格一致。
+# available_material_types 按此序输出（evals/minimal.jsonl 第 4 行
+# partial_types_diary_and_bet_only 期望 ["diary","completed_bet"] 是权威样例）。
+_MATERIAL_TYPE_ORDER: tuple[str, ...] = (
+    "diary", "completed_bet", "handbook_note", "matured_wish", "bucket_list_completion",
+)
+# 覆盖修复节点：1.0.5 图中紧随 bounded_loop 的唯一一次 repair 模型节点 id。
+_REPAIR_NODE_ID = "repair_coverage_gaps"
 
 
 def _version_at_least(agent_version: object, minimum: str) -> bool:
@@ -224,6 +298,11 @@ class MemoirNodeRunner:
         self._contexts = ContextManager()
         self._structured_output = StructuredOutputParser()
         self._lease_context: LeaseContext | None = None
+        # M7 bounded_loop 循环暂存：begin_loop 冻结素材清单与游标，迭代段消费。
+        # Runner 由 Worker 按 Run 粒度构造（每次 run/resume 新建），实例级暂存
+        # 不会跨 Run 泄漏；循环中途无 checkpoint，重算时 begin_loop 重新初始化。
+        self._loop_materials: list[dict[str, str]] | None = None
+        self._loop_cursor = 0
 
     def bind_lease_context(self, lease_context: LeaseContext) -> None:
         """Executor 每个节点前绑定有效写上下文，拒绝迟到工具结果落库。"""
@@ -358,6 +437,17 @@ class MemoirNodeRunner:
             state.fallback_flags.append("template_scenes")
             logging.info("MemoirAgent 模板场景完成 run_id=%s scene_count=%s", run.run_id, len(state.scenes))
             return {"node_id": "generate_scenes", "fallback": True}
+        if node.get("node_id") == "generate_scene_batch":
+            # M7 循环体节点：真实模型调用已由 begin_loop/run_loop_iteration/
+            # finalize_loop 三段接口在 bounded_loop 节点内完成（每轮至多一次）。
+            # 静态计划线性遍历到达本节点时只做无副作用透传——场景已在
+            # state.scenes，再次调用模型会违反单轮一次调用契约。
+            return {"node_id": "generate_scene_batch", "loop_body": True}
+        if node.get("node_id") == _REPAIR_NODE_ID:
+            # M7 覆盖缺失收尾：覆盖完整时直通，否则唯一一次 repair 模型调用
+            # 补齐缺失类型；冻结语义（fail closed、禁止模板补写）见
+            # _repair_coverage_gaps 文档与设计说明 §3.3。
+            return self._repair_coverage_gaps(run, state)
         if node.get("node_id") == "generate_actions":
             scenes = state.scenes if isinstance(state.scenes, list) else []
             # 动作按 scene_type 确定性映射：日记/赌约精选卡正文用打字机呈现
@@ -429,7 +519,29 @@ class MemoirNodeRunner:
                     if isinstance(item, Mapping)
                     and item.get("material_type") == "completed_bet"
                 )
+                # M7 覆盖判定输入：canonical materials 的真实出现类型 ∩ 五类全集。
+                present_types = {
+                    str(item.get("material_type"))
+                    for item in raw_materials
+                    if isinstance(item, Mapping)
+                    and item.get("material_type") in _MATERIAL_TYPE_ORDER
+                }
             else:
+                # legacy 形状：五类素材槽按 sanitize 同一组键等价推导（空列表
+                # = 无真实素材，类型不算实际存在）；bet 槽与计数分支同源。
+                legacy_slots: tuple[tuple[tuple[str, ...], str], ...] = (
+                    (("diary_items", "diaries"), "diary"),
+                    (("completed_bet_items", "completed_bets", "bet_items", "bets"), "completed_bet"),
+                    (("handbook_notes",), "handbook_note"),
+                    (("matured_wishes",), "matured_wish"),
+                    (("bucket_list_completions",), "bucket_list_completion"),
+                )
+                present_types = set()
+                for fields, material_type in legacy_slots:
+                    raw = next((snapshot[field] for field in fields if field in snapshot), None)
+                    # 槽存在且非空列表 = 该类型有真实素材（与计数分支同源取槽）。
+                    if isinstance(raw, list) and raw:
+                        present_types.add(material_type)
                 diaries = snapshot.get("diary_items", snapshot.get("diaries", []))
                 bets = snapshot.get(
                     "completed_bet_items",
@@ -437,8 +549,23 @@ class MemoirNodeRunner:
                 )
                 diary_count = len(diaries) if isinstance(diaries, list) else 0
                 bet_count = len(bets) if isinstance(bets, list) else 0
-            state.stats = {"diary_count": diary_count, "bet_count": bet_count, "has_material": bool(diary_count or bet_count)}
-            log_success("MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s", run.run_id, diary_count, bet_count)
+            available_material_types = [
+                material_type
+                for material_type in _MATERIAL_TYPE_ORDER
+                if material_type in present_types
+            ]
+            state.stats = {
+                "diary_count": diary_count,
+                "bet_count": bet_count,
+                "has_material": bool(diary_count or bet_count),
+                # 实际存在的合格素材类型集合（固定类型序），供下游
+                # repair_coverage_gaps 做覆盖判定与缺失修复。
+                "available_material_types": available_material_types,
+            }
+            log_success(
+                "MemoirAgent 统计素材 run_id=%s diaries=%s bets=%s types=%s",
+                run.run_id, diary_count, bet_count, len(available_material_types),
+            )
             return {"node_id": "compute_stats", "stats_ready": True}
         if node.get("node_id") == "sanitize_materials":
             # 原始快照只允许在该节点读取；下游仅能获得最小脱敏视图。
@@ -768,6 +895,600 @@ class MemoirNodeRunner:
             raise RuntimeError(exc.error_code) from None
         log_success("MemoirAgent 已加载快照 run_id=%s archive_id=%s", run.run_id, archive_id)
         return {"node_id": "load_snapshot", "snapshot_loaded": True}
+
+    # ------------------------------------------------------------------
+    # M7 bounded_loop 三段接口：仅 1.0.5+ 图的 bounded_loop 节点可达；
+    # 1.0.0-1.0.4 图无该节点类型，三个方法永远不会被调用（零影响）。
+    # ------------------------------------------------------------------
+
+    def begin_loop(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        state: AgentState,
+        budget: InheritedLoopBudget,
+    ) -> None:
+        """初始化循环状态：冻结素材清单 + 游标归零；不产生任何模型调用。
+
+        fail closed 条件（缺任一即抛错，executor 统一转 LOOP_BODY_FAILED）：
+        - 模型网关不可用：循环体每轮都需要一次模型调用，无网关必然整循环空转；
+        - 脱敏素材视图缺失 / 无任何带安全 text 的可循环素材：没有可切批的输入。
+        """
+        if self._model_gateway is None:
+            raise ValueError("LOOP_MODEL_GATEWAY_UNAVAILABLE")
+        materials = self._loop_material_texts(state.sanitized_material)
+        if not materials:
+            logging.warning(
+                "MemoirAgent 循环启动失败 run_id=%s code=%s",
+                run.run_id, "LOOP_MATERIALS_MISSING",
+            )
+            raise ValueError("LOOP_MATERIALS_MISSING")
+        self._loop_materials = materials
+        self._loop_cursor = 0
+        # 只记计数与预算快照，不记录素材正文或引用清单本身。
+        logging.info(
+            "MemoirAgent 循环状态初始化完成 run_id=%s material_count=%s max_iterations=%s",
+            run.run_id, len(materials), budget.max_iterations,
+        )
+
+    def run_loop_iteration(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        state: AgentState,
+        iteration_index: int,
+        budget: InheritedLoopBudget,
+    ) -> LoopIterationResult:
+        """驱动循环体 generate_scene_batch 一次模型调用（每轮至多一次）。
+
+        - 单批切分：按素材稳定顺序装批，批内 token 总量不超过
+           min(route context_token_budget, budget.remaining_tokens) 且至多 8 条；
+        - 单条超限拒绝不截断：单条素材自身超限即整条剔除（安全计数），绝不
+           等比压缩或截断 digest；剔除后本批为空则该轮不调模型直接 continue
+           （游标已推进，不会死循环）；
+        - 解析失败/结构非法：抛受控原因码（executor 按 on_iteration_error=
+           continue 跳过该轮继续）；正文与模型原始输出不进异常消息与日志；
+        - 完成判定：本批吃掉全部剩余素材（末批）且输出合法 → complete。
+        """
+        if self._loop_materials is None:
+            # 契约违约：executor 保证先 begin_loop 后迭代，防御性 fail closed。
+            raise ValueError("LOOP_NOT_INITIALIZED")
+        materials = self._loop_materials
+        if self._loop_cursor >= len(materials):
+            # 素材游标已耗尽（末批可能被解析失败跳过）：防御性收敛，
+            # 结构完整性交 finalize_loop 判定，不在此伪造场景。
+            return LoopIterationResult(
+                outcome="complete", reason_code="LOOP_MATERIALS_EXHAUSTED",
+            )
+        cap = self._loop_batch_token_cap(budget.remaining_tokens)
+        batch: list[dict[str, str]] = []
+        used_tokens = 0
+        over_limit_dropped = 0
+        while (
+            self._loop_cursor < len(materials)
+            and len(batch) < _LOOP_BATCH_MAX_MATERIALS
+        ):
+            material = materials[self._loop_cursor]
+            tokens = MemoirNodeRunner._estimate_material_tokens(material["text"])
+            if tokens > cap:
+                # 单条素材自身超限：整条剔除出本批（绝不截断/压缩 digest），
+                # 游标同步推进，避免下一轮重复扫描同一条造成死循环。
+                self._loop_cursor += 1
+                over_limit_dropped += 1
+                continue
+            if used_tokens + tokens > cap:
+                # 本条放不进本批剩余额度：批到此为止，留给下一轮迭代
+                # （稳定顺序装批，不越过本条去挑后面更小的素材）。
+                break
+            batch.append(material)
+            used_tokens += tokens
+            self._loop_cursor += 1
+        if not batch:
+            # 剔除后本批为空：不消耗模型调用，返回 continue；游标已推进。
+            logging.warning(
+                "MemoirAgent 循环批次素材全部超限剔除 run_id=%s iteration=%s dropped=%s",
+                run.run_id, iteration_index, over_limit_dropped,
+            )
+            return LoopIterationResult(
+                outcome="continue", reason_code="LOOP_BATCH_ALL_OVER_LIMIT",
+            )
+        # 首批看实际产出而非轮次：此前批次被跳过时本批仍可补 cover，
+        # 保证 finalize 的"首 cover"结构判定可达。
+        is_first_batch = not state.scenes
+        is_final_batch = self._loop_cursor >= len(materials)
+        batch_refs = [material["source_ref"] for material in batch]
+        request: dict[str, object] = {
+            # batch_index 直接用 1 基轮次：与 scene_id 的 s{batch_index}-N
+            # 前缀契约配合，跨轮次天然不冲突（含被跳过的轮次）。
+            "batch_index": iteration_index,
+            "is_first_batch": is_first_batch,
+            "is_final_batch": is_final_batch,
+            "source_refs": batch_refs,
+        }
+        data = self._model_data(
+            run.run_id, _LOOP_BODY_NODE_ID, request, run.agent_version,
+            materials=batch,
+        )
+        if data is None:
+            # 网关不可用/未成功：本批素材已消费，抛受控码交 executor 跳过继续。
+            raise RuntimeError("LOOP_BATCH_MODEL_UNAVAILABLE")
+        scenes = self._parse_batch_output(
+            data, batch_refs,
+            is_first_batch=is_first_batch, is_final_batch=is_final_batch,
+        )
+        if scenes is None:
+            # on_iteration_error=continue：该批安全失败（素材已消费，由下游
+            # repair_coverage_gaps 补覆盖），异常只携带受控原因码。
+            raise RuntimeError("LOOP_BATCH_OUTPUT_INVALID")
+        if scenes:
+            state.apply_tool_output("scenes", [*(state.scenes or []), *scenes])
+        covered_refs = {ref for scene in scenes for ref in scene["source_refs"]}
+        log_success(
+            "MemoirAgent 循环批次完成 run_id=%s iteration=%s batch_size=%s "
+            "scene_count=%s dropped_over_limit=%s is_final=%s",
+            run.run_id, iteration_index, len(batch), len(scenes),
+            over_limit_dropped, is_final_batch,
+        )
+        if is_final_batch:
+            return LoopIterationResult(
+                outcome="complete", reason_code="LOOP_COMPLETE",
+                output_count=len(scenes), coverage_count=len(covered_refs),
+            )
+        return LoopIterationResult(
+            outcome="continue",
+            output_count=len(scenes), coverage_count=len(covered_refs),
+        )
+
+    def finalize_loop(
+        self, node: dict[str, object], run: AgentRun, state: AgentState,
+    ) -> LoopIterationResult:
+        """结构完整性收尾判定：>=3 场景、首个 cover、末个 summary。
+
+        结构完整 → complete；缺首/末或不足 3 → failed（原因码，executor 转
+        LOOP_BODY_FAILED）。finalize 自身不补写任何 Scene（fail closed 优于
+        编造内容），覆盖补齐语义由工作流下游 repair_coverage_gaps 节点承担。
+        """
+        scenes = state.scenes if isinstance(state.scenes, list) else []
+        reason: str | None = None
+        if len(scenes) < 3:
+            reason = "LOOP_SCENE_COUNT_INSUFFICIENT"
+        elif scenes[0].get("scene_type") != "cover":
+            reason = "LOOP_COVER_MISSING"
+        elif scenes[-1].get("scene_type") != "summary":
+            reason = "LOOP_SUMMARY_MISSING"
+        covered_refs = {
+            ref for scene in scenes if isinstance(scene, dict)
+            for ref in scene.get("source_refs", []) if isinstance(ref, str)
+        }
+        if reason is not None:
+            logging.warning(
+                "MemoirAgent 循环收尾结构不完整 run_id=%s scene_count=%s code=%s",
+                run.run_id, len(scenes), reason,
+            )
+            return LoopIterationResult(
+                outcome="failed", reason_code=reason, output_count=len(scenes),
+                coverage_count=len(covered_refs),
+            )
+        log_success(
+            "MemoirAgent 循环收尾结构完整 run_id=%s scene_count=%s covered=%s",
+            run.run_id, len(scenes), len(covered_refs),
+        )
+        return LoopIterationResult(
+            outcome="complete", reason_code="LOOP_STRUCTURE_COMPLETE",
+            output_count=len(scenes), coverage_count=len(covered_refs),
+        )
+
+    @staticmethod
+    def _loop_material_texts(sanitized_material: object) -> list[dict[str, str]]:
+        """提取循环可用的脱敏素材（sensitive=False 且带安全 text），稳定顺序去重。
+
+        与 _safe_material_texts 的差异：不做 8 条截断（循环要遍历全部素材），
+        且不带 allowlist（批内引用白名单由每轮切批结果动态决定）。
+        """
+        if not isinstance(sanitized_material, Mapping):
+            return []
+        materials = sanitized_material.get("materials")
+        if not isinstance(materials, list):
+            return []
+        texts: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in materials:
+            if not isinstance(item, Mapping):
+                continue
+            ref, text = item.get("source_ref"), item.get("text")
+            if (
+                item.get("sensitive") is not False
+                or not isinstance(ref, str) or not ref or ref in seen
+                or not isinstance(text, str) or not text.strip()
+            ):
+                continue
+            seen.add(ref)
+            texts.append({"source_ref": ref, "text": text})
+        return texts
+
+    @staticmethod
+    def _estimate_material_tokens(text: str) -> int:
+        """素材 token 估算：与 ContextManager 相同的字符近似口径（4 字符 ≈ 1）。"""
+        return max(1, (len(text) + 3) // 4)
+
+    def _loop_batch_token_cap(self, remaining_tokens: int) -> int:
+        """单批素材 token 上限 = min(route 上下文窗口, Run 剩余 token)。
+
+        route 窗口优先 duck-typing 读取网关的 context_token_budget(node_id)；
+        读取失败/未暴露（当前模型网关适配器尚未提供该入口，部署接线属后续
+        任务）一律回退保守冻结值，绝不放大预算。
+        """
+        cap = _LOOP_BATCH_TOKEN_FALLBACK
+        accessor = getattr(self._model_gateway, "context_token_budget", None)
+        if callable(accessor):
+            try:
+                value = accessor(_LOOP_BODY_NODE_ID)
+            except Exception:  # noqa: BLE001 - route 预算不可得时回退冻结值。
+                value = None
+            if (
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+            ):
+                cap = value
+        return min(cap, max(remaining_tokens, 0))
+
+    # ------------------------------------------------------------------
+    # M7 repair_coverage_gaps 覆盖缺失收尾（仅 1.0.5+ 图可达；1.0.0-1.0.4
+    # 图无该节点，方法永远不会被调用，零影响）。
+    # ------------------------------------------------------------------
+
+    def _repair_coverage_gaps(
+        self, run: AgentRun, state: AgentState,
+    ) -> dict[str, object]:
+        """覆盖判定 + 唯一一次 repair 模型调用（设计说明 §3.3 冻结语义）。
+
+        - 覆盖定义：available_material_types（compute_stats 产出，实际存在的
+          合格素材类型）中每个类型都被任一已生成 Scene 的 source_refs 引用；
+        - 全部已覆盖：不调模型直通完成，链路继续 generate_actions；
+        - 有缺失：只允许一次 ModelGateway repair（coverage-repair.v1.md 契约），
+          输入仅缺失类型的安全 text_digest 与真实 source_ref，走与
+          generate_scene_batch 相同的网关/预算/guardrail 治理；
+        - 缺失类型无安全 text_digest 投影：契约错误 fail closed（不得把无来源
+          卡片或编造内容计为覆盖）；
+        - 无剩余模型许可/预算、输出违反 JSON 契约、修复后仍缺失：Run failed
+          （稳定原因码）。禁止 deterministic 模板补写 Scene——fail closed
+          优于编造内容。
+        """
+        scenes = state.scenes if isinstance(state.scenes, list) else []
+        available = self._available_material_types(state)
+        covered_types = self._covered_material_types(scenes)
+        missing = [t for t in available if t not in covered_types]
+        if not missing:
+            log_success(
+                "MemoirAgent 覆盖完整修复节点直通 run_id=%s scene_count=%s type_count=%s",
+                run.run_id, len(scenes), len(available),
+            )
+            return {
+                "node_id": _REPAIR_NODE_ID, "repaired": False, "added_scene_count": 0,
+            }
+        repair_materials = self._missing_type_materials(
+            state.sanitized_material, missing,
+        )
+        if repair_materials is None:
+            # 设计 §3.3：实际存在类型缺少安全 text_digest 投影 → 契约错误
+            # fail closed，不调模型、不编造（缺失类型只可能是五类枚举值）。
+            logging.warning(
+                "MemoirAgent 覆盖修复缺失类型无安全摘要 run_id=%s missing=%s code=%s",
+                run.run_id, missing, "COVERAGE_TEXT_DIGEST_MISSING",
+            )
+            raise ValueError("COVERAGE_TEXT_DIGEST_MISSING")
+        request: dict[str, object] = {
+            "missing_material_types": missing,
+            "source_refs": [material["source_ref"] for material in repair_materials],
+        }
+        data = self._model_data(
+            run.run_id, _REPAIR_NODE_ID, request, run.agent_version,
+            materials=repair_materials,
+        )
+        if data is None:
+            # 网关不可用或无剩余模型许可/预算：Run failed（fail closed 优于
+            # 模板编造），与普通生成节点的模板降级语义刻意不同。
+            logging.warning(
+                "MemoirAgent 覆盖修复模型能力不可用 run_id=%s missing=%s code=%s",
+                run.run_id, missing, "COVERAGE_REPAIR_MODEL_UNAVAILABLE",
+            )
+            raise ValueError("COVERAGE_REPAIR_MODEL_UNAVAILABLE")
+        repair_scenes = self._parse_coverage_repair_output(
+            data,
+            allowed_refs=set(request["source_refs"]),
+            existing_scene_ids={
+                str(scene.get("scene_id"))
+                for scene in scenes
+                if isinstance(scene, dict) and isinstance(scene.get("scene_id"), str)
+            },
+        )
+        if repair_scenes is None:
+            logging.warning(
+                "MemoirAgent 覆盖修复输出被拒绝 run_id=%s missing=%s code=%s",
+                run.run_id, missing, "COVERAGE_REPAIR_OUTPUT_INVALID",
+            )
+            raise ValueError("COVERAGE_REPAIR_OUTPUT_INVALID")
+        # 修复后覆盖复核：仍缺失即 Run failed（模型判定素材不足以成卡也是
+        # 正确结果，宁可不发布也不编造）。
+        still_missing = [
+            t for t in available
+            if t not in covered_types | self._covered_material_types(repair_scenes)
+        ]
+        if still_missing:
+            logging.warning(
+                "MemoirAgent 覆盖修复后仍缺失 run_id=%s missing=%s code=%s",
+                run.run_id, still_missing, "COVERAGE_REPAIR_INCOMPLETE",
+            )
+            raise ValueError("COVERAGE_REPAIR_INCOMPLETE")
+        # 合并：修复场景插在末尾 summary 之前——prompt 冻结"修复只补中间
+        # 场景"，全文档首 cover/末 summary 已由生成批次固定，保持播放结构。
+        merged = list(scenes)
+        if (
+            merged
+            and isinstance(merged[-1], dict)
+            and merged[-1].get("scene_type") == "summary"
+        ):
+            merged = merged[:-1] + repair_scenes + [merged[-1]]
+        else:
+            merged = merged + repair_scenes
+        state.apply_tool_output("scenes", merged)
+        log_success(
+            "MemoirAgent 覆盖修复完成 run_id=%s missing_before=%s added=%s scene_count=%s",
+            run.run_id, len(missing), len(repair_scenes), len(merged),
+        )
+        return {
+            "node_id": _REPAIR_NODE_ID, "repaired": True,
+            "added_scene_count": len(repair_scenes),
+        }
+
+    @staticmethod
+    def _covered_material_types(scenes: list[object]) -> set[str]:
+        """从场景引用集合推导已覆盖类型（source_ref 前缀即素材类型）。"""
+        return {
+            str(ref).split(":", 1)[0]
+            for scene in scenes
+            if isinstance(scene, dict)
+            for ref in scene.get("source_refs", [])
+            if isinstance(ref, str)
+        }
+
+    @staticmethod
+    def _available_material_types(state: AgentState) -> list[str]:
+        """读取 compute_stats 产出的实际存在类型（固定类型序）。
+
+        图顺序保证 compute_stats 先于修复节点执行；stats 缺键时从脱敏视图
+        等价推导（sanitize 后真实出现的类型），只服务独立节点单测与防御。
+        """
+        stats = state.stats if isinstance(state.stats, dict) else {}
+        raw = stats.get("available_material_types")
+        if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+            return [item for item in raw if item in _MATERIAL_TYPE_ORDER]
+        if not isinstance(state.sanitized_material, Mapping):
+            return []
+        materials = state.sanitized_material.get("materials")
+        if not isinstance(materials, list):
+            return []
+        present = {
+            item.get("type")
+            for item in materials
+            if isinstance(item, Mapping) and item.get("type") in _MATERIAL_TYPE_ORDER
+        }
+        return [t for t in _MATERIAL_TYPE_ORDER if t in present]
+
+    @staticmethod
+    def _missing_type_materials(
+        sanitized_material: object, missing_types: list[str],
+    ) -> list[dict[str, str]] | None:
+        """收集缺失类型的安全素材（sensitive=False 且带 text）；返回 None =
+        任一缺失类型无安全 text_digest 投影（契约错误 fail closed）。
+
+        轮转交错装填（zip_longest 按位拉链）：多缺失类型时保证每类至少
+        一条进入模型上下文（与循环按类型交错成批同一精神），总量对齐
+        网关素材通道的 8 条上限。
+        """
+        if not isinstance(sanitized_material, Mapping):
+            return None
+        materials = sanitized_material.get("materials")
+        if not isinstance(materials, list):
+            return None
+        by_type: dict[str, list[dict[str, str]]] = {
+            material_type: [] for material_type in missing_types
+        }
+        for item in materials:
+            if not isinstance(item, Mapping):
+                continue
+            ref, text = item.get("source_ref"), item.get("text")
+            if (
+                item.get("type") in by_type
+                and item.get("sensitive") is False
+                and isinstance(ref, str) and ref
+                and isinstance(text, str) and text.strip()
+            ):
+                by_type[str(item["type"])].append({"source_ref": ref, "text": text})
+        if any(not queue for queue in by_type.values()):
+            return None
+        return [
+            entry
+            for row in zip_longest(*(by_type[t] for t in missing_types))
+            for entry in row
+            if entry is not None
+        ][:8]
+
+    def _parse_coverage_repair_output(
+        self,
+        data: object,
+        allowed_refs: set[str],
+        existing_scene_ids: set[str],
+    ) -> list[dict[str, object]] | None:
+        """按 coverage-repair.v1.md JSON 契约解析修复输出；失败返回 None。
+
+        与 _parse_batch_output 同一纪律：逐场景过受信任语义校验器（引用
+        白名单 + 控制字段黑名单）+ r1- 前缀/封闭类型枚举/正文非空等逐字段
+        校验；任何一步失败只记受控原因码，模型原始输出不进日志。
+        """
+        if isinstance(data, str):
+            raw = data
+        elif isinstance(data, Mapping):
+            try:
+                raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                return None
+        else:
+            logging.info(
+                "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "MODEL_OUTPUT_TYPE_INVALID",
+            )
+            return None
+        value, _status = parse_json_once(raw)
+        if value is None:
+            logging.info(
+                "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "JSON_PARSE_FAILED",
+            )
+            return None
+        try:
+            output = _CoverageRepairOutput.model_validate(value)
+        except ValidationError:
+            logging.info(
+                "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "SCHEMA_VALIDATION_FAILED",
+            )
+            return None
+        validator = SemanticValidator()
+        scenes: list[dict[str, object]] = []
+        for scene in output.scenes:
+            # r1- 前缀：与生成批次 s{batch_index}- 命名空间隔离；且不得与已
+            # 生成场景或本批内其它修复场景冲突（覆盖式合并被禁止）。
+            if not scene.scene_id.startswith("r1-"):
+                logging.info(
+                    "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "REPAIR_SCENE_ID_PREFIX_INVALID",
+                )
+                return None
+            if scene.scene_id in existing_scene_ids or any(
+                scene.scene_id == earlier["scene_id"] for earlier in scenes
+            ):
+                logging.info(
+                    "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "REPAIR_SCENE_ID_CONFLICT",
+                )
+                return None
+            semantic = validator.validate(
+                scene.model_dump(), trusted_refs=allowed_refs,
+            )
+            if not semantic.valid:
+                recorder = getattr(self._model_gateway, "record_validation_rejection", None)
+                if callable(recorder):
+                    recorder(_REPAIR_NODE_ID, semantic.error_codes)
+                logging.info(
+                    "MemoirAgent 覆盖修复输出被拒绝 reason=%s error_codes=%s",
+                    "SEMANTIC_VALIDATION_FAILED", semantic.error_codes,
+                )
+                return None
+            if not scene.source_refs or not scene.body.strip():
+                logging.info(
+                    "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "REPAIR_SCENE_CONTENT_EMPTY",
+                )
+                return None
+            title_word = scene.title_word
+            if title_word is not None and (not title_word or len(title_word) > 6):
+                logging.info(
+                    "MemoirAgent 覆盖修复输出被拒绝 reason=%s", "REPAIR_TITLE_WORD_INVALID",
+                )
+                return None
+            entry: dict[str, object] = {
+                "scene_id": scene.scene_id,
+                "scene_type": scene.scene_type,
+                "source_refs": list(dict.fromkeys(scene.source_refs)),
+                "body": scene.body,
+            }
+            if title_word is not None:
+                entry["title_word"] = title_word
+            scenes.append(entry)
+        return scenes
+
+    def _parse_batch_output(
+        self,
+        data: object,
+        batch_refs: list[str],
+        *,
+        is_first_batch: bool,
+        is_final_batch: bool,
+    ) -> list[dict[str, object]] | None:
+        """按 1.0.5 scene-batch-generate JSON 契约解析本批场景；失败返回 None。
+
+        与既有 _parse_structured_output 的差异：容器的 len(scenes)>=3 规则不
+        适用（单批允许 1~2 个场景，prompt 冻结契约），因此改为逐场景过同一
+        受信任语义校验器（场景级 source_refs ⊆ 本批引用 + 控制字段黑名单）。
+        任何一步失败只记受控原因码，模型原始输出不进日志。
+        """
+        if isinstance(data, str):
+            raw = data
+        elif isinstance(data, Mapping):
+            try:
+                raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                return None
+        else:
+            logging.info(
+                "MemoirAgent 循环批次输出被拒绝 reason=%s", "MODEL_OUTPUT_TYPE_INVALID",
+            )
+            return None
+        value, _status = parse_json_once(raw)
+        if value is None:
+            logging.info(
+                "MemoirAgent 循环批次输出被拒绝 reason=%s", "JSON_PARSE_FAILED",
+            )
+            return None
+        try:
+            output = _SceneBatchPlanOutput.model_validate(value)
+        except ValidationError:
+            logging.info(
+                "MemoirAgent 循环批次输出被拒绝 reason=%s", "SCHEMA_VALIDATION_FAILED",
+            )
+            return None
+        validator = SemanticValidator()
+        scenes: list[dict[str, object]] = []
+        for position, scene in enumerate(output.scenes):
+            semantic = validator.validate(
+                scene.model_dump(), trusted_refs=set(batch_refs),
+            )
+            if not semantic.valid:
+                recorder = getattr(self._model_gateway, "record_validation_rejection", None)
+                if callable(recorder):
+                    recorder(_LOOP_BODY_NODE_ID, semantic.error_codes)
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s error_codes=%s",
+                    "SEMANTIC_VALIDATION_FAILED", semantic.error_codes,
+                )
+                return None
+            if not scene.source_refs or not scene.body.strip():
+                # prompt 冻结契约：source_refs 不得为空数组、body 必须可读。
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s", "BATCH_SCENE_CONTENT_EMPTY",
+                )
+                return None
+            # cover/summary 双重校验（prompt 之外的结构闸门）：仅首批可出 cover
+            # 且必须居首；仅末批可出 summary 且必须居末。
+            if scene.scene_type == "cover" and (not is_first_batch or position != 0):
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s", "BATCH_COVER_POSITION_INVALID",
+                )
+                return None
+            if scene.scene_type == "summary" and (
+                not is_final_batch or position != len(output.scenes) - 1
+            ):
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s", "BATCH_SUMMARY_POSITION_INVALID",
+                )
+                return None
+            entry: dict[str, object] = {
+                "scene_id": scene.scene_id,
+                "scene_type": scene.scene_type,
+                "source_refs": list(dict.fromkeys(scene.source_refs)),
+                "body": scene.body,
+            }
+            title_word = scene.title_word
+            if title_word is not None:
+                if not isinstance(title_word, str) or not title_word or len(title_word) > 6:
+                    return None
+                entry["title_word"] = title_word
+            scenes.append(entry)
+        return scenes
 
     @staticmethod
     def _sanitize_materials(snapshot: object) -> tuple[list[dict[str, object]], int, int]:
@@ -1312,6 +2033,10 @@ class MemoirNodeRunner:
             "extract_highlights": "highlight-extract",
             "plan_chapters": "chapter-plan",
             "generate_scenes": "scene-generate",
+            # M7 循环体：1.0.5 bounded_loop 的单批场景生成 prompt。
+            "generate_scene_batch": "scene-batch-generate",
+            # M7 覆盖修复：1.0.5 循环后唯一一次 repair 模型调用的 prompt。
+            "repair_coverage_gaps": "coverage-repair",
         }.get(node_id)
         if prompt_id is None:
             return None

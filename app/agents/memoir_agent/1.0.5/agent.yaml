@@ -1,0 +1,24 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.5（M7 动态生成）：场景生成从"单次模型调用 + 全局前 N 条
+# 素材 + 1～3 章裁剪"改为受控 bounded_loop 分批生成——五类素材（diary/
+# completed_bet/handbook_note/matured_wish/bucket_list_completion）按固定类型顺序
+# 交错成批，循环体每批一次模型调用，由模型按素材丰富度动态决定场景数量与主题组织，
+# 不设 maxScenes/maxImages 任何数量上限（scene_count >= 3 由 prompt 与输出校验保证）。
+# 覆盖缺失（实际存在类型未被任何 Scene 引用）只允许一次 repair 模型节点补齐（经相同
+# ModelGateway、预算与 guardrail 治理，输入仅为缺失类型安全 text_digest 与真实
+# source_ref）；无剩余预算或修复后仍缺失即 failed，禁止 deterministic 模板补写 Scene。
+# 媒体继续对每个最终 Scene 尝试一张图，单场景失败降级文本卡，不阻塞发布。
+# 契约零变更：Snapshot/Scene/Action/PlaybackDocument wire 不变，
+# contract_version 仍为 1.0.0（Tool/Snapshot/Playback 契约不随 Agent 版本升级）。
+version: 1.0.5
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+prompts:
+  - scene-batch-generate.v1.md
+  - coverage-repair.v1.md
+  - safety-review.v1.md
+  - structured-output-repair.v1.md

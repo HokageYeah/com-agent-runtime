@@ -525,17 +525,21 @@ def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> Non
     monkeypatch.setattr(
         worker.settings,
         "MEMOIR_MODEL_NODE_ROUTES_JSON",
-        '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}',
+        '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir",'
+        '"generate_scene_batch":"memoir","repair_coverage_gaps":"memoir"}',
         raising=False,
     )
 
     gateway = configured_model_gateway(object())
 
     assert gateway is not None
+    # 键集合必须与 worker 精确门禁基准完全一致（含 M7 循环体与覆盖修复节点）。
     assert gateway._route_ids == {
         "extract_highlights": "memoir",
         "plan_chapters": "memoir",
         "generate_scenes": "memoir",
+        "generate_scene_batch": "memoir",
+        "repair_coverage_gaps": "memoir",
     }
 
 
@@ -577,7 +581,8 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
     monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
     monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":10,"tpm_limit":10,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
     monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
-    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir"}', raising=False)
+    # M7 循环体与覆盖修复节点须一并列全，否则集合门禁禁用模型网关。
+    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir","generate_scene_batch":"memoir","repair_coverage_gaps":"memoir"}', raising=False)
     monkeypatch.setattr(
         worker.settings,
         "RUNTIME_TRUSTED_CLIENTS_JSON",

@@ -97,6 +97,8 @@ _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
     "1.0.2": "1.1.0",
     "1.0.3": "1.1.0",
     "1.0.4": "1.1.0",
+    # 1.0.5（M7 受控循环）沿用 1.1.0 工具 wire 契约：仅新增 bounded_loop 工作流语义。
+    "1.0.5": "1.1.0",
 }
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 

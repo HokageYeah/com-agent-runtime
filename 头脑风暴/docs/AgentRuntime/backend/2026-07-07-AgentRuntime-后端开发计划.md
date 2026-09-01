@@ -1,5 +1,7 @@
 # AgentRuntime 后端 Implementation Plan
 
+> **2026-09-01 实施轮完成（工作区未提交）：** 本计划的通用 `bounded_loop` 节点与 `memoir_agent@1.0.5` 包已在本仓工作区实现并全量测试通过（958 passed/16 skipped，含网关五节点注册——`generate_scene_batch` 与最终评审修复轮补齐的 `repair_coverage_gaps`——及 1.0.5 全图集成测试与 fixture pin 4 处 `1.0.4`→`1.0.5`）。改动未提交、未部署，目标环境注册仍为 `1.0.4`。下方 2026-08-31 横幅为冻结时点的历史记录。
+
 > **2026-08-31 未来设计，尚未实现：** 本计划新增通用 `bounded_loop` 静态 DAG 节点与 `memoir_agent@1.0.5` 动态回忆录生成任务。它们不改变当前已部署 `memoir_agent@1.0.4` 的事实，也不得据本文把代码、fixture 或验证状态标记为已完成。完整设计见 [`../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
 
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 的 CREATE USER 密码已改为仅经 mysql stdin 传递；bootstrap/guard `28 passed` 覆盖 argv、调用日志、stdout/stderr 无密码与失败补偿。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，专用 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint 重放与 conflicting fingerprint 冲突，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。

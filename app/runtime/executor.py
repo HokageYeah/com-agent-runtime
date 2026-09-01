@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Protocol
@@ -15,6 +16,16 @@ from sqlalchemy.orm import Session
 from app.core.logging_uru import log_success
 from app.models import AgentDefinition, AgentPlan, AgentRun, AgentStep
 from app.runtime.artifact import ArtifactError, ArtifactStore
+from app.runtime.bounded_loop import (
+    InheritedLoopBudget,
+    LoopBudgetError,
+    LoopIterationResult,
+    derive_inherited_budget,
+    merge_unique_scenes,
+    recompute_loop_remaining,
+    usage_snapshot,
+    validated_loop_policy,
+)
 from app.runtime.checkpoint import CheckpointError, CheckpointStore
 from app.runtime.graph_builder import StaticWorkflowGraph, StaticWorkflowGraphError
 from app.runtime.interfaces import AgentRunResult, LeaseContext
@@ -64,6 +75,49 @@ def _safe_checkpoint_state(state: AgentState, completed_steps: int) -> dict[str,
         "completed_node_ids": list(state.completed_node_ids),
         "fallback_flags": list(state.fallback_flags),
     }
+
+
+@dataclass
+class _LoopProgress:
+    """bounded_loop 执行进度：只含轮次/安全计数/原因码，绝不含正文。"""
+
+    iterations: int = 0
+    iteration_errors: int = 0
+    output_count: int = 0
+    coverage_count: int = 0
+    exhausted: bool = False
+    declared_partial: bool = False
+    reason_code: str | None = None
+    early: AgentRunResult | None = None
+
+
+@dataclass
+class _LoopNodeOutcome:
+    """bounded_loop 节点执行结论；三态互斥。
+
+    - ``node_result``：循环收敛（complete/partial），节点按正常完成处理。
+    - ``early``：逐轮安全检查或结构性失败的提前返回（cancelled/failed/
+      draining），由 _execute 原样上抛。
+    - ``partial``：循环以 partial 收敛，Run 终态降级 partial。
+    """
+
+    node_result: dict[str, object] | None = None
+    early: AgentRunResult | None = None
+    partial: bool = False
+
+
+def _loop_protocol(runner: object) -> tuple[Callable, Callable, Callable] | None:
+    """解析 Runner 的受控循环三段接口；缺任一段即不支持（fail closed）。
+
+    与 bind_lease_context 相同的 duck-typing 解析：现有 1.0.0-1.0.4 Runner
+    不实现该接口，其节点类型也不含 bounded_loop，行为零变化。
+    """
+    begin = getattr(runner, "begin_loop", None)
+    iterate = getattr(runner, "run_loop_iteration", None)
+    finalize = getattr(runner, "finalize_loop", None)
+    if not all(callable(item) for item in (begin, iterate, finalize)):
+        return None
+    return begin, iterate, finalize
 
 
 class WorkflowExecutor:
@@ -289,6 +343,8 @@ class WorkflowExecutor:
             state.completed_node_ids = sorted(completed_node_ids)
         skipping = resume_from_node_id is not None
         partial_optional_failure = False
+        # M7：bounded_loop 以 partial 收敛（预算耗尽/单轮失败）时 Run 终态降级。
+        partial_loop_failure = False
         # 只在本次实际执行范围计时；held/queued/waiting_human 从未进入此循环，
         # 不会被误算为活跃预算。历史累计值存放在 Run 的 active_elapsed_ms。
         active_started_at = monotonic()
@@ -368,30 +424,55 @@ class WorkflowExecutor:
                 bind_lease_context = getattr(self._node_runner, "bind_lease_context", None)
                 if callable(bind_lease_context):
                     bind_lease_context(lease_context)
-                while True:
-                    try:
-                        node_result = self._node_runner.run_node(node, run, state)
-                        break
-                    except RetryableWorkflowNodeError as exc:
+                if node.get("node_type") == "bounded_loop":
+                    # M7 受控循环：循环体由 Runner 三段接口（begin/iteration/
+                    # finalize）执行，Executor 只负责预算继承、逐轮安全检查、
+                    # 按键去重合并与安全审计；循环错误语义与通用节点不同，
+                    # 不进入通用 run_node 自动重试路径。
+                    loop = self._run_bounded_loop_node(
+                        node,
+                        run,
+                        state,
+                        lease_context,
+                        completed_steps,
+                        active_started_at,
+                    )
+                    if loop.early is not None:
+                        if loop.early.status == "failed":
+                            step.status = "failed"
+                            step.error_code = loop.early.error_code
+                            step.finished_at = datetime.now(UTC)
+                        return loop.early
+                    node_result = loop.node_result or {"node_id": node_id}
+                    partial_loop_failure = partial_loop_failure or loop.partial
+                else:
+                    while True:
                         try:
-                            self._runs.record_auto_retry(run_id, step.step_id)
-                        except AgentRunServiceError:
-                            logging.warning(
-                                "Workflow 节点自动重试额度已耗尽 run_id=%s node=%s",
+                            node_result = self._node_runner.run_node(node, run, state)
+                            break
+                        except RetryableWorkflowNodeError as exc:
+                            try:
+                                self._runs.record_auto_retry(run_id, step.step_id)
+                            except AgentRunServiceError:
+                                logging.warning(
+                                    "Workflow 节点自动重试额度已耗尽 run_id=%s node=%s",
+                                    run_id,
+                                    node_id,
+                                )
+                                step.status = "failed"
+                                step.error_code = "AUTO_RETRY_LIMIT_EXCEEDED"
+                                step.finished_at = datetime.now(UTC)
+                                return self._fail(
+                                    run, lease_context, "AUTO_RETRY_LIMIT_EXCEEDED"
+                                )
+                            logging.info(
+                                "Workflow 节点自动重试 run_id=%s node=%s "
+                                "step_attempt=%s code=%s",
                                 run_id,
                                 node_id,
+                                step.step_attempt,
+                                str(exc),
                             )
-                            step.status = "failed"
-                            step.error_code = "AUTO_RETRY_LIMIT_EXCEEDED"
-                            step.finished_at = datetime.now(UTC)
-                            return self._fail(run, lease_context, "AUTO_RETRY_LIMIT_EXCEEDED")
-                        logging.info(
-                            "Workflow 节点自动重试 run_id=%s node=%s step_attempt=%s code=%s",
-                            run_id,
-                            node_id,
-                            step.step_attempt,
-                            str(exc),
-                        )
             except Exception:  # noqa: BLE001 - 节点异常必须转为安全错误码。
                 step.status = "failed"
                 step.error_code = "WORKFLOW_NODE_FAILED"
@@ -440,6 +521,12 @@ class WorkflowExecutor:
                 "node_id": node_id,
                 "status": "skipped" if node_status == "skipped" else "ok",
             }
+            if isinstance(node_result.get("loop_summary"), dict):
+                # 循环摘要只含轮次/原因/安全计数/用量，不携带任何正文。
+                step.output_summary = {
+                    **step.output_summary,
+                    "loop": node_result["loop_summary"],
+                }
             step.finished_at = datetime.now(UTC)
             # 每个安全节点边界刷新累计活跃时间；不能用 Run.created_at，避免排队
             # 或人工审批时间错误消耗执行额度。
@@ -504,7 +591,11 @@ class WorkflowExecutor:
         )
         return AgentRunResult(
             run_id=run_id,
-            status="partial" if partial_optional_failure else "succeeded",
+            status=(
+                "partial"
+                if partial_optional_failure or partial_loop_failure
+                else "succeeded"
+            ),
             execution_attempt=lease_context.execution_attempt,
             output_summary={"completed_steps": completed_steps},
         )
@@ -525,6 +616,321 @@ class WorkflowExecutor:
             execution_attempt=lease_context.execution_attempt,
             error_code="WORKFLOW_DRAINING",
             output_summary={"completed_steps": completed_steps},
+        )
+
+    def _run_bounded_loop_node(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        state: AgentState,
+        lease_context: LeaseContext,
+        completed_steps: int,
+        active_started_at: float,
+    ) -> _LoopNodeOutcome:
+        """M7 bounded_loop 节点编排：策略/预算 fail closed → 循环 → 收尾审计。
+
+        冻结语义（详见 app/runtime/bounded_loop.py）：预算继承 Run 级限额、
+        迭代上限 = 剩余 model call、每轮逐项安全检查、产物按 scene_id 去重
+        追加、中间正文不落 checkpoint（整节点 safe_to_rerun=True 重算）。
+        """
+        policy = validated_loop_policy(node)
+        if policy is None:
+            logging.warning(
+                "bounded_loop loop_policy 非法 run_id=%s node=%s code=LOOP_POLICY_INVALID",
+                run.run_id,
+                node.get("node_id"),
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_POLICY_INVALID")
+            )
+        try:
+            budget = derive_inherited_budget(self._session, run)
+        except LoopBudgetError as exc:
+            logging.warning(
+                "bounded_loop 预算继承 fail closed run_id=%s code=%s",
+                run.run_id,
+                exc.code,
+            )
+            return _LoopNodeOutcome(early=self._fail(run, lease_context, exc.code))
+        protocol = _loop_protocol(self._node_runner)
+        if protocol is None:
+            logging.warning(
+                "bounded_loop Runner 未实现循环接口 run_id=%s code=LOOP_RUNNER_UNSUPPORTED",
+                run.run_id,
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_RUNNER_UNSUPPORTED")
+            )
+        begin, iterate, finalize = protocol
+        try:
+            # begin_loop 只做循环初始化（批次/预算快照），不产生模型调用。
+            begin(node, run, state, budget)
+        except Exception:  # noqa: BLE001 - 初始化失败是结构性失败，fail closed。
+            logging.warning(
+                "bounded_loop begin_loop 失败 run_id=%s code=LOOP_BODY_FAILED", run.run_id
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_BODY_FAILED")
+            )
+        usage_before, _, _ = usage_snapshot(self._session, run.run_id)
+        progress = self._run_loop_iterations(
+            node, run, state, lease_context, completed_steps, active_started_at,
+            budget, iterate,
+        )
+        if progress.early is not None:
+            return _LoopNodeOutcome(early=progress.early)
+        return self._finalize_bounded_loop(
+            node, run, state, lease_context, policy, progress, finalize, usage_before
+        )
+
+    def _run_loop_iterations(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        state: AgentState,
+        lease_context: LeaseContext,
+        completed_steps: int,
+        active_started_at: float,
+        budget: InheritedLoopBudget,
+        iterate: Callable,
+    ) -> _LoopProgress:
+        """逐轮执行循环体：安全检查 → 预算重算 → 单次调用 → 去重合并。"""
+        progress = _LoopProgress()
+        while True:
+            # 每轮重新检查 cancel/purge、授权、package、lease/fencing、draining。
+            early = self._loop_safety_check(run, lease_context, completed_steps)
+            if early is not None:
+                progress.early = early
+                return progress
+            live = recompute_loop_remaining(
+                self._session, run, budget, monotonic() - active_started_at
+            )
+            # 全部预算逐轮重检：任一余额触底即额度耗尽，交 on_budget_exhausted 收敛。
+            if (
+                live.remaining_model_calls <= 0
+                or live.remaining_tokens <= 0
+                or live.remaining_cost <= 0
+                or live.remaining_ms <= 0
+            ):
+                progress.exhausted = True
+                progress.reason_code = "LOOP_BUDGET_EXHAUSTED"
+                break
+            # 迭代上限 = 启动时剩余 model call；上限本身就是额度边界。
+            if progress.iterations >= budget.max_iterations:
+                progress.exhausted = True
+                progress.reason_code = "LOOP_BUDGET_EXHAUSTED"
+                break
+            calls_before, _, _ = usage_snapshot(self._session, run.run_id)
+            try:
+                raw = iterate(node, run, state, progress.iterations + 1, live)
+                result = (
+                    raw
+                    if isinstance(raw, LoopIterationResult)
+                    else LoopIterationResult.model_validate(raw)
+                )
+            except Exception:  # noqa: BLE001
+                # on_iteration_error=continue：单轮失败只跳过该轮继续下一轮；
+                # 异常正文可能夹带模型输出/请求体，不落任何日志或账本。
+                progress.iterations += 1
+                progress.iteration_errors += 1
+                logging.warning(
+                    "bounded_loop 迭代失败跳过 run_id=%s iteration=%s "
+                    "code=LOOP_ITERATION_SKIPPED",
+                    run.run_id,
+                    progress.iterations,
+                )
+                continue
+            calls_now, _, _ = usage_snapshot(self._session, run.run_id)
+            if calls_now - calls_before > 1:
+                # 每轮至多一次模型调用是冻结契约；违反即结构性失败 fail closed。
+                logging.warning(
+                    "bounded_loop 单轮模型调用超限 run_id=%s iteration=%s "
+                    "code=LOOP_MODEL_CALL_CONTRACT_VIOLATED",
+                    run.run_id,
+                    progress.iterations + 1,
+                )
+                progress.early = self._fail(
+                    run, lease_context, "LOOP_MODEL_CALL_CONTRACT_VIOLATED"
+                )
+                return progress
+            progress.iterations += 1
+            if result.outcome == "failed":
+                logging.warning(
+                    "bounded_loop 迭代声明结构性失败 run_id=%s iteration=%s "
+                    "code=LOOP_BODY_FAILED",
+                    run.run_id,
+                    progress.iterations,
+                )
+                progress.early = self._fail(run, lease_context, "LOOP_BODY_FAILED")
+                return progress
+            progress.output_count += result.output_count
+            progress.coverage_count += result.coverage_count
+            # append_unique_by_key：迭代产物按 scene_id 去重后追加，禁止覆盖。
+            merge_unique_scenes(state)
+            if result.outcome in {"complete", "partial"}:
+                progress.declared_partial = result.outcome == "partial"
+                progress.reason_code = result.reason_code or (
+                    "LOOP_COMPLETE" if result.outcome == "complete" else "LOOP_PARTIAL_DECLARED"
+                )
+                break
+        return progress
+
+    def _loop_safety_check(
+        self, run: AgentRun, lease_context: LeaseContext, completed_steps: int
+    ) -> AgentRunResult | None:
+        """逐轮安全检查；终态结论与 _execute 节点级检查完全一致，不引入新语义。"""
+        if run.cancel_requested_at is not None:
+            return AgentRunResult(
+                run_id=run.run_id,
+                status="cancelled",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="CANCEL_REQUESTED",
+            )
+        if self._authorization_changed(run):
+            run.cancel_requested_at = datetime.now(UTC)
+            self._record_authorization_change(run)
+            return AgentRunResult(
+                run_id=run.run_id,
+                status="cancelled",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="AUTHORIZATION_CHANGED",
+            )
+        if self._package_revoked(run):
+            run.cancel_requested_at = datetime.now(UTC)
+            self._record_package_revoked(run)
+            return AgentRunResult(
+                run_id=run.run_id,
+                status="cancelled",
+                execution_attempt=lease_context.execution_attempt,
+                error_code="PACKAGE_REVOKED",
+            )
+        if not self._lease.heartbeat(
+            run.run_id, lease_context
+        ) or not self._lease.can_write(run_id=run.run_id, context=lease_context):
+            # can_write 同时覆盖隐私状态/版本（purge 屏障）与 lease/fencing。
+            return self._fail(run, lease_context, "LEASE_CONTEXT_INVALID")
+        if self._is_draining():
+            return self._draining_result(run.run_id, lease_context, completed_steps)
+        return None
+
+    def _finalize_bounded_loop(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        state: AgentState,
+        lease_context: LeaseContext,
+        policy: dict[str, object],
+        progress: _LoopProgress,
+        finalize: Callable,
+        usage_before: int,
+    ) -> _LoopNodeOutcome:
+        """收尾调用段：on_budget_exhausted=failed 直接失败，否则执行 finalize。"""
+        if progress.exhausted and policy["on_budget_exhausted"] == "failed":
+            # 额度耗尽且冻结策略为 failed：不发布部分结果，整节点失败。
+            logging.warning(
+                "bounded_loop 预算耗尽按 failed 收敛 run_id=%s code=LOOP_BUDGET_EXHAUSTED",
+                run.run_id,
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_BUDGET_EXHAUSTED")
+            )
+        try:
+            raw_final = finalize(node, run, state)
+            final_result = (
+                raw_final
+                if isinstance(raw_final, LoopIterationResult)
+                else LoopIterationResult.model_validate(raw_final)
+            )
+        except Exception:  # noqa: BLE001 - 收尾失败/结论非法是结构性失败，fail closed。
+            logging.warning(
+                "bounded_loop finalize 失败或结论非法 run_id=%s code=LOOP_BODY_FAILED",
+                run.run_id,
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_BODY_FAILED")
+            )
+        if final_result.outcome != "complete" and final_result.outcome != "partial":
+            # finalize 必须给出终态结论；failed/continue 均为结构性不完整。
+            logging.warning(
+                "bounded_loop finalize 结论非终态 run_id=%s outcome=%s code=LOOP_BODY_FAILED",
+                run.run_id,
+                final_result.outcome,
+            )
+            return _LoopNodeOutcome(
+                early=self._fail(run, lease_context, "LOOP_BODY_FAILED")
+            )
+        return self._bounded_loop_outcome(
+            node, run, lease_context, final_result, progress, usage_before
+        )
+
+    def _bounded_loop_outcome(
+        self,
+        node: dict[str, object],
+        run: AgentRun,
+        lease_context: LeaseContext,
+        final_result: LoopIterationResult,
+        progress: _LoopProgress,
+        usage_before: int,
+    ) -> _LoopNodeOutcome:
+        """判定段：partial 触发条件合并 + 安全审计 + 循环摘要节点结果。"""
+        # partial 的触发条件（冻结语义 7）：额度耗尽（策略=partial）、迭代
+        # 声明 partial、存在被跳过的失败迭代、finalize 判定 partial。
+        final_outcome = (
+            "partial"
+            if (
+                progress.exhausted
+                or progress.declared_partial
+                or progress.iteration_errors > 0
+                or final_result.outcome == "partial"
+            )
+            else "complete"
+        )
+        reason_code = (
+            progress.reason_code
+            or final_result.reason_code
+            or ("LOOP_COMPLETE" if final_outcome == "complete" else "LOOP_PARTIAL")
+        )
+        usage_now, _, _ = usage_snapshot(self._session, run.run_id)
+        loop_summary = {
+            "iterations": progress.iterations,
+            "outcome": final_outcome,
+            "reason_code": reason_code,
+            "output_count": progress.output_count,
+            "coverage_count": progress.coverage_count,
+            "model_calls_used": max(0, usage_now - usage_before),
+        }
+        self._record_bounded_loop_audit(run, final_outcome, reason_code)
+        return _LoopNodeOutcome(
+            node_result={
+                "node_id": str(node["node_id"]),
+                "loop_outcome": final_outcome,
+                "loop_summary": loop_summary,
+            },
+            partial=final_outcome == "partial",
+        )
+
+    def _record_bounded_loop_audit(
+        self, run: AgentRun, outcome: str, reason_code: str
+    ) -> None:
+        """bounded_loop 审计：只记结论/原因码与定位字段。
+
+        计数明细（轮次/输出/覆盖/用量）落在 AgentStep.output_summary；两处都
+        不含 Scene 正文、素材 digest、prompt 或模型原始输出。
+        """
+        AuditService(session=self._session).append(
+            RuntimeAuditEvent(
+                audit_id=str(uuid4()),
+                actor_type="system",
+                actor_id="workflow_executor",
+                action="agent_run_bounded_loop",
+                resource_type="agent_run",
+                resource_id=run.run_id,
+                reason_code=reason_code,
+                outcome=outcome,
+                occurred_at=datetime.now(UTC),
+                trace_id=run.trace_id,
+                metadata_summary={"run_id": run.run_id, "status": outcome},
+            )
         )
 
     @staticmethod
