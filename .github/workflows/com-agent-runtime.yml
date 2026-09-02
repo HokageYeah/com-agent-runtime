@@ -217,7 +217,7 @@ jobs:
             export DOCKER_BUILDKIT=0
             export COMPOSE_DOCKER_CLI_BUILD=0
 
-            TARGET_BRANCH="memoir-deploy-pro"
+            TARGET_BRANCH="memoir-optimize"
 
             # 部署仍按 tag 构建，但服务器仓库目录不应长期停留在 detached HEAD；
             # 无论成功失败，退出前都把工作区恢复到远程 master 一致状态。

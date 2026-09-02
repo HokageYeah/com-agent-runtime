@@ -87,7 +87,7 @@ def test_runtime_capabilities_requires_valid_service_signature(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["contract_version"] == "1.0.0"
-    assert payload["agents"] == [{"agent_id": "memoir_agent", "version": "1.0.1"}]
+    assert payload["agents"] == [{"agent_id": "memoir_agent", "version": "1.0.5"}]
     assert set(payload["capabilities"]) == {
         "workflow_agent",
         "native_sse",

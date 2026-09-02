@@ -2,10 +2,10 @@
 
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 已把 CREATE USER 密码从 mysql argv 移至 stdin；离线 bootstrap/guard `28 passed` 证明密码不进入 fake mysql argv、调用日志或 stdout/stderr，且失败补偿未回退。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，隔离 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint、conflicting fingerprint 三项，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
-> **2026-08-31 后续开发块（未实现）：** 新增公共 `bounded_loop` 静态 DAG
-> 节点与 `memoir_agent@1.0.5` 五类动态生成。当前代码最新仍为 `1.0.4`；
-> 不得把本计划新增 `[ ]`、新 Package、版本登记或生产切流表述为已完成。
-> 设计入口：
+> **2026-09-01 当前实现校准：** 公共 `bounded_loop` 静态 DAG 节点与
+> `memoir_agent@1.0.5` 五类动态生成已在当前工作区实现，并有自动化测试证据；
+> 1.0.5 尚未提交、注册或部署，生产仍运行 1.0.4。不得把生产注册、部署、切流或
+> staging/生产真实验证表述为已完成。设计入口：
 > [通用受控循环与 Memoir 动态生成设计说明](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
 
 > **2026-08-06 跨项目校准：** 本计划的 Runtime 公共能力任务仍有效；Task 6.5、Task 10.75 及本仓库现存 Archive/Snapshot/密码/播放态代码标记为“已实现的迁移证据”，目标归属改为 `couple-diary-b`，不得继续在公共 Runtime 扩展业务接口。生产闭环只保留 Runtime 公共 Run/Worker/Tool/Callback 能力，公共路径以 `/api/v1/runtime/capabilities` 与 `/api/v1/runtime/agent-runs` 为准。历史勾选项中的“revision 0 封面/基础统计”不得原样成为目标 baseline；迁移后 revision 0 按情侣日记计划收敛为无来源派生信息的通用安全版本。详细迁移与联调顺序见情侣日记仓库 `头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md`。
@@ -386,12 +386,12 @@ callback、作品发布工具和媒体 worker 不得交叉写状态；成功 cal
 - [✅] Tool manifest 冻结 `connector_id/method/relative path/input_from/output_to`；完整 URL、未声明状态路径和覆盖 trusted 控制字段的映射在注册期拒绝。
 - [✅] 构建不可变 package digest，排除签名文件、构建时间和 digest 自身等生成元数据；同版本不同 digest 拒绝注册，revoked 支持在途安全停止。**（2026-08-11 第六次收口 P1 实证：1.0.0 在 620f44a 被改动加 `safe_to_rerun` 违反此铁律——同版本改内容属非法；故恢复 1.0.0 缺键原貌 + 另发 1.0.1。`test_memoir_agent_1_0_0_and_1_0_1_are_independent_immutable_packages` 证明两版本 digest 不同且各自合法 load，`contract_version` 都 1.0.0；同版本改内容→必须升版本的规则被真实触发并按规则处置）**
 - [✅] Package active/deprecated/revoked 变化记录操作者、原因、时间并写 RuntimeAuditEvent。
-- [ ] 扩展 AgentPackage schema/loader 支持 `node_type=bounded_loop` 与冻结
+- [✅] 扩展 AgentPackage schema/loader 支持 `node_type=bounded_loop` 与冻结
   `loop_policy`；首版 `budget_profile=inherit_run_limits_v1`，按剩余
   `max_model_calls/max_tokens/max_model_cost/max_run_seconds` 和 ContextManager 公式导出
   循环/批次上限，不允许 Package 或业务请求自选数值；拒绝必要预算缺失/耗尽、未知 merge/error 策略、含 Business Tool/
   媒体/发布副作用循环体或企图放宽 Runtime 全局预算的 Package。
-- [ ] 新建不可变 `memoir_agent@1.0.5` 并冻结 digest；不得覆盖
+- [✅] 新建不可变 `memoir_agent@1.0.5` 并冻结 digest；不得覆盖
   `1.0.0`～`1.0.4`，未完成 provider/consumer 与部署登记前不得用于新 Run。
 
 **Checkpoint:** Runtime 可以加载指定版本 AgentPackage，不能自动使用最新版。
@@ -798,25 +798,28 @@ Runtime 侧：
 
 **Plan:** [2026-08-31 专题设计](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md) + 后端计划 Task 14。
 
-- [ ] 先实现并验证公共 `bounded_loop` Package/Executor/Policy/Audit/Resume 能力；
+- [✅] 已实现并验证公共 `bounded_loop` Package/Executor/Policy/Audit/Resume 能力；
   循环体只允许 model/deterministic，所有副作用留在循环外。
-- [ ] `1.0.5` 以 `prepare_scene_batches -> generate_scene_batches(bounded_loop)
+- [✅] `1.0.5` 以 `prepare_scene_batches -> generate_scene_batches(bounded_loop)
   -> finalize_scenes` 替代全局固定 refs/1～3 章裁剪；五类合格素材按类型交错扫描，
   单轮切片由模型上下文与既有通用预算计算，不作为总素材上限。
-- [ ] 模型决定每批 Scene 数、主题和跨类型叙事；产品只保留至少 3 Scene，不设
+- [✅] 模型决定每批 Scene 数、主题和跨类型叙事；产品只保留至少 3 Scene，不设
   Scene/图片总数上限。确定性收尾保证每个存在的安全素材类型至少被引用一次。
-- [ ] 循环结果统一为 `continue|complete|partial|failed`：全量处理并覆盖为
+- [✅] 循环结果统一为 `continue|complete|partial|failed`：全量处理并覆盖为
   `complete`；预算/批次失败但类型覆盖完整为 `partial`；缺类只允许一次经相同
   ModelGateway/预算/guardrail 的 repair，输入使用该类型安全 digest 与真实 source_ref；
   无剩余许可/预算或仍缺失则 `failed`，Runtime 不用 deterministic 模板补写 Scene。
   实际存在类型缺安全 digest 时契约 fail closed，不以无来源 fallback 冒充覆盖。
-- [ ] 媒体继续在循环外逐场景串行执行；单图失败或 900 秒预算耗尽只降级文字卡，
+- [✅] 媒体继续在循环外逐场景串行执行；单图失败或 900 秒预算耗尽只降级文字卡，
   不改变文本内容 succeeded/partial 判定。
-- [ ] 完成 Package digest、Tool wire/capabilities、部署模板、Business 显式版本及
-  双仓 fixture/behavior 测试后，按“Business 接收 → Runtime 注册 → Business 切流”上线；
-  旧 Run 继续使用冻结版本。
+- [✅] Package digest、Tool wire/capabilities、Business 显式版本、双仓 fixture/behavior
+  测试已有工作区证据；2026-09-02 复核 Runtime 全量 `965 passed/16 skipped`
+  （含 capabilities 1.0.5 收口），1.0.5 聚焦五件套 `132 passed`，旧 Run 继续使用冻结版本。
+- [ ] 生产发布并显式注册 `memoir_agent@1.0.5`，再按“Business 接收 → Runtime 注册
+  → Business 切流”上线；真实 staging/生产验证尚未执行。
 
-**Checkpoint:** 五类动态生成在资源、恢复、隐私和发布边界内可控；当前尚未完成。
+**Checkpoint:** 五类动态生成在资源、恢复、隐私和发布边界内已有自动化证据；注册、部署、
+真实环境验证和 Business 切流仍未完成。
 
 ## 5. 跨模块职责表
 
