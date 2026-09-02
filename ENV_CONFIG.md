@@ -381,6 +381,40 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 | `MEMOIR_MODEL_NODE_ROUTES_JSON` | Memoir 五个模型节点（extract_highlights/plan_chapters/generate_scenes/generate_scene_batch/repair_coverage_gaps）到 route_id 的映射 | 键必须恰好覆盖这五个节点；值必须是已注册的 route_id |
 | `MODEL_PROVIDER_API_KEYS_JSON` | route_id 到 Provider API Key 的映射 | 只进入请求头 `Authorization: Bearer`；不写入 route JSON、日志、trace、响应或 Git |
 
+#### 10.2.1 五个模型节点分别是什么
+
+`MEMOIR_MODEL_NODE_ROUTES_JSON` 的五个键是 MemoirAgent 历代工作流图中全部模型节点的并集。Worker 门禁按**集合精确匹配**校验（见 `app/worker.py` 的 `_MEMOIR_MODEL_NODES`）：少一个键、多一个键或某个值不是已注册的 route_id，都会导致模型网关整体禁用——不报错、只在启动/建网关时打一条 warning（`Memoir Worker 模型配置不完整，使用模板 fallback`），然后所有模型节点退回模板降级。即使当前只运行 1.0.5 图（只用后两个节点），也必须配满五键：这是有意设计，防止"部分节点走模型、部分节点走模板"产出不一致的回忆录。
+
+| 节点键 | 引入版本 | 职责 |
+|---|---|---|
+| `extract_highlights` | 1.0.4（1.0.5 已移除） | 单次模型调用，从全部素材中筛选前 N 条高光 |
+| `plan_chapters` | 1.0.4（1.0.5 已移除） | 单次模型调用，规划固定 1~3 个章节 |
+| `generate_scenes` | 1.0.4（1.0.5 已移除） | 按章节批量生成场景卡 |
+| `generate_scene_batch` | 1.0.5 | bounded_loop 循环体：每批素材一次模型调用，按素材丰富度动态生成场景卡 |
+| `repair_coverage_gaps` | 1.0.5 | 覆盖缺失修复：存在未被任何场景引用的素材类型时，唯一一次补齐调用 |
+
+#### 10.2.2 MEMOIR_MODEL_NODE_ROUTES_JSON 如何配置
+
+配置形态是「节点键 → route_id」的 JSON 对象。route_id 必须先在 `MODEL_ROUTES_JSON` 中注册，值为该路由的 `route_id` 字符串。五个节点可以映射到同一个 route（单模型场景），也可以分开（例如场景生成用写作型模型、修复用推理型模型）。
+
+```dotenv
+# 单 route 全节点复用（当前 development 实况形态）
+MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"deepseek-chat","plan_chapters":"deepseek-chat","generate_scenes":"deepseek-chat","generate_scene_batch":"deepseek-chat","repair_coverage_gaps":"deepseek-chat"}
+
+# 多 route 分流示例（route_id 需已在 MODEL_ROUTES_JSON 注册）
+# MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"deepseek-chat","plan_chapters":"deepseek-reasoner","generate_scenes":"deepseek-chat","generate_scene_batch":"deepseek-chat","repair_coverage_gaps":"deepseek-reasoner"}
+```
+
+配置步骤（按序）：
+
+1. 在 `MODEL_ROUTES_JSON` 注册至少一条 route（route_id、provider、model、endpoint、限流、价格）；
+2. 写 `MEMOIR_MODEL_NODE_ROUTES_JSON`，五键齐全、值都指向已注册 route_id；
+3. 在 `MODEL_PROVIDER_API_KEYS_JSON` 为每个用到的 route_id 补 Key；
+4. 确认 `RUNTIME_REDIS_URL` 非空（模型限流的前置依赖，缺失同样整体降级）；
+5. 重启 Worker 进程——这三个键与 Redis 配置都在进程启动时加载，改完不重启不生效。
+
+写在哪个文件：受管模板 `.env.<environment>` 默认为空（不默认外呼）；实际配置写到 `.env.<environment>.local`（覆盖模板，不进 Git；加载顺序 `.env.<environment>` → `.env.<environment>.local` → `.env.local`，后加载者生效）。改完后可用 §10.4 的无凭据校验命令确认 `NODES` 输出恰好五个键。
+
 ### 10.3 openai_compatible Provider 与密钥占位
 
 `provider` 为 `openai_compatible` 的路由面向 DeepSeek、Qwen 等标准 chat/completions API：
@@ -392,7 +426,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 当前三个受管环境模板均是 `MODEL_ROUTES_JSON=[]` 和
 `MEMOIR_MODEL_NODE_ROUTES_JSON={}`，不会默认调用 DeepSeek 或任何
 外部 Provider。如需启用 `deepseek-chat`，必须由部署管理员显式增加
-route、三个节点映射、价格/驻留/限流字段和 `MODEL_PROVIDER_API_KEYS_JSON`
+route、五个节点映射（§10.2.1/§10.2.2）、价格/驻留/限流字段和 `MODEL_PROVIDER_API_KEYS_JSON`
 的对应 Key，再重启 Worker。任一项缺失都应 fail-closed 或走确定性
 模板降级，不应依赖 Provider 401 才发现配置不完整。
 
@@ -409,7 +443,46 @@ MODEL_PROVIDER_API_KEYS_JSON={"deepseek-chat":"<由 secret manager 注入>","qwe
 ENVIRONMENT=development poetry run python -c 'from app.core.config import settings; print("ROUTES", [f"{r.route_id}:{r.provider}" for r in settings.model_routes]); print("NODES", sorted(settings.memoir_model_node_routes)); print("KEYS", sorted(settings.model_provider_api_keys))'
 ```
 
-预期：输出路由清单、三个节点映射键和 Key 条目的 route_id 列表，不输出任何 Key 值。
+预期：输出路由清单、五个节点映射键和 Key 条目的 route_id 列表，不输出任何 Key 值。
+
+### 10.5 Agent 包 policy 额度配置（agent.yaml）
+
+模型路由（§10.2）决定模型节点「调用谁」，包内 policy 决定一个 Run「允许调用多少」。policy 声明在每个版本包的 `app/agents/<agent_id>/<version>/agent.yaml` 的 `policy:` 节，注册时随包写入 `agent_definitions.definition_json`，创建 Run 时冻结进 `capability_snapshot_json`——请求方不能在执行期扩大额度。
+
+#### 字段含义
+
+| 字段 | 含义 | 缺省行为 |
+|---|---|---|
+| `waiting_human_timeout_action` | 人工等待超时的处置：`failed`（默认）/`fallback` /`cancelled`；选 `fallback` 时 workflow 必须声明确定性恢复节点 | `failed` |
+| `max_model_calls` | 单 Run 模型调用次数上限；bounded_loop 的迭代上限即剩余模型调用次数 | 不设上限（见下方铁律） |
+| `max_tokens` | 单 Run 模型 token 总量上限；实际计量未知时按输入 token 预留保守计入 | 不设上限 |
+| `max_model_cost` | 单 Run 模型成本上限（货币单位与网关计量一致） | 不设上限 |
+| `max_run_seconds` | 单 Run 执行时长上限（秒），含模型、媒体与审核整链 | 不设上限 |
+| `max_steps` | 单 Run 步数上限；bounded_loop 迭代不占步数、由模型额度单独封顶 | 不设上限 |
+| `max_tool_calls` / `max_auto_retry_per_step` | 工具调用次数 / 单步自动重试次数上限 | 不设上限 |
+
+#### bounded_loop 铁律：四项额度必填（1.0.5+ 图）
+
+schema 中「缺失 = 不设额度」只对无循环节点的旧图（≤1.0.4）成立。含 `bounded_loop` 节点的图（1.0.5 起）在执行循环节点时会做预算继承（`inherit_run_limits_v1`）：`max_model_calls`、`max_tokens`、`max_model_cost`、`max_run_seconds` 四项必须全部为有限正值，任一缺失或为零即 `LOOP_BUDGET_PROFILE_INVALID`，Run 直接终结 `failed`（fail closed——不允许在无额度约束下进入受控循环）。这是 Run 级冻结快照的检查，改包后必须重新注册并**发起新 Run** 才生效，已存在的 Run 不受影响。
+
+#### 额度容量怎么估
+
+1.0.5 图的模型调用 ≈ 批次数 + 至多 1 次修复。每批至多 8 条素材（`_LOOP_BATCH_MAX_MATERIALS`），批内 token 另受 `min(route context_token_budget, 剩余 token)` 约束。以 `max_model_calls=6` 为例：可支撑 5 批（约 40 条素材）+ 1 次修复；素材更多时按 `ceil(素材数/8)+1` 上调。额度耗尽不直接失败——loop_policy 的 `on_budget_exhausted=partial` 会进入部分发布收尾判定。
+
+#### 配置与生效流程
+
+```yaml
+# app/agents/memoir_agent/1.0.5/agent.yaml（节选；当前生效值）
+policy:
+  waiting_human_timeout_action: failed
+  max_model_calls: 6        # 每批≤8条素材+1次修复，6 次≈40 条素材容量
+  max_tokens: 100000
+  max_model_cost: 2.0
+  max_run_seconds: 300
+  max_steps: 32
+```
+
+改完 agent.yaml 后按序：`ENVIRONMENT=<env> poetry run python -m app.scripts.register_agent_package --agent-id memoir_agent --version <版本>`（幂等 upsert，digest 变化即更新 definition；注意环境选择变量是 `ENVIRONMENT`，不设置时默认 `development`，写错变量名会静默连到 dev 库）→ 新建 Run 时冻结新额度。只改文件不注册、或只注册不发新 Run，都看不到变化。
 
 ## 11. 最终检查顺序
 

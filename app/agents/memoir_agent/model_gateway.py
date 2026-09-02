@@ -30,6 +30,20 @@ _PROMPT_REFS = {
 }
 _REPAIR_PROMPT_REF = ("structured-output-repair", "v1")
 _MAX_REPAIR_CANDIDATE_CHARS = 2048
+# M7 bounded_loop 循环体的权威 Step 映射：executor 只为外层循环节点
+# generate_scene_batches 创建 AgentStep（loop_policy.body_node_ids 声明的
+# 循环体不占步数、不建独立 step，见 1.0.5 workflow.graph.py），循环体
+# generate_scene_batch 的模型调用全部发生在外层 step 运行期间，权威上下文
+# 查询必须锚定到这条 running 的外层 step；否则按循环体名查询恒为 0 条，
+# 模型调用会在到达 ModelGateway 前被静默拒绝（无网关日志、无 usage 行）。
+_AUTHORITATIVE_STEP_BY_NODE = {
+    "generate_scene_batch": "generate_scene_batches",
+}
+
+
+def _authoritative_step_name(node_id: str) -> str:
+    """解析模型节点的权威 step 名；非循环体节点就是自身节点名。"""
+    return _AUTHORITATIVE_STEP_BY_NODE.get(node_id, node_id)
 
 
 class MemoirModelGatewayAdapter:
@@ -62,10 +76,11 @@ class MemoirModelGatewayAdapter:
             return ModelGatewayResult("route_not_allowed")
         try:
             run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+            # 循环体模型调用锚定到外层 bounded_loop step（见映射常量注释）。
             steps = self._session.scalars(
                 select(AgentStep).where(
                     AgentStep.run_id == run_id,
-                    AgentStep.step_name == node_id,
+                    AgentStep.step_name == _authoritative_step_name(node_id),
                     AgentStep.status == "running",
                     AgentStep.execution_attempt == self._lease_context.execution_attempt,
                 )
@@ -161,10 +176,11 @@ class MemoirModelGatewayAdapter:
             return ModelGatewayResult("route_not_allowed")
         try:
             run = self._session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+            # 与 call() 同口径：循环体 repair 也锚定到外层 bounded_loop step。
             steps = self._session.scalars(
                 select(AgentStep).where(
                     AgentStep.run_id == run_id,
-                    AgentStep.step_name == node_id,
+                    AgentStep.step_name == _authoritative_step_name(node_id),
                     AgentStep.status == "running",
                     AgentStep.execution_attempt
                     == self._lease_context.execution_attempt,

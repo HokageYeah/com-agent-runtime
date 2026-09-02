@@ -314,8 +314,11 @@ def test_memoir_adapter_registers_m7_bounded_loop_scene_batch_prompt() -> None:
     run.agent_id = "memoir_agent"
     # 循环体 prompt scene-batch-generate 只随 1.0.5 包发布。
     run.agent_version = "1.0.5"
-    # 权威 Step 的 step_name 必须就是循环体 node_id，否则上下文装配拒绝。
-    step.step_name = "generate_scene_batch"
+    # 生产中 executor 只为外层 bounded_loop 节点建 step（generate_scene_batches，
+    # 复数）；循环体模型调用的权威上下文必须锚定到这条 running 的外层 step。
+    # 此前这里伪造 step_name="generate_scene_batch"（单数）掩盖了命名错配，
+    # 导致循环体模型调用在真实环境被适配层静默拒绝（run 851829df）。
+    step.step_name = "generate_scene_batches"
     session.commit()
 
     class RecordingGateway:

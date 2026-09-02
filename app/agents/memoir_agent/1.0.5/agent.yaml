@@ -17,6 +17,21 @@ allowed_business_types:
   - couple_memory
 policy:
   waiting_human_timeout_action: failed
+  # M7 bounded_loop 预算继承（inherit_run_limits_v1）要求以下额度在 Run 创建时
+  # 全部冻结为有限正值，任一缺失会触发 LOOP_BUDGET_PROFILE_INVALID 并终结 Run
+  # （executor fail closed）。取值与 tests/runtime_test_memoir_105_full_graph.py
+  # 的 CAPABILITY_SNAPSHOT 权威 fixture 一致；额度容量说明：循环体每批至多 8 条
+  # 素材（_LOOP_BATCH_MAX_MATERIALS）+ 至多 1 次 repair 模型调用，
+  # max_model_calls=6 可支撑 5 批（约 40 条素材）+ 1 次 repair。
+  max_model_calls: 6
+  # 单 Run 模型 token 总量上限（输入按保守预留计量）。
+  max_tokens: 100000
+  # 单 Run 模型成本上限（货币单位与网关计量一致）。
+  max_model_cost: 2.0
+  # 单 Run 执行时长上限（秒）：约 3 次模型调用 + 媒体任务 + 安全审核的整链耗时。
+  max_run_seconds: 300
+  # 单 Run 最大步数（bounded_loop 迭代不占步数、由模型额度单独封顶）。
+  max_steps: 32
 prompts:
   - scene-batch-generate.v1.md
   - coverage-repair.v1.md
