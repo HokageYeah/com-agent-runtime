@@ -21,6 +21,7 @@ usage() {
   - test/production 缺失业务 Snapshot key/pepper 时独立生成，重复执行沿用旧值。
   - 保留已有 CD_DOCKER_NO_PROXY，并补齐共享 Docker 网络别名和私有网段。
   - 从 Runtime BUCKET_NAME + ENDPOINT 生成 Couple Diary 媒体 URL 精确 Host 白名单。
+  - 从 Runtime MEMOIR_MEDIA_IMAGE_PREFIX 派生 Couple Diary 媒体 object_key 前缀（缺省冻结值 memoir/images/）。
   - 不执行（source）env 文件，不回显任何密钥。
 EOF
 }
@@ -176,6 +177,19 @@ else
   media_url_allowed_suffixes="[]"
 fi
 
+# 业务端发布校验的媒体 object_key 前缀与 Runtime 生成侧同源：Runtime env 显式
+# 配置 MEMOIR_MEDIA_IMAGE_PREFIX 时透传，未配置时回退冻结默认值；与 Host 白名单
+# 不同，该前缀无泄露面，媒体关闭时也照常写入，避免业务端残留旧前缀。
+memoir_media_image_prefix="$(last_env_value "${runtime_env_file}" "MEMOIR_MEDIA_IMAGE_PREFIX")"
+if [[ -z "${memoir_media_image_prefix}" ]]; then
+  memoir_media_image_prefix="memoir/images/"
+fi
+[[ "${memoir_media_image_prefix}" != /* ]] \
+  || fail "Runtime env 中 MEMOIR_MEDIA_IMAGE_PREFIX 不能以 / 开头"
+[[ "${memoir_media_image_prefix}" == */ ]] \
+  || fail "Runtime env 中 MEMOIR_MEDIA_IMAGE_PREFIX 必须以 / 结尾"
+validate_safe_token "MEMOIR_MEDIA_IMAGE_PREFIX" "${memoir_media_image_prefix}"
+
 snapshot_master_key=""
 password_pepper=""
 existing_no_proxy=""
@@ -228,6 +242,9 @@ CD_MEMORY_RUNTIME_TIMEOUT_SECONDS=5.0
 CD_MEMORY_RUNTIME_PACKAGE_ENABLED=${activate}
 # 从 Runtime OSS Bucket + Endpoint 派生精确公开 Host，供业务发布接口校验媒体 URL。
 CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES=${media_url_allowed_suffixes}
+# 从 Runtime MEMOIR_MEDIA_IMAGE_PREFIX 派生（未配置时为冻结默认值）：业务发布校验
+# 要求 manifest object_key 以它开头，必须与 Runtime 实际上传前缀一致，否则 422。
+CD_MEMORY_MEDIA_OBJECT_KEY_PREFIX=${memoir_media_image_prefix}
 CD_MEMORY_SNAPSHOT_MASTER_KEY=${snapshot_master_key}
 CD_MEMORY_SNAPSHOT_KEY_ID=1
 CD_MEMORY_ACCESS_PASSWORD_PEPPER=${password_pepper}

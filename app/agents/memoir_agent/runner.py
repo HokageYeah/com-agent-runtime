@@ -303,6 +303,10 @@ class MemoirNodeRunner:
         # 不会跨 Run 泄漏；循环中途无 checkpoint，重算时 begin_loop 重新初始化。
         self._loop_materials: list[dict[str, str]] | None = None
         self._loop_cursor = 0
+        # 结构修复快照：首批/末批装批结果各留一份（迭代段写、finalize 段读），
+        # 供模型漏发开场 cover / 收尾 summary 时做定向修复模型调用。
+        self._loop_first_batch: tuple[int, list[dict[str, str]], list[str]] | None = None
+        self._loop_final_batch: tuple[int, list[dict[str, str]], list[str]] | None = None
 
     def bind_lease_context(self, lease_context: LeaseContext) -> None:
         """Executor 每个节点前绑定有效写上下文，拒绝迟到工具结果落库。"""
@@ -323,12 +327,24 @@ class MemoirNodeRunner:
                 trusted_source_refs=trusted_refs,
                 enabled_capabilities=set(),
             )
+            # manifest 前缀必须与媒体服务上传侧实际生效的部署前缀同源
+            # （MemoirMediaConfig.image_prefix 来自 MEMOIR_MEDIA_IMAGE_PREFIX）。
+            # 历史缺陷：这里曾硬编码冻结常量校验，部署改了前缀后上传成功、
+            # 校验恒败，safety_review 整批回退 3 张基础卡发布（前端只见默认三张）。
+            # 媒体服务未注入时 manifest 恒为空，前缀不参与校验，维持默认常量。
+            media_config = getattr(self._media_service, "config", None)
+            effective_image_prefix = (
+                media_config.image_prefix
+                if media_config is not None
+                else MEDIA_IMAGE_PREFIX
+            )
             if evaluation.decision == "pass" and self._is_safe_playback(
                 state.scenes, state.actions, media_tasks=state.media_tasks,
                 scene_types=_MEDIA_SCENE_TYPES if _media_version_enabled(agent_version) else _SCENE_TYPES,
                 # 1.0.4+ 每场景配图：任意场景可携带配图 payload。
                 per_scene_media=_per_scene_media_enabled(agent_version),
                 agent_version=agent_version,
+                image_prefix=effective_image_prefix,
             ):
                 decision = "passed"
             else:
@@ -936,6 +952,9 @@ class MemoirNodeRunner:
             raise ValueError("LOOP_MATERIALS_MISSING")
         self._loop_materials = materials
         self._loop_cursor = 0
+        # 结构修复快照随循环状态一并重置，避免 resume 重算时读到上一轮残留。
+        self._loop_first_batch = None
+        self._loop_final_batch = None
         # 只记计数与预算快照，不记录素材正文或引用清单本身。
         logging.info(
             "MemoirAgent 循环状态初始化完成 run_id=%s material_count=%s max_iterations=%s",
@@ -1016,6 +1035,12 @@ class MemoirNodeRunner:
             "is_final_batch": is_final_batch,
             "source_refs": batch_refs,
         }
+        # 结构修复快照：首批/末批在模型调用前各留一份（含随后解析失败被
+        # 跳过的批），finalize 段发现缺 cover/summary 时用它做定向修复调用。
+        if is_first_batch:
+            self._loop_first_batch = (iteration_index, list(batch), list(batch_refs))
+        if is_final_batch:
+            self._loop_final_batch = (iteration_index, list(batch), list(batch_refs))
         data = self._model_data(
             run.run_id, _LOOP_BODY_NODE_ID, request, run.agent_version,
             materials=batch,
@@ -1055,18 +1080,28 @@ class MemoirNodeRunner:
     ) -> LoopIterationResult:
         """结构完整性收尾判定：>=3 场景、首个 cover、末个 summary。
 
-        结构完整 → complete；缺首/末或不足 3 → failed（原因码，executor 转
-        LOOP_BODY_FAILED）。finalize 自身不补写任何 Scene（fail closed 优于
-        编造内容），覆盖补齐语义由工作流下游 repair_coverage_gaps 节点承担。
+        结构完整 → complete；场景数不足 3 → failed（fail closed，不修复）。
+        首位缺 cover / 末位缺 summary 属于模型单批输出遗漏（素材本身在），
+        允许对首批/末批素材各做至多一次定向结构修复模型调用（共上限 2 次），
+        修复产物过同一解析闸门且只取缺口单卡；修复不可用或仍不合法 → 维持
+        failed（fail closed 优于编造内容），覆盖补齐仍由下游
+        repair_coverage_gaps 节点承担。
         """
         scenes = state.scenes if isinstance(state.scenes, list) else []
-        reason: str | None = None
-        if len(scenes) < 3:
-            reason = "LOOP_SCENE_COUNT_INSUFFICIENT"
-        elif scenes[0].get("scene_type") != "cover":
-            reason = "LOOP_COVER_MISSING"
-        elif scenes[-1].get("scene_type") != "summary":
-            reason = "LOOP_SUMMARY_MISSING"
+        reason = self._loop_structure_reason(scenes)
+        # 定向结构修复：只处理缺 cover/summary 两种缺口，修复成功后重查
+        # 整体结构；同类缺口修复成功即消除（新卡必在首/末位），循环天然
+        # 至多跑两次，上限守卫仅作防御。
+        for _ in range(2):
+            if reason not in ("LOOP_COVER_MISSING", "LOOP_SUMMARY_MISSING"):
+                break
+            if not self._repair_loop_structure(
+                run, state, reason,
+                batch_index=self._next_repair_batch_index(scenes),
+            ):
+                break
+            scenes = state.scenes if isinstance(state.scenes, list) else []
+            reason = self._loop_structure_reason(scenes)
         covered_refs = {
             ref for scene in scenes if isinstance(scene, dict)
             for ref in scene.get("source_refs", []) if isinstance(ref, str)
@@ -1088,6 +1123,103 @@ class MemoirNodeRunner:
             outcome="complete", reason_code="LOOP_STRUCTURE_COMPLETE",
             output_count=len(scenes), coverage_count=len(covered_refs),
         )
+
+    @staticmethod
+    def _loop_structure_reason(scenes: list[dict[str, object]]) -> str | None:
+        """结构判定：返回首个不满足的原因码，完整返回 None。"""
+        if len(scenes) < 3:
+            return "LOOP_SCENE_COUNT_INSUFFICIENT"
+        if scenes[0].get("scene_type") != "cover":
+            return "LOOP_COVER_MISSING"
+        if scenes[-1].get("scene_type") != "summary":
+            return "LOOP_SUMMARY_MISSING"
+        return None
+
+    def _repair_loop_structure(
+        self, run: AgentRun, state: AgentState, reason: str, batch_index: int,
+    ) -> bool:
+        """定向结构修复：缺 cover/summary 时对首批/末批素材再调一次模型。
+
+        - 复用 generate_scene_batch 既有路由与权威 step 锚定（finalize 仍在
+          该 bounded_loop step 运行期间，网关可命中 running 权威 step）；
+        - is_first_batch/is_final_batch 按缺口类型设置，触发 prompt 对应的
+          cover 居首 / summary 居末强制规则；
+        - 修复输出过同一 _parse_batch_output 闸门（目标卡位置与唯一性由
+          闸门保证），只提取缺口所需单卡，多余重复场景丢弃；
+        - 无对应批次快照 / 网关不可用 / 输出无目标卡 → False（fail closed）。
+        """
+        want_summary = reason == "LOOP_SUMMARY_MISSING"
+        stash = self._loop_final_batch if want_summary else self._loop_first_batch
+        if stash is None:
+            logging.warning(
+                "MemoirAgent 循环结构修复无批次快照 run_id=%s code=%s",
+                run.run_id, reason,
+            )
+            return False
+        _, batch, batch_refs = stash
+        request: dict[str, object] = {
+            # batch_index 由调用方按既有 scene_id 最大批次号 +1 分配（全新
+            # 批次号，按构造保证修复卡 scene_id 不冲突）。
+            "batch_index": batch_index,
+            "is_first_batch": not want_summary,
+            "is_final_batch": want_summary,
+            "source_refs": batch_refs,
+        }
+        data = self._model_data(
+            run.run_id, _LOOP_BODY_NODE_ID, request, run.agent_version,
+            materials=batch,
+        )
+        if data is None:
+            logging.warning(
+                "MemoirAgent 循环结构修复模型不可用 run_id=%s code=%s",
+                run.run_id, reason,
+            )
+            return False
+        scenes = self._parse_batch_output(
+            data, batch_refs,
+            is_first_batch=not want_summary, is_final_batch=want_summary,
+        )
+        target = "summary" if want_summary else "cover"
+        # 闸门保证目标卡若存在必居合法位且批内唯一：只取缺口单卡。
+        card = next(
+            (s for s in (scenes or []) if s.get("scene_type") == target), None,
+        )
+        if card is None:
+            logging.warning(
+                "MemoirAgent 循环结构修复输出无目标卡 run_id=%s code=%s "
+                "target=%s scene_count=%s",
+                run.run_id, reason, target, len(scenes or []),
+            )
+            return False
+        if want_summary:
+            state.apply_tool_output("scenes", [*(state.scenes or []), card])
+        else:
+            state.apply_tool_output("scenes", [card, *(state.scenes or [])])
+        logging.info(
+            "MemoirAgent 循环结构修复完成 run_id=%s code=%s target=%s "
+            "batch_index=%s",
+            run.run_id, reason, target, batch_index,
+        )
+        return True
+
+    @staticmethod
+    def _next_repair_batch_index(scenes: list[dict[str, object]]) -> int:
+        """从既有 scene_id（s{批次}-序号）取最大批次号 +1，作修复批次号。
+
+        直接以已落盘场景数据为准（而非按迭代轮次推断），按构造保证修复卡
+        scene_id 不与既有场景冲突；无法解析的 scene_id 安全跳过。
+        """
+        max_index = 0
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = scene.get("scene_id")
+            if not isinstance(scene_id, str):
+                continue
+            match = re.match(r"^s(\d+)-", scene_id)
+            if match:
+                max_index = max(max_index, int(match.group(1)))
+        return max_index + 1
 
     @staticmethod
     def _loop_material_texts(sanitized_material: object) -> list[dict[str, str]]:
@@ -1843,6 +1975,7 @@ class MemoirNodeRunner:
         per_scene_media: bool = False,
         media_pending: bool = False,
         agent_version: object = "",
+        image_prefix: str = MEDIA_IMAGE_PREFIX,
     ) -> bool:
         """校验播放结构及动作引用；只允许当前模板链定义的安全字段组合。
 
@@ -1880,7 +2013,9 @@ class MemoirNodeRunner:
         manifest = media_tasks if isinstance(media_tasks, list) else []
         if media_pending and manifest:
             return False
-        if not MemoirNodeRunner._media_manifest_valid(manifest, scene_ids):
+        if not MemoirNodeRunner._media_manifest_valid(
+            manifest, scene_ids, image_prefix=image_prefix,
+        ):
             return False
         url_by_scene = {
             entry["scene_id"]: entry["url"]
@@ -1949,8 +2084,15 @@ class MemoirNodeRunner:
         )
 
     @staticmethod
-    def _media_manifest_valid(manifest: list[object], scene_ids: set[str]) -> bool:
-        """校验 media_manifest 条目与 image 场景 payload 的冻结契约。"""
+    def _media_manifest_valid(
+        manifest: list[object], scene_ids: set[str],
+        image_prefix: str = MEDIA_IMAGE_PREFIX,
+    ) -> bool:
+        """校验 media_manifest 条目与 image 场景 payload 的冻结契约。
+
+        image_prefix 必须传媒体服务上传侧实际生效的部署前缀（默认冻结常量，
+        旧调用方零变化）；前缀结构约束（尾斜杠、UUID 文件名）不因部署值放宽。
+        """
         manifest_scenes: set[str] = set()
         for entry in manifest:
             if not isinstance(entry, dict) or set(entry) != MEDIA_MANIFEST_KEYS:
@@ -1959,19 +2101,19 @@ class MemoirNodeRunner:
                 return False
             object_key, url = entry.get("object_key"), entry.get("url")
             mime, scene_id = entry.get("mime"), entry.get("scene_id")
-            if not isinstance(object_key, str) or not object_key.startswith(MEDIA_IMAGE_PREFIX):
+            if not isinstance(object_key, str) or not object_key.startswith(image_prefix):
                 return False
             # object_key 前缀后必须是不可猜测的 UUID（拒绝可预测命名）。
-            stem = object_key[len(MEDIA_IMAGE_PREFIX):]
+            stem = object_key[len(image_prefix):]
             try:
                 uuid_module.UUID(stem.rsplit(".", 1)[0] if "." in stem else stem)
             except (ValueError, AttributeError):
                 return False
             if not isinstance(url, str) or not url.startswith("https://"):
                 return False
-            # URL path 必须落在冻结前缀下；域名后缀白名单由媒体服务上传侧
+            # URL path 必须落在实际生效前缀下；域名后缀白名单由媒体服务上传侧
             # _require_contract_url 按部署配置校验（runner 保持配置无关）。
-            if not urlparse(url).path.startswith(f"/{MEDIA_IMAGE_PREFIX}"):
+            if not urlparse(url).path.startswith(f"/{image_prefix}"):
                 return False
             if not isinstance(mime, str) or mime not in MEDIA_IMAGE_MIME_TYPES:
                 return False

@@ -463,6 +463,185 @@ def test_finalize_loop_failed_for_insufficient_or_misplaced_scenes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6.1 finalize_loop 定向结构修复：缺 cover/summary 时对首批/末批素材再调一次
+# ---------------------------------------------------------------------------
+# 通用驱动形态：3 条素材 + route 窗口 10 token → 批 1 装 m1+m2、批 2 收尾 m3；
+# 末批/首批刻意漏发 cover 或 summary，复现线上"批次全部成功但收尾结构缺口"。
+
+def _drive_two_batches_and_finalize(
+    gateway: FakeModelGateway,
+) -> tuple[object, AgentState]:
+    """跑满两批迭代后执行 finalize，返回 (finalize 结果, state)。"""
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(3, 20)))
+    run = _run()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+    runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    return runner.finalize_loop(LOOP_NODE, run, state), state
+
+
+def test_finalize_repairs_missing_summary_from_final_batch_stash() -> None:
+    """末批漏发 summary（线上 run 9a4a79fa 形态）：末批素材定向修复一次后 complete。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            # 末批只出 body 卡不收尾：解析合法（闸门只管 summary 位置不管在场），
+            # 结构缺口留给 finalize 判定。
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            # 定向修复输出：末批素材重新生成的收尾卡。
+            _payload(_scene("s3-1", "summary", ["diary:m3"])),
+        ],
+        token_budget=10,
+    )
+
+    result, state = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "complete"
+    # 修复调用形状：复用 generate_scene_batch 路由与 prompt；末批素材；
+    # is_final_batch=True 触发 prompt 的 summary 居末强制；批次号取既有
+    # 最大批次号 +1（s3 命名空间不与 s1/s2 冲突）。
+    assert len(gateway.calls) == 3
+    node_id, request = gateway.calls[2]
+    assert node_id == "generate_scene_batch"
+    assert request["prompt_id"] == "scene-batch-generate"
+    assert request["input"]["is_final_batch"] is True  # type: ignore[index]
+    assert request["input"]["is_first_batch"] is False  # type: ignore[index]
+    assert request["input"]["batch_index"] == 3  # type: ignore[index]
+    assert [item["source_ref"] for item in request["materials"]] == ["diary:m3"]  # type: ignore[union-attr]
+    # 修复只追加收尾卡：原 3 张顺序不动，summary 居末。
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s1-1", "s1-2", "s2-1", "s3-1",
+    ]
+    assert (state.scenes or [])[-1]["scene_type"] == "summary"
+
+
+def test_finalize_repair_without_target_card_fails_closed() -> None:
+    """修复输出仍无 summary → 维持 failed（每缺口至多修复一次，不重试）。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            # 修复仍只出 body 卡：无目标卡可提取。
+            _payload(_scene("s3-1", "milestone", ["diary:m3"])),
+        ],
+        token_budget=10,
+    )
+
+    result, state = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "LOOP_SUMMARY_MISSING"
+    assert len(gateway.calls) == 3  # 修复只调一次
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s1-1", "s1-2", "s2-1",
+    ]
+
+
+def test_finalize_repair_takes_only_summary_card_and_drops_extras() -> None:
+    """修复输出多卡时只提取 summary 单卡，多余 body 卡丢弃不进文档。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            # 修复输出 body + summary：闸门保证 summary 居末，只取收尾卡。
+            _payload(
+                _scene("s3-1", "diary_highlight", ["diary:m3"]),
+                _scene("s3-2", "summary", ["diary:m3"]),
+            ),
+        ],
+        token_budget=10,
+    )
+
+    result, state = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "complete"
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s1-1", "s1-2", "s2-1", "s3-2",
+    ]
+
+
+def test_finalize_repairs_missing_cover_from_first_batch_stash() -> None:
+    """首批漏发 cover：首批素材定向修复一次，cover 前插到文档首位。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            # 首批只出 body 卡（闸门只管 cover 位置不管在场）。
+            _payload(
+                _scene("s1-1", "diary_highlight", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(
+                _scene("s2-1", "milestone", ["diary:m3"]),
+                _scene("s2-2", "summary", ["diary:m3"]),
+            ),
+            # 定向修复输出：开场 cover 卡。
+            _payload(_scene("s3-1", "cover", ["diary:m1"])),
+        ],
+        token_budget=10,
+    )
+
+    result, state = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "complete"
+    node_id, request = gateway.calls[2]
+    assert node_id == "generate_scene_batch"
+    assert request["input"]["is_first_batch"] is True  # type: ignore[index]
+    assert request["input"]["is_final_batch"] is False  # type: ignore[index]
+    assert [item["source_ref"] for item in request["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    # cover 前插到首位，原有场景顺序整体后移。
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s3-1", "s1-1", "s1-2", "s2-1", "s2-2",
+    ]
+
+
+def test_finalize_repair_model_unavailable_fails_closed() -> None:
+    """修复调用网关不可用（status=failed）→ 维持 failed 原因码。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            # 第三次调用无脚本输出 → status=failed：修复不可用。
+        ],
+        token_budget=10,
+    )
+
+    result, _ = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "LOOP_SUMMARY_MISSING"
+
+
+def test_finalize_insufficient_scene_count_skips_repair() -> None:
+    """场景数不足下限不属于结构缺口：不触发修复模型调用，直接 failed。"""
+    gateway = FakeModelGateway()  # 任何调用都会被断言捕获
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(scenes=[
+        _scene("s1-1", "cover", ["diary:m1"]),
+        _scene("s2-1", "summary", ["diary:m2"]),
+    ])
+
+    result = runner.finalize_loop(LOOP_NODE, _run(), state)
+
+    assert result.outcome == "failed"
+    assert result.reason_code == "LOOP_SCENE_COUNT_INSUFFICIENT"
+    assert gateway.calls == []  # 数量缺口不做修复（素材不足，补卡无据）
+
+
+# ---------------------------------------------------------------------------
 # 7. 旧版本节点分发零影响：新分支只增不改
 # ---------------------------------------------------------------------------
 

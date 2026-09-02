@@ -874,6 +874,42 @@ def test_is_safe_playback_rejects_url_mismatch_and_payload_violations() -> None:
     )
 
 
+def test_is_safe_playback_follows_deployed_image_prefix() -> None:
+    """部署前缀（MEMOIR_MEDIA_IMAGE_PREFIX）与冻结常量不同时校验跟部署值走。
+
+    回归背景：safety_review 曾硬编码冻结常量校验 manifest，部署改成
+    memoir-test/images/ 后 13 张图上传成功、校验恒败，整批回退 3 张基础卡
+    发布（前端只见默认三张）。校验前缀必须与媒体服务上传前缀同源。
+    """
+    deployed_prefix = "memoir-test/images/"
+    url = f"https://bucket.oss-cn-hangzhou.aliyuncs.com/{deployed_prefix}0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+    entry = {
+        "media_id": "media-1", "kind": "image",
+        "object_key": f"{deployed_prefix}0f14d0ab-9605-4a62-a9e4-5ed26688389b.png",
+        "url": url, "mime": "image/png", "scene_id": "scene-2",
+    }
+    scenes = [
+        _text_scene("scene-1"),
+        {
+            "scene_id": "scene-2", "scene_type": "image",
+            "source_refs": ["diary:diary-1"], "body": "画面描述",
+            "payload": {"image_url": url, "title_word": "那年海边"},
+        },
+        _text_scene("scene-3"),
+    ]
+    actions = MemoirNodeRunner._rule_actions(scenes)
+    # 传部署前缀：与上传侧同源，必须放行。
+    assert MemoirNodeRunner._is_safe_playback(
+        scenes, actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES,
+        image_prefix=deployed_prefix,
+    )
+    # 同一 manifest 按冻结常量校验必须拒绝：证明两口径确实分歧、
+    # 部署前缀不是"任意前缀都放行"。
+    assert not MemoirNodeRunner._is_safe_playback(
+        scenes, actions, media_tasks=[entry], scene_types=_MEDIA_SCENE_TYPES,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 交付物 1：火山视觉异步任务签名与客户端（mock transport，零真实计费调用）
 # ---------------------------------------------------------------------------

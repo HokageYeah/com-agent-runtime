@@ -107,6 +107,12 @@ def test_configure_couple_diary_env_creates_private_test_block(
         _last_value(content, "CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES")
         == '["com-agent-runtime.oss-cn-beijing.aliyuncs.com"]'
     )
+    # Runtime env 未配置 MEMOIR_MEDIA_IMAGE_PREFIX 时回退冻结默认值，
+    # 保证业务端发布校验前缀与 Runtime 上传前缀同源。
+    assert (
+        _last_value(content, "CD_MEMORY_MEDIA_OBJECT_KEY_PREFIX")
+        == "memoir/images/"
+    )
     assert (
         set(_last_value(content, "CD_DOCKER_NO_PROXY").split(","))
         == REQUIRED_NO_PROXY_HOSTS
@@ -254,3 +260,56 @@ def test_configure_couple_diary_env_allows_media_disabled_without_oss(
     assert result.returncode == 0, result.stderr
     generated = output_file.read_text(encoding="utf-8")
     assert _last_value(generated, "CD_MEMORY_MEDIA_URL_ALLOWED_SUFFIXES") == "[]"
+    # 媒体关闭只清空 Host 白名单；object_key 前缀无泄露面，仍写入冻结默认值，
+    # 避免业务端 env 残留旧前缀导致后续开启媒体时发布校验口径漂移。
+    assert (
+        _last_value(generated, "CD_MEMORY_MEDIA_OBJECT_KEY_PREFIX")
+        == "memoir/images/"
+    )
+
+
+def test_configure_couple_diary_env_passes_through_runtime_media_prefix(
+    tmp_path: Path,
+) -> None:
+    """Runtime 显式配置 MEMOIR_MEDIA_IMAGE_PREFIX（如测试环境 memoir-test/）时透传。
+
+    回归背景：业务端发布校验前缀曾与 Runtime 上传前缀分裂——Runtime 侧改为
+    memoir-test/images/ 后发布校验仍按冻结默认值整体 422。派生通道保证两端同源。
+    """
+    runtime_env = tmp_path / "runtime-test.env"
+    output_file = tmp_path / "couple-diary-test.env"
+    _write_runtime_env(runtime_env)
+    content = runtime_env.read_text(encoding="utf-8").replace(
+        "MEMOIR_MEDIA_ENABLED=true",
+        "MEMOIR_MEDIA_ENABLED=true\nMEMOIR_MEDIA_IMAGE_PREFIX=memoir-test/images/",
+    )
+    runtime_env.write_text(content, encoding="utf-8")
+
+    result = _run_configure(runtime_env, output_file)
+
+    assert result.returncode == 0, result.stderr
+    generated = output_file.read_text(encoding="utf-8")
+    assert (
+        _last_value(generated, "CD_MEMORY_MEDIA_OBJECT_KEY_PREFIX")
+        == "memoir-test/images/"
+    )
+
+
+def test_configure_couple_diary_env_rejects_media_prefix_without_trailing_slash(
+    tmp_path: Path,
+) -> None:
+    """前缀缺尾斜杠会在业务端拼出错误路径口径，必须在生成期拒绝。"""
+    runtime_env = tmp_path / "runtime-test.env"
+    output_file = tmp_path / "couple-diary-test.env"
+    _write_runtime_env(runtime_env)
+    content = runtime_env.read_text(encoding="utf-8").replace(
+        "MEMOIR_MEDIA_ENABLED=true",
+        "MEMOIR_MEDIA_ENABLED=true\nMEMOIR_MEDIA_IMAGE_PREFIX=memoir-test/images",
+    )
+    runtime_env.write_text(content, encoding="utf-8")
+
+    result = _run_configure(runtime_env, output_file)
+
+    assert result.returncode != 0
+    assert "MEMOIR_MEDIA_IMAGE_PREFIX" in result.stderr
+    assert not output_file.exists()
