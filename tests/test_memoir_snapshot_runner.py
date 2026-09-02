@@ -113,6 +113,40 @@ def test_compute_stats_available_material_types_legacy_shape():
     ]
 
 
+def test_all_five_canonical_material_types_keep_safe_digest_projection():
+    """五类真实素材都能进入脱敏摘要和 M7 循环素材集合。"""
+    runner = MemoirNodeRunner(object())
+    raw_materials = [
+        {
+            "material_type": material_type,
+            "source_ref": f"{material_type}:1",
+            "sanitized_payload": {"text_digest": f"{material_type} 的真实摘要"},
+        }
+        for material_type in (
+            "diary",
+            "completed_bet",
+            "handbook_note",
+            "matured_wish",
+            "bucket_list_completion",
+        )
+    ]
+    state = AgentState(snapshot={"materials": raw_materials})
+    run = type("Run", (), {"run_id": "r"})()
+
+    runner.run_node({"node_id": "compute_stats"}, run, state)
+    runner.run_node({"node_id": "sanitize_materials"}, run, state)
+
+    assert state.stats["available_material_types"] == [
+        "diary",
+        "completed_bet",
+        "handbook_note",
+        "matured_wish",
+        "bucket_list_completion",
+    ]
+    assert len(MemoirNodeRunner._loop_material_texts(state.sanitized_material)) == 5
+    assert len(MemoirNodeRunner._safe_material_refs(state.sanitized_material)) == 5
+
+
 def test_snapshot_envelope_is_consumed_without_copying_control_fields():
     """Runner 只消费版本化素材槽，冻结关系元数据不得进入模型素材摘要。"""
     runner = MemoirNodeRunner(object())

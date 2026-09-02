@@ -312,10 +312,12 @@ class MemoirNodeRunner:
         if node.get("node_id") == "safety_review":
             # 使用脱敏节点冻结的引用集合做 grounding；兼容独立节点单测时，
             # 仅把已在内存中的引用视为测试夹具，正式工作流一定会带 sanitized_material。
-            trusted_refs = set(self._safe_material_refs(state.sanitized_material))
+            agent_version = getattr(run, "agent_version", "")
+            trusted_refs = set(
+                self._safe_material_refs(state.sanitized_material, agent_version)
+            )
             if not isinstance(state.sanitized_material, Mapping):
                 trusted_refs = self._playback_source_refs(state.scenes)
-            agent_version = getattr(run, "agent_version", "")
             evaluation = self._playback_evaluator.evaluate(
                 state.scenes, state.actions,
                 trusted_source_refs=trusted_refs,
@@ -358,7 +360,9 @@ class MemoirNodeRunner:
             safe_refs = [ref for ref in refs if isinstance(ref, str)][:8] if isinstance(refs, list) else []
             chapter_request: dict[str, object] = {"source_refs": safe_refs}
             # 章节规划只携带高光选中 refs 对应的素材文本，省 token 且不越权。
-            chapter_materials = self._safe_material_texts(state.sanitized_material, safe_refs)
+            chapter_materials = self._safe_material_texts(
+                state.sanitized_material, safe_refs, run.agent_version,
+            )
             model_data = self._model_data(
                 run.run_id, "plan_chapters", chapter_request, run.agent_version,
                 materials=chapter_materials,
@@ -395,6 +399,7 @@ class MemoirNodeRunner:
             # 场景生成只携带章节选中 refs 对应的素材文本，省 token 且不越权。
             scene_materials = self._safe_material_texts(
                 state.sanitized_material, self._source_refs(safe_chapters),
+                run.agent_version,
             )
             model_data = self._model_data(
                 run.run_id, "generate_scenes", scene_request, run.agent_version,
@@ -459,10 +464,14 @@ class MemoirNodeRunner:
             return {"node_id": "generate_actions", "fallback": True}
         if node.get("node_id") == "extract_highlights":
             # 原始 snapshot 不得在此节点回读，高光只可消费脱敏视图中的非敏感引用。
-            refs = self._safe_material_refs(state.sanitized_material)
+            refs = self._safe_material_refs(
+                state.sanitized_material, run.agent_version,
+            )
             highlight_request: dict[str, object] = {"source_refs": refs}
             # 高光抽取携带全部非敏感素材文本（digest 通道），让模型看到真实细节。
-            highlight_materials = self._safe_material_texts(state.sanitized_material, refs)
+            highlight_materials = self._safe_material_texts(
+                state.sanitized_material, refs, run.agent_version,
+            )
             model_data = self._model_data(
                 run.run_id, "extract_highlights", highlight_request, run.agent_version,
                 materials=highlight_materials,
@@ -649,7 +658,9 @@ class MemoirNodeRunner:
                 if isinstance(state.actions, list)
                 else self._rule_actions(scenes)
             )
-            trusted_refs = set(self._safe_material_refs(state.sanitized_material))
+            trusted_refs = set(
+                self._safe_material_refs(state.sanitized_material, agent_version)
+            )
             if not isinstance(state.sanitized_material, Mapping):
                 trusted_refs = self._playback_source_refs(scenes)
             evaluation = self._playback_evaluator.evaluate(
@@ -1689,26 +1700,31 @@ class MemoirNodeRunner:
         return _MATERIAL_SELF_NICKNAME.sub("我", redacted).strip()[:limit]
 
     @staticmethod
-    def _safe_material_refs(sanitized_material: object) -> list[str]:
-        """返回脱敏材料中可供模型使用的非敏感稳定引用，最多八条。"""
+    def _safe_material_refs(
+        sanitized_material: object, agent_version: object = "",
+    ) -> list[str]:
+        """返回非敏感稳定引用；仅 1.0.5 放开旧版八条上限。"""
         if not isinstance(sanitized_material, Mapping):
             return []
         materials = sanitized_material.get("materials")
         if not isinstance(materials, list):
             return []
-        return list(dict.fromkeys(
+        refs = list(dict.fromkeys(
             item["source_ref"]
             for item in materials
             if isinstance(item, Mapping)
             and item.get("sensitive") is False
             and isinstance(item.get("source_ref"), str)
-        ))[:8]
+        ))
+        return refs if _version_at_least(agent_version, "1.0.5") else refs[:8]
 
     @staticmethod
     def _safe_material_texts(
-        sanitized_material: object, allowed_refs: list[str],
+        sanitized_material: object,
+        allowed_refs: list[str],
+        agent_version: object = "",
     ) -> list[dict[str, str]]:
-        """提取脱敏视图中带真实文本（text_digest 派生）的素材，最多八条。
+        """提取授权摘要；仅 1.0.5 放开旧版八条上限。
 
         只取 sensitive=False 且 text 非空且 source_ref 在 allowed_refs 内的条目：
         与引用白名单双保险，模型只能看到当前节点已授权引用的素材文本。
@@ -1722,8 +1738,6 @@ class MemoirNodeRunner:
         allowlist = set(allowed_refs)
         texts: list[dict[str, str]] = []
         for item in materials:
-            if len(texts) >= 8:
-                break
             if not isinstance(item, Mapping):
                 continue
             ref, text = item.get("source_ref"), item.get("text")
@@ -1735,7 +1749,7 @@ class MemoirNodeRunner:
                 and text.strip()
             ):
                 texts.append({"source_ref": ref, "text": text})
-        return texts
+        return texts if _version_at_least(agent_version, "1.0.5") else texts[:8]
 
     @staticmethod
     def _playback_source_refs(scenes: object) -> set[str]:

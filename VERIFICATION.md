@@ -226,7 +226,7 @@ docker volume ls --filter name=agent-runtime-redis-harness
 
 ```env
 MODEL_ROUTES_JSON=[{"route_id":"memoir-private-v1","provider":"trusted_gateway","model":"approved-structured-model","endpoint":"https://model-gateway.example.com/v1","rate_limit_key":"memoir-private","max_concurrency":4,"rpm_limit":60,"tpm_limit":120000,"timeout_seconds":30,"permit_ttl_seconds":35,"settle_margin_seconds":5,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":32768,"max_output_tokens":4096,"enabled":true,"allowed_tenant_ids":["couple-diary"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]
-MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_chapters":"memoir-private-v1","generate_scenes":"memoir-private-v1","generate_scene_batch":"memoir-private-v1"}
+MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"memoir-private-v1","plan_chapters":"memoir-private-v1","generate_scenes":"memoir-private-v1","generate_scene_batch":"memoir-private-v1","repair_coverage_gaps":"memoir-private-v1"}
 MODEL_PROVIDER_API_KEYS_JSON={"memoir-private-v1":"<由 secret manager 注入的 Provider Key>"}
 ```
 
@@ -376,7 +376,7 @@ poetry run pytest -q \
 poetry run alembic heads
 ```
 
-预期：全部测试通过，Alembic 只显示 `20260820_0900 (head)`。旧 `enhancement_status=not_started` 被迁为 `disabled`，未知状态和同一 `archive_id + generation_epoch` 的第二个 RunRef 被数据库拒绝；Archive 固化 partner 昵称/头像资产引用与 bound/unbound 时间，Snapshot 只保存加密的版本化白名单 envelope。发布完整作品只推进 `content_status=succeeded + published_revision`，不得改写 enhancement。`memory.enqueue_tts` 保持 `enabled=false`。对 1.0.0-1.0.2 或未装配媒体服务的运行，`enqueue_media_tasks` 不触达媒体 Provider；1.0.3/1.0.4 的具体降级与媒体契约由 `tests/test_memoir_media_channel.py` 单独验证。
+预期：全部测试通过，Alembic 只显示 `20260820_0900 (head)`。旧 `enhancement_status=not_started` 被迁为 `disabled`，未知状态和同一 `archive_id + generation_epoch` 的第二个 RunRef 被数据库拒绝；Archive 固化 partner 昵称/头像资产引用与 bound/unbound 时间，Snapshot 只保存加密的版本化白名单 envelope。发布完整作品只推进 `content_status=succeeded + published_revision`，不得改写 enhancement。`memory.enqueue_tts` 保持 `enabled=false`。对 1.0.0-1.0.2 或未装配媒体服务的运行，`enqueue_media_tasks` 不触达媒体 Provider；1.0.3-1.0.5 的具体降级与媒体契约由 `tests/test_memoir_media_channel.py` 单独验证（1.0.5：全部合法 Scene 尝试媒体，失败/关闭/预算耗尽降级同 Scene 文本卡，媒体节点位于安全审核前）。
 
 Snapshot 版本兼容与旧 revision 迟到媒体可单独快速回归：
 
@@ -386,6 +386,20 @@ poetry run pytest -q tests/test_memory_archive_snapshot.py \
 ```
 
 预期：`4 passed`。旧的无版本 `diaries/bets` 密文负载只在读取结果中单向投影为 `1.0.0` envelope，数据库中的密文和 digest 不发生 writeback；未知未来 `schema_major` 在读取和发布共用授权入口返回固定 `MEMORY_SNAPSHOT_SCHEMA_UNSUPPORTED`。旧 document 的迟到媒体即使落库，也不会被当前 `published_revision` 的播放器查询拼入。
+
+M7 `memoir_agent@1.0.5` 聚焦回归（2026-09-01 收口轮）：
+
+```bash
+poetry run pytest -q \
+  tests/test_memoir_media_channel.py \
+  tests/test_memoir_snapshot_runner.py \
+  tests/test_runtime_agent_package_loader.py \
+  tests/runtime_test_memoir_105_full_graph.py \
+  tests/runtime_test_memoir_coverage_repair.py
+poetry run ruff check .
+```
+
+预期：测试全部通过（收口轮实测 `132 passed`，含评审补齐的 `test_media_service_budget_exhausted_degrades_before_generation`）、Ruff 全绿。覆盖：第 9/17 条及更多合法安全素材引用不再被旧版八条上限截断（仅 `1.0.5` 放开；`1.0.0`–`1.0.4` 保持八条上限且历史包字节与 digest 冻结）；五类素材（`diary/completed_bet/handbook_note/matured_wish/bucket_list_completion`）进入脱敏摘要与生成循环；`1.0.5` workflow 顺序固定 `generate_actions → enqueue_media_tasks → safety_review → publish_document`，媒体节点 `optional=False` 且位于最终安全审核之前，媒体关闭、单图失败或预算耗尽只降级为同 Scene 文本卡（预算耗尽用例锚定 provider 零调用与 `MEDIA_NODE_BUDGET_EXCEEDED` 观测码），不阻塞安全审核与发布。
 
 迁移前先在隔离数据库备份并检查旧状态分布：
 

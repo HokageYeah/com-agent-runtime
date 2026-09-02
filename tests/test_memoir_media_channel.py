@@ -349,6 +349,36 @@ def test_media_service_all_failures_publish_text_only() -> None:
     assert [scene["scene_type"] for scene in updated] == ["summary", "summary", "summary"]
 
 
+def test_media_service_budget_exhausted_degrades_before_generation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """预算耗尽：deadline 到点后不再调用生成，候选场景统一降级同 Scene 文本卡。
+
+    M7 1.0.5 契约锚点：媒体预算不足只能降级文字卡——provider 零调用、
+    零媒体任务；image 场景无 payload 必须降 summary，其余保留原类型，
+    降级场景剥离顶层 title_word，且打出 MEDIA_NODE_BUDGET_EXCEEDED 观测码。
+    """
+    provider = MockCVClient(text_image=PNG_BYTES)
+    scenes = [
+        {"scene_id": "scene-1", "scene_type": "cover", "source_refs": ["diary:diary-1"],
+         "body": "我们的故事。", "title_word": "那年海边"},
+        _text_scene("scene-2"),
+        _image_scene("scene-3", "雨天我们共撑一把伞，踩着水花回家。", "雨中同行"),
+    ]
+    # node_budget_seconds=0：deadline 即刻到点，第一个候选场景就命中预算门。
+    service = MemoirMediaService(provider, FakeUploader(), _config(node_budget_seconds=0.0))
+    with caplog.at_level(logging.WARNING):
+        manifest, updated = service.generate(
+            _run("1.0.5"), scenes, None, illustrate_all_scenes=True,
+        )
+    assert manifest == []
+    # 预算门位于生成调用之前：provider 不应被触达。
+    assert provider.text_prompts == []
+    assert [scene["scene_type"] for scene in updated] == ["cover", "summary", "summary"]
+    assert all("payload" not in scene and "title_word" not in scene for scene in updated)
+    assert "MEDIA_NODE_BUDGET_EXCEEDED" in caplog.text
+
+
 def test_media_service_ignores_legacy_image_count_policy() -> None:
     """场景 4：图片张数不设配额，历史 model_policy.max_media_images 一并失效。
 
@@ -554,6 +584,54 @@ def test_media_node_rejects_unsafe_body_before_provider_egress() -> None:
     assert "media_egress_safety_fallback" in state.fallback_flags
 
 
+@pytest.mark.parametrize("reference_count", [9, 17])
+def test_safety_review_accepts_all_safe_material_references(
+    reference_count: int,
+) -> None:
+    """1.0.5 不因旧的八条裁剪误杀第 9 条及更后面的合法引用。"""
+    refs = [f"diary:d{index}" for index in range(reference_count)]
+    scenes = [
+        {
+            "scene_id": f"scene-{index}",
+            "scene_type": scene_type,
+            "source_refs": refs,
+            "body": "一段安全的场景正文。",
+        }
+        for index, scene_type in enumerate(("cover", "diary_highlight", "summary"), 1)
+    ]
+    state = AgentState(
+        scenes=scenes,
+        actions=MemoirNodeRunner._rule_actions(scenes),
+        sanitized_material={
+            "materials": [
+                {
+                    "source_ref": ref,
+                    "type": "diary",
+                    "sensitive": False,
+                    "text": "安全摘要",
+                }
+                for ref in refs
+            ]
+        },
+    )
+
+    assert len(MemoirNodeRunner._safe_material_refs(
+        state.sanitized_material, "1.0.4",
+    )) == min(reference_count, 8)
+    assert len(MemoirNodeRunner._safe_material_refs(
+        state.sanitized_material, "1.0.5",
+    )) == reference_count
+
+    result = MemoirNodeRunner(object()).run_node(
+        {"node_id": "safety_review"},
+        type("Run", (), {"run_id": "r", "agent_version": "1.0.5"})(),
+        state,
+    )
+
+    assert result == {"node_id": "safety_review", "safe": True}
+    assert len(state.playback_document["scenes"][0]["source_refs"]) == reference_count
+
+
 def test_media_node_safety_publishes_all_image_manifests() -> None:
     """多图经过动作生成和安全审核后，完整进入 PlaybackDocument。"""
     provider = MockCVClient(text_image=PNG_BYTES)
@@ -585,6 +663,41 @@ def test_media_node_safety_publishes_all_image_manifests() -> None:
     assert [scene["payload"]["image_url"] for scene in document["scenes"][1:3]] == [
         entry["url"] for entry in document["media_manifest"]
     ]
+
+
+def test_memoir_105_media_failure_keeps_complete_text_card_document() -> None:
+    """1.0.5 媒体失败只降级文字卡，最终结构仍可安全发布。"""
+    service = MemoirMediaService(
+        MockCVClient(text_image=b"broken-image"), FakeUploader(), _config(),
+    )
+    runner = MemoirNodeRunner(object(), media_service=service)
+    scenes = _per_scene_document()
+    state = AgentState(
+        scenes=scenes,
+        actions=MemoirNodeRunner._rule_actions(scenes),
+        sanitized_material={"materials": [{
+            "source_ref": "diary:diary-1",
+            "type": "diary",
+            "sensitive": False,
+            "text": "安全摘要",
+        }]},
+    )
+
+    result = runner.run_node(
+        {"node_id": "enqueue_media_tasks"}, _run("1.0.5"), state,
+    )
+    safety = runner.run_node(
+        {"node_id": "safety_review"}, _run("1.0.5"), state,
+    )
+
+    assert result == {"node_id": "enqueue_media_tasks", "skipped": False, "delivered": 0}
+    assert safety == {"node_id": "safety_review", "safe": True}
+    assert state.playback_document is not None
+    assert len(state.playback_document["scenes"]) == 3
+    assert len(state.playback_document["actions"]) == 3
+    assert state.playback_document["media_manifest"] == []
+    assert all("payload" not in scene for scene in state.playback_document["scenes"])
+    assert "media_degraded" in state.fallback_flags
 
 
 def test_safety_review_falls_back_when_image_scene_lacks_manifest_entry() -> None:

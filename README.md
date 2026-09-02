@@ -74,7 +74,7 @@ com-agent-runtime/
 │   │   └── memoir_agent/
 │   │       ├── runner.py                     # MemoirAgent 节点执行与版本门控
 │   │       ├── model_gateway.py              # Memoir 节点到公共 ModelGateway 的适配
-│   │       ├── 1.0.0/ ... 1.0.4/             # 不可变的版本化 AgentPackage
+│   │       ├── 1.0.0/ ... 1.0.5/             # 不可变的版本化 AgentPackage
 │   │       │   ├── agent.yaml                # 包身份、版本、策略、Prompt 清单
 │   │       │   ├── workflow.graph.py         # 受信任静态工作流声明
 │   │       │   ├── input.schema.json         # Run 输入 JSON Schema
@@ -372,8 +372,8 @@ poetry run alembic heads
 chmod 600 .env.development.local
 ./agent-runtime.sh doctor development
 ./agent-runtime.sh prepare development
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4 --dry-run
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.5 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.5
 ./agent-runtime.sh start development
 ```
 
@@ -407,8 +407,8 @@ development 流控状态混用，在 `Redis URL` 提示处请明确输入
 chmod 600 .env.test.local
 ./agent-runtime.sh doctor test
 ./agent-runtime.sh prepare test
-./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.4 --dry-run
-./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.5 --dry-run
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.5
 ./agent-runtime.sh start test
 ```
 
@@ -436,8 +436,8 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
 ```bash
 ./agent-runtime.sh doctor production
 ./agent-runtime.sh prepare production
-./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.4 --dry-run
-./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.5 --dry-run
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.5
 ./agent-runtime.sh start production
 ```
 
@@ -620,16 +620,16 @@ AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不
 - `1.0.0–1.0.2`：历史文本工作流版本。
 - `1.0.3`：媒体节点进入发布前链路，只为 `image` 场景生成配图。
 - `1.0.4`：已部署磁盘包；至少生成 3 个场景，场景数和正文长度不设上限。媒体开启时仅用场景正文逐场景尝试文生图，不读取用户照片；预算耗尽、媒体关闭或单图失败时降级为文字卡。
-- `1.0.5`：2026-09-01 已在本仓工作区实现并全量测试通过（通用 `bounded_loop` + 五类素材动态生成 + 网关注册 `generate_scene_batch` 模型节点），尚未提交、未部署、未注册到任何目标环境。
+- `1.0.5`：M7 目标版本，已在本仓实现（通用 `bounded_loop` + 五类素材动态生成 + 网关注册 `generate_scene_batch`/`repair_coverage_gaps` 模型节点；收口轮放开旧版八条素材引用上限，workflow 固定 `generate_actions → enqueue_media_tasks → safety_review → publish_document`，媒体节点位于安全审核前且失败降级同 Scene 文本卡），尚未部署、未注册到任何目标环境。
 
 `memoir_agent@1.0.5` 与通用 `bounded_loop` 的设计记录在
-[`头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。**2026-09-01 更新：该能力已实现并通过全量测试（958 passed/16 skipped，含最终评审修复轮补齐的 `repair_coverage_gaps` 节点实现与 1.0.5 全图集成测试），但改动停留在工作区；线上部署与命令仍以 `1.0.4` 为准。注册 `1.0.5` 前须同步服务器 env（`AGENT_PACKAGE_VERSION` 升 1.0.5、`MEMOIR_MODEL_NODE_ROUTES_JSON` 增补 `generate_scene_batch` 与 `repair_coverage_gaps` 键），否则 register 仍会注册 `1.0.4`。**
+[`头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。**2026-09-01 更新（含最小收口轮）：该能力已实现——实施轮全量 958 passed/16 skipped（含最终评审修复轮补齐的 `repair_coverage_gaps` 节点实现与 1.0.5 全图集成测试），收口轮聚焦五件套 132 passed（含评审补齐的媒体预算耗尽降级用例；命令与预期见 [VERIFICATION.md](VERIFICATION.md)「M7 `memoir_agent@1.0.5` 聚焦回归」）。改动停留在工作区，`1.0.5` 未部署、未注册到任何目标环境；本 README 与 CI 的注册/校验命令已按 M7 目标切到 `1.0.5`，线上当前实际运行的仍是 `1.0.4`，直至按部署流程完成注册。注册 `1.0.5` 前须同步服务器 env（`AGENT_PACKAGE_VERSION` 升 1.0.5、`MEMOIR_MODEL_NODE_ROUTES_JSON` 增补 `generate_scene_batch` 与 `repair_coverage_gaps` 键），否则 register 仍会注册 `1.0.4`。**
 
-磁盘上存在 `1.0.4` 不代表目标环境已经注册。使用下面的命令确认并注册：
+磁盘上存在 `1.0.5` 不代表目标环境已经注册。线上当前运行 `1.0.4`；注册 `1.0.5` 前先完成上述服务器 env 前置，再使用下面的命令确认并注册：
 
 ```bash
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4 --dry-run
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.4
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.5 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.5
 ```
 
 ## 开发与验证

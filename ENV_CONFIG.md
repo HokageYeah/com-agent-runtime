@@ -347,7 +347,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 ### 9.4 回忆录媒体生成开关（M6，默认全关）
 
-以下键已进 `app/core/config.py`；`MEMOIR_MEDIA_ENABLED=False` 时媒体服务不装配。1.0.3 的 `image` 场景会降级为文本卡，1.0.4 的全部场景会保留为纯文字卡并剥离仅供配图使用的 `title_word`；1.0.0-1.0.2 行为不变。
+以下键已进 `app/core/config.py`；`MEMOIR_MEDIA_ENABLED=False` 时媒体服务不装配。1.0.3 的 `image` 场景会降级为文本卡，1.0.4 的全部场景会保留为纯文字卡并剥离仅供配图使用的 `title_word`；1.0.0-1.0.2 行为不变。1.0.5 的全部合法 Scene 都会尝试媒体，媒体节点位于最终安全审核之前；媒体关闭、单图失败或预算耗尽时只降级为同 Scene 文本卡，不阻塞安全审核与发布。
 
 | 字段 | 默认 | 作用 |
 |---|---|---|

@@ -24,6 +24,14 @@ FROZEN_LOOP_POLICY = {
     "body_node_ids": ["generate_scene_batch"],
 }
 
+FROZEN_HISTORICAL_DIGESTS = {
+    "1.0.0": "sha256:a6e2f53e223658fb648026335373d23f548232e5dd2c4c67a2c774df6e67833e",
+    "1.0.1": "sha256:e92ae977220e02f3956d821b0c5ff6adc2320359970d9989863324ab11349c06",
+    "1.0.2": "sha256:bd20469b0d205242b2639aaa039858495e42dd704036ec8be8b82bfb8ac2f379",
+    "1.0.3": "sha256:c9b3936c9ca11e3e388a8cdba3f10e04a43bdaa998775c47da512c378c379f9c",
+    "1.0.4": "sha256:c99d171acf1def1dc1eecbebe62e24643904e849d4d0544248ee3fcea48908bb",
+}
+
 
 def test_loads_frozen_memoir_agent_package() -> None:
     package_root = Path(__file__).parents[1] / "app" / "agents"
@@ -209,6 +217,23 @@ def test_bounded_loop_schema_rejects_out_of_contract_policy(payload: dict) -> No
         WorkflowNodeDefinition.model_validate(payload)
 
 
+def test_memoir_agent_1_0_5_orders_media_before_safety_and_publish() -> None:
+    """1.0.5 的媒体降级必须在最终安全审核和发布前完成。"""
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    package = AgentPackageService(package_root).load("memoir_agent", "1.0.5")
+
+    assert [node.node_id for node in package.workflow_nodes][-4:] == [
+        "generate_actions",
+        "enqueue_media_tasks",
+        "safety_review",
+        "publish_document",
+    ]
+    media = next(
+        node for node in package.workflow_nodes if node.node_id == "enqueue_media_tasks"
+    )
+    assert media.optional is False
+
+
 def test_loads_memoir_agent_1_0_5_with_frozen_bounded_loop_dag() -> None:
     """1.0.5 是独立不可变包：bounded_loop DAG + 冻结策略 + digest 独立。
 
@@ -240,3 +265,12 @@ def test_loads_memoir_agent_1_0_5_with_frozen_bounded_loop_dag() -> None:
     for version in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"):
         assert package.package_digest != service.load("memoir_agent", version).package_digest
     assert package.contract_version == "1.0.0"
+
+
+def test_historical_memoir_package_bytes_keep_frozen_digests() -> None:
+    """Loader 规则变化不得改写 1.0.0–1.0.4 的任何受管字节。"""
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    for version, digest in FROZEN_HISTORICAL_DIGESTS.items():
+        assert service.load("memoir_agent", version).package_digest == digest
