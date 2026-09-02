@@ -1,6 +1,6 @@
 # AgentRuntime 后端 Implementation Plan
 
-> **2026-09-01 实施轮完成（工作区未提交）：** 本计划的通用 `bounded_loop` 节点与 `memoir_agent@1.0.5` 包已在本仓工作区实现并全量测试通过（958 passed/16 skipped，含网关五节点注册——`generate_scene_batch` 与最终评审修复轮补齐的 `repair_coverage_gaps`——及 1.0.5 全图集成测试与 fixture pin 4 处 `1.0.4`→`1.0.5`）。改动未提交、未部署，目标环境注册仍为 `1.0.4`。下方 2026-08-31 横幅为冻结时点的历史记录。
+> **2026-09-01 实施轮完成（已提交至 memoir-optimize 分支）：** 本计划的通用 `bounded_loop` 节点与 `memoir_agent@1.0.5` 包已在本仓实现并全量测试通过（958 passed/16 skipped，含网关五节点注册——`generate_scene_batch` 与最终评审修复轮补齐的 `repair_coverage_gaps`——及 1.0.5 全图集成测试与 fixture pin 4 处 `1.0.4`→`1.0.5`）。改动已提交至 memoir-optimize 分支（未合并主干），未部署，目标环境注册仍为 `1.0.4`。下方 2026-08-31 横幅为冻结时点的历史记录。
 
 > **2026-08-31 未来设计，尚未实现：** 本计划新增通用 `bounded_loop` 静态 DAG 节点与 `memoir_agent@1.0.5` 动态回忆录生成任务。它们不改变当前已部署 `memoir_agent@1.0.4` 的事实，也不得据本文把代码、fixture 或验证状态标记为已完成。完整设计见 [`../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](../plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
 
@@ -1005,7 +1005,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 实现场景长度和空作品 completeness evaluator。
 - [✅] 校验 MemoirAgent MVP 正常场景数 3～8、契约硬上限 16 和单卡主体文案 80 字上限；越界进入裁剪、fallback 或拒绝发布。
 - [✅] **版本校准：** 上一项只描述 `memoir_agent@1.0.0`～`1.0.3` 的历史规则；`1.0.4` 已改为场景数仅保留 `>=3`、`body` 无字数上限，也不存在“超过 16 场景 fallback”的当前规则。
-- [ ] 为 AgentPackage 内部 schema 增加通用 `bounded_loop.loop_policy`；首版只允许 `budget_profile=inherit_run_limits_v1`，按 Run 剩余 `max_model_calls/max_tokens/max_model_cost/max_run_seconds` 与 ContextManager 公式导出有限上限，必要预算缺失/耗尽即 fail closed，Package/业务请求不得自选数值。evaluator/policy 在每轮前后校验，循环结果只允许 `continue|complete|partial|failed`，不得把循环体扩展为动态工具规划器。
+- [✅] 为 AgentPackage 内部 schema 增加通用 `bounded_loop.loop_policy`；首版只允许 `budget_profile=inherit_run_limits_v1`，按 Run 剩余 `max_model_calls/max_tokens/max_model_cost/max_run_seconds` 与 ContextManager 公式导出有限上限，必要预算缺失/耗尽即 fail closed，Package/业务请求不得自选数值。evaluator/policy 在每轮前后校验，循环结果只允许 `continue|complete|partial|failed`，不得把循环体扩展为动态工具规划器。（`LoopPolicySchema` 见 `app/schemas/agent_package.py`，loader fail-closed 校验见下方 Task 14 区勾选项）
 - [✅] 校验 Scene type/safety level 和完整 Action enum、order/duration/reference；当前 `focus_image/play_tts` 在 capability 关闭时进入安全 fallback。
 - [✅] 实现敏感字段和情绪安全 guardrails。
 - [✅] 实现 step/tool/model/token/cost/time/retry 硬限制；`max_model_calls/max_estimated_cost` 按实际或可能已发出的物理 attempt 统计，aborted_before_send 不计，已观察 usage 使用实际估算成本，running/outcome_unknown 使用预留成本，同一行不重复相加。
@@ -1039,7 +1039,7 @@ unique(client_id, idempotency_key, scope)
 - [✅] 测试模型节点失败后进入模板场景，原子发布失败后稳定幂等重试，purge 与迟到模型返回并发时私密 payload 不复活。
 - [✅] 修正 `WorkflowExecutor` checkpoint 输入：仅投影路由进度、fallback 标记、副作用稳定逻辑键/安全结果引用与 digest，禁止 Snapshot/tool payload、`sanitized_material`、prompt/模型中间文本、Scene 和 PlaybackDocument 进入密文。**（2026-08-11 第四次最小收口 ✅：`executor.py` `_SAFE_CHECKPOINT_KEYS` 白名单（`fallback_flags/completed_node_ids/completed_steps/resume_from_node_id`）+ 非白名单键 `CHECKPOINT_STATE_INVALID` 拒绝；`test_executor_checkpoint_decrypted_blob_excludes_all_five_content_sentinels_and_playback` 五类正文哨兵 + legacy 拒绝 purge 测试为证）**
 - [✅] 修正 resume：按当前 privacy/authorization 重取 Snapshot 并重算无副作用内容节点，已发布等副作用只按稳定键 query-after-commit；为旧完整状态 checkpoint 增加版本拒绝、撤销/purge 与防复活回归。**（2026-08-11 第三次最终收口 ✅：= P1 query-after-commit digest 修复 + P2 safe_to_rerun legacy 识别 + P3 authorization/privacy 防复活 + legacy purge 跨 Session finish() commit 持久化 + 日志隐私 + fail-closed；`runtime_test_workflow_executor.py` 28 passed 为证）**
-- [ ] `bounded_loop` 中途不写 checkpoint；每轮只写无内容 audit 计数、`continue|complete|partial|failed` 和原因码，禁止保存游标、素材正文、prompt、模型原文、已生成 Scene 正文或 source refs。只有整个循环节点完成边界写安全路由 checkpoint；节点中途 crash/resume 必须重取 Snapshot 并从循环节点起点确定性全量重算，发布副作用继续采用稳定键 query-after-commit。
+- [✅] `bounded_loop` 中途不写 checkpoint；每轮只写无内容 audit 计数、`continue|complete|partial|failed` 和原因码，禁止保存游标、素材正文、prompt、模型原文、已生成 Scene 正文或 source refs。只有整个循环节点完成边界写安全路由 checkpoint；节点中途 crash/resume 必须重取 Snapshot 并从循环节点起点确定性全量重算，发布副作用继续采用稳定键 query-after-commit。（已实现：`tests/runtime_test_bounded_loop_executor.py` 13 测试通过，同项勾选见下方 Task 14 区）
 
 ### Task 11: Callback Dispatcher 与 Public Trace
 

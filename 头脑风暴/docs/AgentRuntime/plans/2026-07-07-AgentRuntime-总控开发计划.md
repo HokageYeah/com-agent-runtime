@@ -3,8 +3,9 @@
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 已把 CREATE USER 密码从 mysql argv 移至 stdin；离线 bootstrap/guard `28 passed` 证明密码不进入 fake mysql argv、调用日志或 stdout/stderr，且失败补偿未回退。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，隔离 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint、conflicting fingerprint 三项，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
 > **2026-09-01 当前实现校准：** 公共 `bounded_loop` 静态 DAG 节点与
-> `memoir_agent@1.0.5` 五类动态生成已在当前工作区实现，并有自动化测试证据；
-> 1.0.5 尚未提交、注册或部署，生产仍运行 1.0.4。不得把生产注册、部署、切流或
+> `memoir_agent@1.0.5` 五类动态生成已在本仓实现，并有自动化测试证据；
+> 1.0.5 已提交至 memoir-optimize 分支（未合并主干），尚未注册或部署，生产仍运行
+> 1.0.4。不得把生产注册、部署、切流或
 > staging/生产真实验证表述为已完成。设计入口：
 > [通用受控循环与 Memoir 动态生成设计说明](./2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。
 
@@ -609,13 +610,16 @@ Runtime 侧：
 - [✅] 共享流量控制 Redis 在 preflight/acquire 异常时统一返回 `capability_disabled(MODEL_TRAFFIC_UNAVAILABLE)`，不触网、不保留 usage/permit，并由节点走显式模板 fallback。
 - [✅] AgentModelUsage、日志、public trace、callback、checkpoint、artifact 与审计仅输出或持久化受控 ID、状态、错误码、计数、预算与版本摘要；完整 prompt、模型原文/隐藏推理、工具 payload、签名 URL、checkpoint 正文和密钥一律拒绝、投影剥离或在 privacy purge 中清除。
 - [✅] RuntimeTrafficEvent 将 permit 拒绝、Retry-After、熔断开闭、Redis fail-closed 与提示/语义拒绝原子聚合到唯一分钟窗口；阈值安全告警只在首次跨越时写入无内容审计。
-- [ ] 实现 `bounded_loop` Runner：静态 DAG 内按冻结输入顺序/policy 有限循环，
+- [✅] 实现 `bounded_loop` Runner：静态 DAG 内按冻结输入顺序/policy 有限循环，
   每轮与每次模型发送前复核全局/节点预算、deadline、取消、Package、privacy/
   authorization、lease/fencing；物理模型调用逐次计量，不能借单一 Step 绕过治理。
-- [ ] 循环中途不写 Checkpoint；每轮审计只保存 iteration、计数、usage id、耗时、
+  （已实现：`app/runtime/bounded_loop.py` + executor 接入，
+  `tests/runtime_test_bounded_loop_executor.py` 13 测试通过）
+- [✅] 循环中途不写 Checkpoint；每轮审计只保存 iteration、计数、usage id、耗时、
   `continue|complete|partial|failed` 和 reason code，不保存 source ref、摘要、prompt、
   候选、Scene 或播放文档。仅在整个循环节点完成边界写安全路由 Checkpoint；节点中途
   crash/resume 从同一 Snapshot、循环节点起点全量重算，发布仍 query-after-commit。
+  （后端计划 Task 14 区已勾选同项，测试证据见上）
 
 **Checkpoint:** 模型节点输出可控、可评价、可降级，成本可记录。
 
@@ -919,7 +923,7 @@ Runtime 侧：
 | snapshot 为旧版本或未知未来 major | 旧版本由服务层单向迁移；未知未来 major 拒绝旧服务写回覆盖 |
 | `memoir_agent@1.0.0`～`1.0.3` 场景数或单卡长度越界 | 按冻结合同回退到 3～8 张且单卡不超过 80 字 |
 | `memoir_agent@1.0.4` 多场景或长正文 | 只校验至少 3 Scene、结构、引用与安全内容，不因超过 8/16 Scene 或 80 字整批回退 |
-| `memoir_agent@1.0.5` 循环预算耗尽（待实现） | 类型覆盖完整则循环结果为 partial 并原子发布；缺类仅允许一次受同一 ModelGateway/预算/guardrail 治理、携带安全 digest 与真实 source_ref 的 repair；无许可/预算或仍缺失则 failed，不以 deterministic/无来源卡冒充覆盖 |
+| `memoir_agent@1.0.5` 循环预算耗尽 | 类型覆盖完整则循环结果为 partial 并原子发布；缺类仅允许一次受同一 ModelGateway/预算/guardrail 治理、携带安全 digest 与真实 source_ref 的 repair；无许可/预算或仍缺失则 failed，不以 deterministic/无来源卡冒充覆盖 |
 | 小程序页面进入后台 | 停止状态轮询、Action 计时和音频；回到前台按当前状态恢复 |
 | `actions` 为空或设备进入低性能模式 | 默认轮播 scenes 或展示静态卡，不出现空白页和并发计时器 |
 | `scenes` 为空 | 展示 baseline 封面与总结空态，不执行 Action |
