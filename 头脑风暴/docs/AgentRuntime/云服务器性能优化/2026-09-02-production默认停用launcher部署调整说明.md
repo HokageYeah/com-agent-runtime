@@ -182,9 +182,16 @@ Runtime test 四个长期 workload 与四个 API 探针全部通过
 先读取并遵守：
 - `AGENTS.md`
 - `.codex/rules/AI通用编码与协作规范.mdc`
+- `.codex/skills/agent-runtime-session/SKILL.md`
 - `.codex/skills/memoir-runtime-integration/SKILL.md`
 - `头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-09-01-Runtime-launcher-CPU优化方案.md`
 - `头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-09-02-production默认停用launcher部署调整说明.md`
+
+按阶段使用当前环境可用的实际技能，不伪造命令：
+1. `adaptive-workflow`：确认这是局部、可逆的部署调整。
+2. `agent-runtime-session`：装载 Runtime 部署和安全边界。
+3. `memoir-runtime-integration`：确认停用的只是 legacy launcher，不是 Runtime Worker。
+4. `code-review`：所有 Agent 交付后、commit 前做最终只读审查。
 
 目标：
 - production Docker/GitHub Actions 默认不启动 legacy `launcher`。
@@ -193,7 +200,16 @@ Runtime test 四个长期 workload 与四个 API 探针全部通过
 - development、本地 supervisor、PostgreSQL harness、Redis harness 保持现状。
 - 只做完成目标所需的最少改动，不重构 launcher，不增加新调度系统。
 
-必须先执行两个仓库的 `git status --short`。工作区可能已有用户改动；不得 reset、checkout、覆盖、格式化或提交与本任务无关的文件。
+必须先执行 Runtime 仓库的 `git status --short`。工作区可能已有用户改动；不得 reset、checkout、覆盖、格式化或提交与本任务无关的文件。
+
+必须使用多 Agent 并明确文件所有权。主 Agent 先检查工作区，再并行分配下列三个任务：
+
+- Agent A（Compose 所有者）：只负责 `docker-compose.production.yml`，并对 `docker-compose.yml`、`docker-compose.test.yml`、PostgreSQL/Redis harness 做只读影响检查。不修改 GitHub Actions、测试和文档。
+- Agent B（CI/合同测试所有者）：只负责 `.github/workflows/com-agent-runtime.yml` 和 `tests/test_docker_deployment_contract.py`，补充 production/test/profile 服务集合合同与旧 launcher 容器清理验证。不修改 Compose 和有效文档。
+- Agent C（文档与复核所有者）：只负责 `README.md`、`ENV_CONFIG.md`、`VERIFICATION.md`、`docker/backend/DOCKER_DEPLOY.md` 的现行部署说明；完成后对 Agent A/B 的 diff 做只读复核，报告是否超出本方案，不直接改写 A/B 所有文件。
+- 主 Agent：负责维护任务依赖、向各 Agent 通知其他人也在同一工作区工作、检查交叉 diff、处理整合问题、执行完整验证和创建唯一 commit。不得覆盖用户或其他 Agent 的改动。
+
+所有子 Agent 都必须知道自己不是唯一开发者：不 reset、不 checkout、不回退他人改动、不提交 Git。发现所有权冲突时立即停止并交由主 Agent 处理。主 Agent 必须等待三个 Agent 全部返回后再进行最终验证，不得因为其中一个先完成就提前提交。
 
 具体修改：
 1. `docker-compose.production.yml`
@@ -232,8 +248,9 @@ Runtime test 四个长期 workload 与四个 API 探针全部通过
 Compose 校验只使用仓库示例/占位配置，不读取或输出真实生产密钥。若本机 Docker 不可用，明确写出未执行原因，不得伪造通过结果。
 
 验证通过后：
+- 主 Agent 先汇总 Agent A/B/C 的实际改动、测试证据和复核结论，确认文件所有权没有交叉。
 - 检查 `git diff`，只 stage 本任务文件以及本次部署调整说明文档。
 - 创建 commit，建议消息：`perf(deploy): disable legacy launcher in production`
 - 不 push、不创建 tag、不触发真实部署。
-- 最终列出 commit hash、改动文件、实际测试结果、未执行验证和生产发布/回滚命令。
+- 最终列出多 Agent 所有权与交付摘要、commit hash、改动文件、实际测试结果、未执行验证和生产发布/回滚命令。
 ```
