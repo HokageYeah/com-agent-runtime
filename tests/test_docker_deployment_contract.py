@@ -39,6 +39,18 @@ def test_runtime_compose_requires_environment_isolation_and_private_integration_
     }
 
 
+def test_runtime_compose_rotates_container_logs() -> None:
+    """所有 Runtime 容器使用有限大小的 Docker 日志轮转，禁止无限增长。"""
+
+    services = _compose("docker-compose.yml")["services"]
+    expected_logging = {
+        "driver": "json-file",
+        "options": {"max-size": "20m", "max-file": "5", "compress": "true"},
+    }
+    for service_name in ("prepare", "register", "api", "launcher", "worker", "reconciler"):
+        assert services[service_name]["logging"] == expected_logging
+
+
 def test_runtime_overlays_cover_register_service() -> None:
     test_services = _compose("docker-compose.test.yml")["services"]
     production_services = _compose("docker-compose.production.yml")["services"]

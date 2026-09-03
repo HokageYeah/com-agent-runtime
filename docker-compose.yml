@@ -24,6 +24,14 @@ x-runtime-hardening: &runtime-hardening
   cap_drop:
     - ALL
   init: true
+  # 生产日志由 Docker 自动轮转，避免无限增长的 json-file 挤满宿主机磁盘。
+  # 不直接截断 Docker 管理的日志文件，保留受控的最近诊断窗口。
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+      compress: "true"
 
 services:
   # 一次性迁移 job：留在默认服务集（不挂 profile），让任何 up 都必须先跑迁移。
