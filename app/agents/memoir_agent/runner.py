@@ -975,9 +975,12 @@ class MemoirNodeRunner:
            min(route context_token_budget, budget.remaining_tokens) 且至多 8 条；
         - 单条超限拒绝不截断：单条素材自身超限即整条剔除（安全计数），绝不
            等比压缩或截断 digest；剔除后本批为空则该轮不调模型直接 continue
-           （游标已推进，不会死循环）；
+           （游标确定性推进，不会死循环）；
         - 解析失败/结构非法：抛受控原因码（executor 按 on_iteration_error=
            continue 跳过该轮继续）；正文与模型原始输出不进异常消息与日志；
+        - 版本语义（1.0.6 起）：批次候选游标——模型调用与解析全部通过才
+           提交消费进度，瞬时失败下一轮同批重试；1.0.5 及更早装批即消费
+           （失败跳批，由下游 repair 兜底），行为不变；
         - 完成判定：本批吃掉全部剩余素材（末批）且输出合法 → complete。
         """
         if self._loop_materials is None:
@@ -994,16 +997,23 @@ class MemoirNodeRunner:
         batch: list[dict[str, str]] = []
         used_tokens = 0
         over_limit_dropped = 0
+        # 1.0.6 批次候选游标：装批只前移局部候选游标，本批模型调用与解析
+        # 全部通过后才提交 self._loop_cursor——瞬时失败下一轮对同一批素材
+        # 重试，不再跳批；1.0.5 及更早沿用旧语义（装批即消费，模型调用前
+        # 游标已前移，失败跳批由下游 repair 兜底），行为逐字节不变。
+        candidate_cursor = self._loop_cursor
+        legacy_consume = not _version_at_least(run.agent_version, "1.0.6")
         while (
-            self._loop_cursor < len(materials)
+            candidate_cursor < len(materials)
             and len(batch) < _LOOP_BATCH_MAX_MATERIALS
         ):
-            material = materials[self._loop_cursor]
+            material = materials[candidate_cursor]
             tokens = MemoirNodeRunner._estimate_material_tokens(material["text"])
             if tokens > cap:
-                # 单条素材自身超限：整条剔除出本批（绝不截断/压缩 digest），
-                # 游标同步推进，避免下一轮重复扫描同一条造成死循环。
-                self._loop_cursor += 1
+                # 单条素材自身超限：整条剔除出本批（绝不截断/压缩 digest）。
+                # 剔除是 cap 的确定性函数：候选游标只前移不落账，失败重试轮
+                # 重新推导出完全相同的剔除结果，既不死循环也不漂移。
+                candidate_cursor += 1
                 over_limit_dropped += 1
                 continue
             if used_tokens + tokens > cap:
@@ -1012,9 +1022,12 @@ class MemoirNodeRunner:
                 break
             batch.append(material)
             used_tokens += tokens
-            self._loop_cursor += 1
+            candidate_cursor += 1
         if not batch:
-            # 剔除后本批为空：不消耗模型调用，返回 continue；游标已推进。
+            # 剔除后本批为空：不消耗模型调用，返回 continue。纯剔除不涉及
+            # 模型失败重试语义，游标确定性提交（两版本一致，游标推进避免
+            # 下一轮重复扫描同一条造成死循环）。
+            self._loop_cursor = candidate_cursor
             logging.warning(
                 "MemoirAgent 循环批次素材全部超限剔除 run_id=%s iteration=%s dropped=%s",
                 run.run_id, iteration_index, over_limit_dropped,
@@ -1022,10 +1035,14 @@ class MemoirNodeRunner:
             return LoopIterationResult(
                 outcome="continue", reason_code="LOOP_BATCH_ALL_OVER_LIMIT",
             )
+        if legacy_consume:
+            # 1.0.5 冻结语义：装批完成即提交消费进度（与历史行为逐字节一致）。
+            self._loop_cursor = candidate_cursor
         # 首批看实际产出而非轮次：此前批次被跳过时本批仍可补 cover，
         # 保证 finalize 的"首 cover"结构判定可达。
         is_first_batch = not state.scenes
-        is_final_batch = self._loop_cursor >= len(materials)
+        # 末批判定基于候选游标（1.0.6 语义下 = 本批吃掉全部剩余素材）。
+        is_final_batch = candidate_cursor >= len(materials)
         batch_refs = [material["source_ref"] for material in batch]
         request: dict[str, object] = {
             # batch_index 直接用 1 基轮次：与 scene_id 的 s{batch_index}-N
@@ -1046,16 +1063,36 @@ class MemoirNodeRunner:
             materials=batch,
         )
         if data is None:
-            # 网关不可用/未成功：本批素材已消费，抛受控码交 executor 跳过继续。
+            # 网关不可用/未成功：抛受控码交 executor 跳过继续。1.0.6 候选
+            # 游标不提交（下一轮同批重试）；1.0.5 素材已消费（跳批）。
+            # 日志只记计数与原因码，不记素材与模型原始输出。
+            logging.warning(
+                "MemoirAgent 循环批次失败 run_id=%s iteration=%s batch_size=%s "
+                "code=%s retry_pending=%s",
+                run.run_id, iteration_index, len(batch),
+                "LOOP_BATCH_MODEL_UNAVAILABLE", not legacy_consume,
+            )
             raise RuntimeError("LOOP_BATCH_MODEL_UNAVAILABLE")
         scenes = self._parse_batch_output(
             data, batch_refs,
             is_first_batch=is_first_batch, is_final_batch=is_final_batch,
+            agent_version=run.agent_version,
         )
         if scenes is None:
-            # on_iteration_error=continue：该批安全失败（素材已消费，由下游
-            # repair_coverage_gaps 补覆盖），异常只携带受控原因码。
+            # on_iteration_error=continue：该批安全失败，异常只携带受控原因
+            # 码。1.0.6 候选游标不提交（下一轮同批重试）；1.0.5 素材已消费
+            # （跳批，由下游 repair_coverage_gaps 补覆盖）。
+            logging.warning(
+                "MemoirAgent 循环批次失败 run_id=%s iteration=%s batch_size=%s "
+                "code=%s retry_pending=%s",
+                run.run_id, iteration_index, len(batch),
+                "LOOP_BATCH_OUTPUT_INVALID", not legacy_consume,
+            )
             raise RuntimeError("LOOP_BATCH_OUTPUT_INVALID")
+        if not legacy_consume:
+            # 1.0.6 候选游标提交点：本批模型调用与输出解析（含首末批在场
+            # 硬校验）全部通过，此刻才落账消费进度（含本批剔除计数）。
+            self._loop_cursor = candidate_cursor
         if scenes:
             state.apply_tool_output("scenes", [*(state.scenes or []), *scenes])
         covered_refs = {ref for scene in scenes for ref in scene["source_refs"]}
@@ -1157,6 +1194,7 @@ class MemoirNodeRunner:
             )
             return False
         _, batch, batch_refs = stash
+        target = "summary" if want_summary else "cover"
         request: dict[str, object] = {
             # batch_index 由调用方按既有 scene_id 最大批次号 +1 分配（全新
             # 批次号，按构造保证修复卡 scene_id 不冲突）。
@@ -1165,6 +1203,10 @@ class MemoirNodeRunner:
             "is_final_batch": want_summary,
             "source_refs": batch_refs,
         }
+        if _version_at_least(run.agent_version, "1.0.6"):
+            # 1.0.6 定向修复受信任控制字段：向 prompt 直说缺口场景类型，
+            # 模型只生成该类型单卡；1.0.5 请求形状冻结不变（不加新字段）。
+            request["required_scene_type"] = target
         data = self._model_data(
             run.run_id, _LOOP_BODY_NODE_ID, request, run.agent_version,
             materials=batch,
@@ -1178,8 +1220,8 @@ class MemoirNodeRunner:
         scenes = self._parse_batch_output(
             data, batch_refs,
             is_first_batch=not want_summary, is_final_batch=want_summary,
+            agent_version=run.agent_version,
         )
-        target = "summary" if want_summary else "cover"
         # 闸门保证目标卡若存在必居合法位且批内唯一：只取缺口单卡。
         card = next(
             (s for s in (scenes or []) if s.get("scene_type") == target), None,
@@ -1551,6 +1593,7 @@ class MemoirNodeRunner:
         *,
         is_first_batch: bool,
         is_final_batch: bool,
+        agent_version: object = None,
     ) -> list[dict[str, object]] | None:
         """按 1.0.5 scene-batch-generate JSON 契约解析本批场景；失败返回 None。
 
@@ -1558,6 +1601,9 @@ class MemoirNodeRunner:
         适用（单批允许 1~2 个场景，prompt 冻结契约），因此改为逐场景过同一
         受信任语义校验器（场景级 source_refs ⊆ 本批引用 + 控制字段黑名单）。
         任何一步失败只记受控原因码，模型原始输出不进日志。
+        1.0.6 起追加首末批在场硬校验：首批第一张必须是 cover、末批最后一
+        张必须是 summary，缺失即整批拒绝（BATCH_COVER_MISSING /
+        BATCH_SUMMARY_MISSING）；1.0.5 及更早只做既有位置校验，行为不变。
         """
         if isinstance(data, str):
             raw = data
@@ -1631,6 +1677,25 @@ class MemoirNodeRunner:
                     return None
                 entry["title_word"] = title_word
             scenes.append(entry)
+        # 1.0.6 首末批在场硬校验：位置校验只约束"若存在必居其位"，这里
+        # 进一步要求"首批必有 cover 居首、末批必有 summary 居末"——缺失
+        # 整批拒绝，配合候选游标让下一轮对同批素材重试（1.0.5 旧行为：
+        # 该批照常提交，缺卡由 finalize 定向修复兜底，保持不变）。
+        if _version_at_least(agent_version, "1.0.6"):
+            if is_first_batch and (
+                not scenes or scenes[0].get("scene_type") != "cover"
+            ):
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s", "BATCH_COVER_MISSING",
+                )
+                return None
+            if is_final_batch and (
+                not scenes or scenes[-1].get("scene_type") != "summary"
+            ):
+                logging.info(
+                    "MemoirAgent 循环批次输出被拒绝 reason=%s", "BATCH_SUMMARY_MISSING",
+                )
+                return None
         return scenes
 
     @staticmethod

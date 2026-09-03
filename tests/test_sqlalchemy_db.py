@@ -121,6 +121,11 @@ def test_database_connect_reads_latest_runtime_config() -> None:
             == "mysql+mysqlconnector://latest_user:latest_password@localhost:3306/latest_db?charset=utf8mb4"
         )
         assert create_engine_kwargs["pool_size"] == latest_config["pool_size"]
+        # 主引擎必须开启连接前探活：服务器 MySQL 连接被中间层回收后，
+        # 借出陈旧连接会以 "MySQL Connection not available" 打到业务层。
+        assert create_engine_kwargs["pool_pre_ping"] is True
+        # 探活是加固而不是替换：既有回收策略必须原样保留。
+        assert create_engine_kwargs["pool_recycle"] == latest_config["pool_recycle"]
 
 
 def test_database_connect_uses_application_group_environment_in_error_message() -> None:

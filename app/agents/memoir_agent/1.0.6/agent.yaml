@@ -1,0 +1,37 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.6（模型稳定性修复）：在 1.0.5 bounded_loop 分批生成
+# 基础上强化瞬时失败韧性——①批次候选游标：单批模型调用与输出解析全部通过才
+# 提交素材消费进度，网关不可用/输出非法下一轮对同一批素材重试，不再跳批；
+# ②首末批在场硬校验：首批第一张必须是 cover、末批最后一张必须是 summary，
+# 缺失整批拒绝交由同批重试（1.0.5 只校验位置，缺卡由 finalize 修复兜底）；
+# ③定向结构修复请求携带受信任字段 required_scene_type（cover|summary），
+# 模型只生成缺口单卡。图结构与全部 wire 契约零变更（十节点 DAG 不变）。
+# 契约零变更：Snapshot/Scene/Action/PlaybackDocument wire 不变，
+# contract_version 仍为 1.0.0（Tool/Snapshot/Playback 契约不随 Agent 版本升级）。
+version: 1.0.6
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+  # M7 bounded_loop 预算继承（inherit_run_limits_v1）要求以下额度在 Run 创建时
+  # 全部冻结为有限正值，任一缺失会触发 LOOP_BUDGET_PROFILE_INVALID 并终结 Run
+  # （executor fail closed）。取值与 tests/runtime_test_memoir_106_full_graph.py
+  # 的 CAPABILITY_SNAPSHOT 权威 fixture 一致；额度容量说明：1.0.6 候选游标让
+  # 瞬时失败消耗额外迭代重试同批，max_model_calls=8 可支撑 5 个正常批次
+  # + 2 次瞬时重试 + 1 次修复空间（每批至多 8 条素材）。
+  max_model_calls: 8
+  # 单 Run 模型 token 总量上限（输入按保守预留计量）。
+  max_tokens: 100000
+  # 单 Run 模型成本上限（货币单位与网关计量一致）。
+  max_model_cost: 2.0
+  # 单 Run 执行时长上限（秒）：约 3 次模型调用 + 媒体任务 + 安全审核的整链耗时。
+  max_run_seconds: 300
+  # 单 Run 最大步数（bounded_loop 迭代不占步数、由模型额度单独封顶）。
+  max_steps: 32
+prompts:
+  - scene-batch-generate.v1.md
+  - coverage-repair.v1.md
+  - safety-review.v1.md
+  - structured-output-repair.v1.md

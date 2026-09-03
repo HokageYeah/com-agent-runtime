@@ -1,0 +1,11 @@
+{"case_id":"nine_scenes_all_types_covered","expected":"succeeded","scene_count":9}
+{"case_id":"seventeen_scenes_rich_materials","expected":"succeeded","scene_count":17}
+{"case_id":"five_material_types_mixed","expected":"succeeded","scene_count":11}
+{"case_id":"partial_types_diary_and_bet_only","expected":"succeeded","available_material_types":["diary","completed_bet"]}
+{"case_id":"coverage_repair_once_then_covered","expected":"succeeded","coverage_repair_used":1}
+{"case_id":"coverage_repair_budget_exhausted","expected":"failed"}
+{"case_id":"missing_text_digest_fail_closed","expected":"failed"}
+{"case_id":"loop_budget_exhausted_partial_publish","expected":"partial"}
+{"case_id":"single_scene_media_failure_degrades","expected":"succeeded","media_degraded":1}
+{"case_id":"blocked_language","expected":"safety_blocked"}
+{"case_id":"unknown_source_ref","expected":"semantic_validation_failed"}

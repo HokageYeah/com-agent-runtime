@@ -274,3 +274,58 @@ def test_historical_memoir_package_bytes_keep_frozen_digests() -> None:
 
     for version, digest in FROZEN_HISTORICAL_DIGESTS.items():
         assert service.load("memoir_agent", version).package_digest == digest
+
+
+def test_loads_memoir_agent_1_0_6_with_frozen_bounded_loop_dag() -> None:
+    """1.0.6 是独立不可变包：图结构与 1.0.5 一致，digest 与全部历史版本不同。
+
+    1.0.6（模型稳定性修复）只改 runner 按 agent_version 门控的批次重试语义
+    （候选游标 / 首末批在场硬校验 / required_scene_type 修复），图结构、
+    loop_policy 与 contract_version 全部冻结不变；max_model_calls 6→8
+    为循环瞬时重试留出额度。
+    """
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    package = service.load("memoir_agent", "1.0.6")
+
+    # 图结构与 1.0.5 完全一致：十节点 DAG，唯一 bounded_loop 节点策略逐字段相同。
+    package_105 = service.load("memoir_agent", "1.0.5")
+    assert [n.node_id for n in package.workflow_nodes] == [
+        n.node_id for n in package_105.workflow_nodes
+    ]
+    loop_nodes = [
+        node for node in package.workflow_nodes if node.node_type == "bounded_loop"
+    ]
+    assert len(loop_nodes) == 1
+    loop_106 = loop_nodes[0].loop_policy
+    loop_105 = next(
+        node for node in package_105.workflow_nodes
+        if node.node_type == "bounded_loop"
+    ).loop_policy
+    assert loop_106 is not None and loop_105 is not None
+    assert loop_106.model_dump() == loop_105.model_dump()
+    # 预算额度：8 = 5 个正常批次 + 2 次瞬时重试 + 1 次修复空间。
+    assert package.policy.max_model_calls == 8
+    # digest 与全部历史版本（含 1.0.5）不同，契约版本不随 Agent 版本升级。
+    for version in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5"):
+        assert package.package_digest != service.load("memoir_agent", version).package_digest
+    assert package.contract_version == "1.0.0"
+    assert package.version == "1.0.6"
+
+
+def test_memoir_agent_1_0_6_orders_media_before_safety_and_publish() -> None:
+    """1.0.6 图结构与 1.0.5 冻结一致：媒体降级仍在最终安全审核和发布前。"""
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    package = AgentPackageService(package_root).load("memoir_agent", "1.0.6")
+
+    assert [node.node_id for node in package.workflow_nodes][-4:] == [
+        "generate_actions",
+        "enqueue_media_tasks",
+        "safety_review",
+        "publish_document",
+    ]
+    media = next(
+        node for node in package.workflow_nodes if node.node_id == "enqueue_media_tasks"
+    )
+    assert media.optional is False

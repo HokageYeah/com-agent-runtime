@@ -73,10 +73,15 @@ def _sanitized(*materials: dict[str, object]) -> dict[str, object]:
     return {"materials": list(materials)}
 
 
-def _run() -> object:
+def _run(version: str = "1.0.5") -> object:
     return type("Run", (), {
-        "run_id": "loop-run", "agent_id": "memoir_agent", "agent_version": "1.0.5",
+        "run_id": "loop-run", "agent_id": "memoir_agent", "agent_version": version,
     })()
+
+
+def _run_106() -> object:
+    """1.0.6 Run 替身：批次候选游标 / 首末批硬校验 / required_scene_type 修复。"""
+    return _run("1.0.6")
 
 
 def _scene(
@@ -669,3 +674,370 @@ def test_iteration_without_begin_loop_fails_closed() -> None:
     runner = MemoirNodeRunner(object(), model_gateway=FakeModelGateway())
     with raises(ValueError, match="LOOP_NOT_INITIALIZED"):
         runner.run_loop_iteration(LOOP_NODE, _run(), AgentState(), 1, BUDGET)
+
+
+# ---------------------------------------------------------------------------
+# 8. 1.0.6 批次候选游标：失败批次不消费素材，下一轮同批重试
+# ---------------------------------------------------------------------------
+# 语义锚点（方案 §2.2）：1.0.6 起 run_loop_iteration 装批用局部候选游标，
+# 只有模型调用成功且 _parse_batch_output 通过（含首末批在场硬校验）后才
+# 提交 self._loop_cursor；瞬时失败下一轮对同一批素材重试，不再跳批。
+# 1.0.5 旧行为（失败即跳批、由 repair 兜底）由第 4/5 节既有测试锁定。
+
+
+class FlakyModelGateway(FakeModelGateway):
+    """前 fail_first 次调用返回 status=failed（网关不可用），其余按脚本输出。"""
+
+    def __init__(
+        self, outputs: list[object] | None, fail_first: int,
+        token_budget: int | None = None,
+    ) -> None:
+        super().__init__(outputs=outputs, token_budget=token_budget)
+        self._fail_first = fail_first
+
+    def call(self, run_id: str, node_id: str, request: dict[str, object]) -> object:
+        if len(self.calls) < self._fail_first:
+            self.calls.append((node_id, request))
+            return SimpleNamespace(status="failed", data=None)
+        return super().call(run_id, node_id, request)
+
+
+def test_106_invalid_output_keeps_cursor_and_retries_same_batch() -> None:
+    """1.0.6：非法 JSON 不消费批次素材，下一轮同批重试成功（游标未前移）。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            "SENTINEL-RAW-OUTPUT 不是 JSON {{{",  # 批 1 首次尝试解析失败
+            # 同批重试（batch_index=2 → s2 命名空间）成功提交首批场景。
+            _payload(
+                _scene("s2-1", "cover", ["diary:m1"]),
+                _scene("s2-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s3-1", "summary", ["diary:m3"])),
+        ],
+        token_budget=10,  # 批 1 只装 m1+m2，m3 留给收尾批
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(3, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    # 失败批次不写场景：首批资格保留给重试轮。
+    assert state.scenes is None
+
+    second = runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    # 重试拿到的是同一批素材（m1+m2），而不是跳到 m3（1.0.5 旧行为）。
+    _, retry_request = gateway.calls[1]
+    assert [item["source_ref"] for item in retry_request["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    assert retry_request["input"]["is_first_batch"] is True  # type: ignore[index]
+    assert retry_request["input"]["is_final_batch"] is False  # type: ignore[index]
+    assert second.outcome == "continue"
+
+    third = runner.run_loop_iteration(LOOP_NODE, run, state, 3, BUDGET)
+    assert third.outcome == "complete"
+    _, final_request = gateway.calls[2]
+    assert [item["source_ref"] for item in final_request["materials"]] == ["diary:m3"]  # type: ignore[union-attr]
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s2-1", "s2-2", "s3-1",
+    ]
+
+
+def test_106_model_unavailable_keeps_cursor_and_retries_same_batch() -> None:
+    """1.0.6：网关不可用（status=failed → data None）游标不前移，恢复后同批成功。"""
+    gateway = FlakyModelGateway(
+        outputs=[_payload(
+            _scene("s2-1", "cover", ["diary:m1"]),
+            _scene("s2-2", "summary", ["diary:m2"]),
+        )],
+        fail_first=1,
+        token_budget=10,  # m1+m2 同批且即收尾批
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(2, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    with raises(RuntimeError, match="LOOP_BATCH_MODEL_UNAVAILABLE"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    assert state.scenes is None
+
+    second = runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    # 恢复后仍是同一批素材（m1+m2），一次调用收尾。
+    _, retry_request = gateway.calls[1]
+    assert [item["source_ref"] for item in retry_request["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    assert retry_request["input"]["is_final_batch"] is True  # type: ignore[index]
+    assert second.outcome == "complete"
+
+
+def test_106_final_batch_missing_summary_rejected_then_retried() -> None:
+    """1.0.6 首末批在场硬校验：收尾批缺 summary 整批拒绝，预算内同批重试成功。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            # 收尾批只出 body 卡：1.0.5 闸门只管位置不管在场（可提交），
+            # 1.0.6 整批拒绝（BATCH_SUMMARY_MISSING）。
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            # 同批重试（batch_index=3）带 summary。
+            _payload(_scene("s3-1", "summary", ["diary:m3"])),
+        ],
+        token_budget=10,
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(3, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    assert runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET).outcome == "continue"
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    # 缺 summary 的收尾批不提交：场景仍只有首批两张。
+    assert [scene["scene_id"] for scene in state.scenes or []] == ["s1-1", "s1-2"]
+
+    third = runner.run_loop_iteration(LOOP_NODE, run, state, 3, BUDGET)
+    assert third.outcome == "complete"
+    _, retry_request = gateway.calls[2]
+    # 重试仍是收尾批素材 m3。
+    assert [item["source_ref"] for item in retry_request["materials"]] == ["diary:m3"]  # type: ignore[union-attr]
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s1-1", "s1-2", "s3-1",
+    ]
+    assert (state.scenes or [])[-1]["scene_type"] == "summary"
+
+
+def test_106_first_batch_missing_cover_rejected_then_retried() -> None:
+    """1.0.6 在场硬校验（cover 侧）：首批缺 cover 整批拒绝，重试补 cover。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            # 首批只出 body 卡：1.0.6 整批拒绝（BATCH_COVER_MISSING）。
+            _payload(_scene("s1-1", "diary_highlight", ["diary:m1"])),
+            _payload(
+                _scene("s2-1", "cover", ["diary:m1"]),
+                _scene("s2-2", "summary", ["diary:m2"]),
+            ),
+        ],
+        token_budget=10,  # m1+m2 同批且即收尾批
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(2, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    assert state.scenes is None
+
+    second = runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    assert second.outcome == "complete"
+    _, retry_request = gateway.calls[1]
+    assert retry_request["input"]["is_first_batch"] is True  # type: ignore[index]
+    assert [scene["scene_id"] for scene in state.scenes or []] == ["s2-1", "s2-2"]
+
+
+def test_106_all_over_limit_still_advances_cursor_deterministically() -> None:
+    """1.0.6 确定性例外：纯剔除空批不调模型，游标照常推进（无重试死循环）。"""
+    gateway = FakeModelGateway(token_budget=20)
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(
+        _material("diary:h1", "长" * 200), _material("diary:h2", "长" * 200),
+    ))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    first = runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    assert first.outcome == "continue"
+    assert first.reason_code == "LOOP_BATCH_ALL_OVER_LIMIT"
+    assert gateway.calls == []
+    second = runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    assert second.outcome == "complete"
+    assert second.reason_code == "LOOP_MATERIALS_EXHAUSTED"
+
+
+def test_106_over_limit_drop_rederived_deterministically_on_retry() -> None:
+    """候选游标下剔除不落账：失败重试轮重新推导剔除，超限素材绝不进请求。"""
+    secret = "超限素材正文哨兵" * 30  # 240 字 ≈ 60 token，远超 20 token 上限
+    gateway = FakeModelGateway(
+        outputs=[
+            "INVALID{{{",  # 批 1 首次尝试失败
+            _payload(
+                _scene("s2-1", "cover", ["diary:m1"]),
+                _scene("s2-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s3-1", "summary", ["diary:m3"])),
+        ],
+        token_budget=20,
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(
+        _material("diary:huge", secret), *_token_materials(3, 40),
+    ))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    runner.run_loop_iteration(LOOP_NODE, run, state, 3, BUDGET)
+
+    # 失败轮与重试轮装批结果一致（huge 剔除被确定性重推导，m1+m2 同批）。
+    assert [item["source_ref"] for item in gateway.calls[0][1]["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    assert [item["source_ref"] for item in gateway.calls[1][1]["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    for _, captured in gateway.calls:
+        assert "diary:huge" not in json.dumps(captured, ensure_ascii=False)
+        assert "超限素材正文哨兵" not in json.dumps(captured, ensure_ascii=False)
+
+
+def test_106_persistent_failures_converge_without_busy_loop() -> None:
+    """持续失败网关：每轮同批重试计入迭代上限，收敛到 finalize fail closed。"""
+    gateway = FakeModelGateway(outputs=["INVALID{{{"] * 6, token_budget=10)
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(3, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    # 按 executor 冻结语义复刻驱动：失败轮同样计入迭代上限后跳过继续。
+    iterations = 0
+    while iterations < BUDGET.max_iterations:
+        try:
+            runner.run_loop_iteration(LOOP_NODE, run, state, iterations + 1, BUDGET)
+            break
+        except RuntimeError:
+            iterations += 1
+
+    # 6 轮全部失败后循环自然终止（迭代上限兜底，无 busy loop），
+    # 每轮都是同一批素材（候选游标从未提交），场景零提交。
+    assert iterations == BUDGET.max_iterations
+    assert len(gateway.calls) == BUDGET.max_iterations
+    assert [item["source_ref"] for item in gateway.calls[0][1]["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    assert state.scenes is None
+    final = runner.finalize_loop(LOOP_NODE, run, state)
+    assert final.outcome == "failed"
+    assert final.reason_code == "LOOP_SCENE_COUNT_INSUFFICIENT"
+
+
+# ---------------------------------------------------------------------------
+# 9. 1.0.6 定向结构修复：受信任字段 required_scene_type（1.0.5 请求形状不变）
+# ---------------------------------------------------------------------------
+
+
+def test_106_repair_summary_request_carries_required_scene_type() -> None:
+    """缺 summary 修复（1.0.6）：请求携带 required_scene_type=summary，单卡收尾。
+
+    驱动形态：5 条素材 + route 窗口 20 token → 批 1（m1+m2）、批 2（m3+m4）、
+    批 3（m5 收尾）；收尾批两次瞬时失败耗尽迭代余量后 finalize 触发修复。
+    """
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            "INVALID{{{",  # 收尾批首次失败
+            "INVALID{{{",  # 收尾批重试再失败（迭代余量耗尽）
+            # 定向修复输出：收尾 summary 单卡（batch_index=3 → s3 命名空间）。
+            _payload(_scene("s3-1", "summary", ["diary:m5"])),
+        ],
+        token_budget=20,
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(5, 40)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 3, BUDGET)
+    with raises(RuntimeError, match="LOOP_BATCH_OUTPUT_INVALID"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 4, BUDGET)
+
+    result = runner.finalize_loop(LOOP_NODE, run, state)
+
+    assert result.outcome == "complete"
+    # 修复请求契约：复用 generate_scene_batch 路由 + 受信任 required_scene_type。
+    assert len(gateway.calls) == 5
+    node_id, request = gateway.calls[4]
+    assert node_id == "generate_scene_batch"
+    assert request["input"]["required_scene_type"] == "summary"  # type: ignore[index]
+    assert request["input"]["is_final_batch"] is True  # type: ignore[index]
+    assert request["input"]["batch_index"] == 3  # type: ignore[index]
+    assert [item["source_ref"] for item in request["materials"]] == ["diary:m5"]  # type: ignore[union-attr]
+    # 修复只追加收尾卡：原 3 张顺序不动，summary 居末。
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s1-1", "s1-2", "s2-1", "s3-1",
+    ]
+
+
+def test_106_repair_cover_request_carries_required_scene_type() -> None:
+    """缺 cover 修复（1.0.6）：请求携带 required_scene_type=cover，单卡前插。
+
+    1.0.6 在场硬校验下首批缺 cover 无法经正常循环提交（会被整批拒绝），
+    该缺口仅在边界路径可达；这里直接置首批快照验证修复请求契约。
+    """
+    gateway = FakeModelGateway(
+        outputs=[_payload(_scene("s3-1", "cover", ["diary:m1"]))],
+        token_budget=10,
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(2, 20)))
+    run = _run_106()
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+    # 手工置首批快照（begin_loop 会重置，须在其后）：修复段唯一消费方。
+    runner._loop_first_batch = (
+        1,
+        [{"source_ref": "diary:m1", "text": "m1"}, {"source_ref": "diary:m2", "text": "m2"}],
+        ["diary:m1", "diary:m2"],
+    )
+    state.scenes = [
+        _scene("s1-1", "diary_highlight", ["diary:m1"]),
+        _scene("s1-2", "milestone", ["diary:m2"]),
+        _scene("s2-1", "summary", ["diary:m2"]),
+    ]
+
+    result = runner.finalize_loop(LOOP_NODE, run, state)
+
+    assert result.outcome == "complete"
+    node_id, request = gateway.calls[0]
+    assert node_id == "generate_scene_batch"
+    assert request["input"]["required_scene_type"] == "cover"  # type: ignore[index]
+    assert request["input"]["is_first_batch"] is True  # type: ignore[index]
+    assert request["input"]["is_final_batch"] is False  # type: ignore[index]
+    # 修复只前插开场卡：cover 居首，原 3 张顺序后移。
+    assert [scene["scene_id"] for scene in state.scenes or []] == [
+        "s3-1", "s1-1", "s1-2", "s2-1",
+    ]
+
+
+def test_repair_request_105_shape_unchanged_without_required_scene_type() -> None:
+    """1.0.5 修复请求形状冻结：不携带 required_scene_type（新字段仅 >=1.0.6）。"""
+    gateway = FakeModelGateway(
+        outputs=[
+            _payload(
+                _scene("s1-1", "cover", ["diary:m1"]),
+                _scene("s1-2", "diary_highlight", ["diary:m2"]),
+            ),
+            _payload(_scene("s2-1", "milestone", ["diary:m3"])),
+            _payload(_scene("s3-1", "summary", ["diary:m3"])),
+        ],
+        token_budget=10,
+    )
+
+    result, _ = _drive_two_batches_and_finalize(gateway)
+
+    assert result.outcome == "complete"
+    _, request = gateway.calls[2]
+    assert "required_scene_type" not in request["input"]  # type: ignore[index]

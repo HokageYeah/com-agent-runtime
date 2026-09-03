@@ -401,6 +401,19 @@ poetry run ruff check .
 
 预期：测试全部通过（收口轮实测 `132 passed`，含评审补齐的 `test_media_service_budget_exhausted_degrades_before_generation`）、Ruff 全绿。覆盖：第 9/17 条及更多合法安全素材引用不再被旧版八条上限截断（仅 `1.0.5` 放开；`1.0.0`–`1.0.4` 保持八条上限且历史包字节与 digest 冻结）；五类素材（`diary/completed_bet/handbook_note/matured_wish/bucket_list_completion`）进入脱敏摘要与生成循环；`1.0.5` workflow 顺序固定 `generate_actions → enqueue_media_tasks → safety_review → publish_document`，媒体节点 `optional=False` 且位于最终安全审核之前，媒体关闭、单图失败或预算耗尽只降级为同 Scene 文本卡（预算耗尽用例锚定 provider 零调用与 `MEDIA_NODE_BUDGET_EXCEEDED` 观测码），不阻塞安全审核与发布。
 
+`memoir_agent@1.0.6` 基础设施定向回归（2026-09-03）：
+
+```bash
+poetry run pytest -q \
+  tests/test_model_gateway.py \
+  tests/test_sqlalchemy_db.py \
+  tests/test_runtime_capabilities.py \
+  tests/test_docker_deployment_contract.py
+poetry run ruff check app/runtime/model_gateway.py app/db/sqlalchemy_db.py app/runtime/tool_gateway.py app/api/endpoints/capabilities_api.py tests/test_model_gateway.py tests/test_sqlalchemy_db.py tests/test_runtime_capabilities.py tests/test_docker_deployment_contract.py
+```
+
+预期：`121 passed`、Ruff 全绿（2026-09-03 实测一致）。覆盖：HttpProviderAdapter 连接后 peer 校验容忍合法 DNS/CDN 轮换——peer 命中发送前快照时不触发重解析（getaddrinfo 仅 1 次）；peer 命中「发送前 ∪ 连接后重解析」集合才放行（记 `reason=dns_rotation`）；私网/回环/保留地址不进集合比对、立即 `MODEL_PROVIDER_PEER_MISMATCH`；重解析失败 fail-closed 归一为 MISMATCH；adapter 内不自动重发 Provider POST（重试交给受预算管理的 bounded loop）。同时覆盖 `create_engine` 新增 `pool_pre_ping=True`（保留 `pool_recycle`）、Tool wire 版本表登记 `"1.0.6": "1.1.0"`（未登记会导致 `load_snapshot` 无日志瞬时失败）、capabilities 活跃版本切到 `memoir_agent@1.0.6`（依赖 1.0.6 包目录通过 `AgentPackageService.load` 校验），以及 test/production env 模板、`configure-runtime-env.sh` 默认值与 GitHub Actions 四处 `AGENT_PACKAGE_VERSION` 均为 `1.0.6` 的部署契约。
+
 迁移前先在隔离数据库备份并检查旧状态分布：
 
 ```sql

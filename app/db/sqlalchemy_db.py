@@ -74,6 +74,10 @@ class Database:
             max_overflow=self.db_config["max_overflow"],
             pool_timeout=self.db_config["pool_timeout"],
             pool_recycle=self.db_config["pool_recycle"],
+            # 借出连接前先做一次轻量探活：服务器 MySQL 空闲连接可能被
+            # 中间层静默回收，pool_pre_ping 把 "MySQL Connection not
+            # available" 这类陈旧连接错误在连接层自愈，而不是打到业务事务。
+            pool_pre_ping=True,
             echo=self.db_config["echo"],
         )
         self._session_factory = sessionmaker(

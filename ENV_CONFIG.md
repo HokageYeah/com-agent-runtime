@@ -371,7 +371,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 ### 10.1 默认关闭与降级行为
 
-`MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的五个模型节点（含 1.0.5 bounded_loop 循环体 generate_scene_batch 与覆盖修复 repair_coverage_gaps）退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
+`MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的五个模型节点（含 1.0.5 起 bounded_loop 循环体 generate_scene_batch 与覆盖修复 repair_coverage_gaps，当前 1.0.6 图沿用这两个节点）退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
 
 ### 10.2 三个配置键
 
@@ -383,7 +383,7 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 #### 10.2.1 五个模型节点分别是什么
 
-`MEMOIR_MODEL_NODE_ROUTES_JSON` 的五个键是 MemoirAgent 历代工作流图中全部模型节点的并集。Worker 门禁按**集合精确匹配**校验（见 `app/worker.py` 的 `_MEMOIR_MODEL_NODES`）：少一个键、多一个键或某个值不是已注册的 route_id，都会导致模型网关整体禁用——不报错、只在启动/建网关时打一条 warning（`Memoir Worker 模型配置不完整，使用模板 fallback`），然后所有模型节点退回模板降级。即使当前只运行 1.0.5 图（只用后两个节点），也必须配满五键：这是有意设计，防止"部分节点走模型、部分节点走模板"产出不一致的回忆录。
+`MEMOIR_MODEL_NODE_ROUTES_JSON` 的五个键是 MemoirAgent 历代工作流图中全部模型节点的并集。Worker 门禁按**集合精确匹配**校验（见 `app/worker.py` 的 `_MEMOIR_MODEL_NODES`）：少一个键、多一个键或某个值不是已注册的 route_id，都会导致模型网关整体禁用——不报错、只在启动/建网关时打一条 warning（`Memoir Worker 模型配置不完整，使用模板 fallback`），然后所有模型节点退回模板降级。即使当前只运行 1.0.6 图（只用后两个节点，与 1.0.5 相同），也必须配满五键：这是有意设计，防止"部分节点走模型、部分节点走模板"产出不一致的回忆录。
 
 | 节点键 | 引入版本 | 职责 |
 |---|---|---|
@@ -467,15 +467,15 @@ schema 中「缺失 = 不设额度」只对无循环节点的旧图（≤1.0.4�
 
 #### 额度容量怎么估
 
-1.0.5 图的模型调用 ≈ 批次数 + 至多 1 次修复。每批至多 8 条素材（`_LOOP_BATCH_MAX_MATERIALS`），批内 token 另受 `min(route context_token_budget, 剩余 token)` 约束。以 `max_model_calls=6` 为例：可支撑 5 批（约 40 条素材）+ 1 次修复；素材更多时按 `ceil(素材数/8)+1` 上调。额度耗尽不直接失败——loop_policy 的 `on_budget_exhausted=partial` 会进入部分发布收尾判定。
+当前活跃 1.0.6 图的模型调用 ≈ 批次数 + 瞬时重试 + 至多 1 次修复。每批至多 8 条素材（`_LOOP_BATCH_MAX_MATERIALS`），批内 token 另受 `min(route context_token_budget, 剩余 token)` 约束。1.0.6 起批次游标改为「成功后提交」：模型瞬时失败（JSON 解析、Provider 不可用、peer mismatch、结构不合法）不消费素材，同批在剩余预算内重试。以 `max_model_calls=8` 为例：可支撑 5 个正常批次（约 40 条素材）+ 2 次瞬时重试 + 1 次修复；素材更多时按 `ceil(素材数/8)+3` 上调。额度耗尽不直接失败——loop_policy 的 `on_budget_exhausted=partial` 会进入部分发布收尾判定。（1.0.5 及更早为「游标先行前移」语义，额度估算按 `ceil(素材数/8)+1`。）
 
 #### 配置与生效流程
 
 ```yaml
-# app/agents/memoir_agent/1.0.5/agent.yaml（节选；当前生效值）
+# app/agents/memoir_agent/1.0.6/agent.yaml（节选；当前生效值）
 policy:
   waiting_human_timeout_action: failed
-  max_model_calls: 6        # 每批≤8条素材+1次修复，6 次≈40 条素材容量
+  max_model_calls: 8        # 5 个正常批次 + 2 次瞬时重试 + 1 次修复（每批≤8条素材）
   max_tokens: 100000
   max_model_cost: 2.0
   max_run_seconds: 300

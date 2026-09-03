@@ -347,3 +347,56 @@ def test_repair_node_registered_on_all_gateway_surfaces() -> None:
     assert '"repair_coverage_gaps"' in inspect.getsource(harness_entry)
     # 4) ContextManager 节点 token cap：模型节点必须有同级 cap（512）。
     assert _NODE_TOKEN_CAPS.get("repair_coverage_gaps") == 512
+
+
+# ---------------------------------------------------------------------------
+# 5. 1.0.6 兼容：coverage repair 请求契约与 1.0.5 逐字段同形
+# ---------------------------------------------------------------------------
+
+def test_repair_request_contract_unchanged_for_1_0_6_run() -> None:
+    """1.0.6 Run 的 repair_coverage_gaps 请求契约不变（不携带 required_scene_type）。
+
+    required_scene_type 只属于 generate_scene_batch 的定向结构修复请求
+    （_repair_loop_structure，1.0.6 起）；coverage repair（缺失类型补齐）
+    的输入契约 missing_material_types / source_refs / materials 在 1.0.6
+    保持 1.0.5 原形，修复场景仍插在末尾 summary 之前。
+    """
+    gateway = FakeModelGateway(
+        outputs=[json.dumps({"scenes": [
+            _scene("r1-1", "bet_highlight", ["completed_bet:b1"], "赌约是谁先跑完五公里。"),
+        ]}, ensure_ascii=False)],
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    run_106 = type("Run", (), {
+        "run_id": "repair-run-106", "agent_id": "memoir_agent", "agent_version": "1.0.6",
+    })()
+    state = _state(
+        ["diary", "completed_bet"],
+        [
+            _scene("s1-1", "cover", ["diary:d1"]),
+            _scene("s1-2", "diary_highlight", ["diary:d1"]),
+            _scene("s1-3", "summary", ["diary:d1"]),
+        ],
+        _sanitized(
+            _material("diary:d1", "日记文本"),
+            _material("completed_bet:b1", "赌约文本"),
+        ),
+    )
+
+    result = runner.run_node(REPAIR_NODE, run_106, state)
+
+    assert result["repaired"] is True  # type: ignore[index]
+    # 恰一次模型调用，请求契约与 1.0.5 逐字段同形。
+    assert len(gateway.calls) == 1
+    node_id, request = gateway.calls[0]
+    assert node_id == "repair_coverage_gaps"
+    assert request["prompt_id"] == "coverage-repair"  # type: ignore[index]
+    candidate_input = request["input"]  # type: ignore[index]
+    assert candidate_input["missing_material_types"] == ["completed_bet"]
+    assert candidate_input["source_refs"] == ["completed_bet:b1"]
+    assert [item["source_ref"] for item in request["materials"]] == ["completed_bet:b1"]  # type: ignore[index]
+    # coverage repair 绝不携带 required_scene_type（该字段只在结构修复请求出现）。
+    assert "required_scene_type" not in candidate_input
+    # 修复场景插在末尾 summary 之前，1.0.6 合并结构不变。
+    assert [scene["scene_id"] for scene in state.scenes] == ["s1-1", "s1-2", "r1-1", "s1-3"]
+    assert state.scenes[-1]["scene_type"] == "summary"

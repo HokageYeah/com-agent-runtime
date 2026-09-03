@@ -99,6 +99,9 @@ _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
     "1.0.4": "1.1.0",
     # 1.0.5（M7 受控循环）沿用 1.1.0 工具 wire 契约：仅新增 bounded_loop 工作流语义。
     "1.0.5": "1.1.0",
+    # 1.0.6（批次候选游标 + 首/末批结构硬校验）只改 runner 循环语义与 prompt，
+    # Tool 合同零变更，沿用 v1.1.0；未登记会导致 load_snapshot 无日志瞬时失败。
+    "1.0.6": "1.1.0",
 }
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 

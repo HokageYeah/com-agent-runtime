@@ -700,6 +700,46 @@ def test_memoir_105_media_failure_keeps_complete_text_card_document() -> None:
     assert "media_degraded" in state.fallback_flags
 
 
+def test_memoir_106_media_failure_keeps_complete_text_card_document() -> None:
+    """1.0.6 兼容：媒体失败降级语义与 1.0.5 一致，最终结构仍可安全发布。
+
+    1.0.6 只改 runner 循环批次重试语义（按 agent_version 门控），媒体链路
+    零变更；本用例锁住 1.0.6 Run 走 enqueue_media_tasks + safety_review 的
+    降级行为与 1.0.5 逐字段一致（全降级文字卡、空 manifest、安全发布）。
+    """
+    service = MemoirMediaService(
+        MockCVClient(text_image=b"broken-image"), FakeUploader(), _config(),
+    )
+    runner = MemoirNodeRunner(object(), media_service=service)
+    scenes = _per_scene_document()
+    state = AgentState(
+        scenes=scenes,
+        actions=MemoirNodeRunner._rule_actions(scenes),
+        sanitized_material={"materials": [{
+            "source_ref": "diary:diary-1",
+            "type": "diary",
+            "sensitive": False,
+            "text": "安全摘要",
+        }]},
+    )
+
+    result = runner.run_node(
+        {"node_id": "enqueue_media_tasks"}, _run("1.0.6"), state,
+    )
+    safety = runner.run_node(
+        {"node_id": "safety_review"}, _run("1.0.6"), state,
+    )
+
+    assert result == {"node_id": "enqueue_media_tasks", "skipped": False, "delivered": 0}
+    assert safety == {"node_id": "safety_review", "safe": True}
+    assert state.playback_document is not None
+    assert len(state.playback_document["scenes"]) == 3
+    assert len(state.playback_document["actions"]) == 3
+    assert state.playback_document["media_manifest"] == []
+    assert all("payload" not in scene for scene in state.playback_document["scenes"])
+    assert "media_degraded" in state.fallback_flags
+
+
 def test_safety_review_falls_back_when_image_scene_lacks_manifest_entry() -> None:
     """image 场景缺 manifest 条目（缺 payload/url）必须安全回退基础卡。"""
     runner = MemoirNodeRunner(object())

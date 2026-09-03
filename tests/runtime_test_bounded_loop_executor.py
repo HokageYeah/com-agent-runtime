@@ -713,3 +713,45 @@ def test_bounded_loop_audit_records_only_safe_counts() -> None:
         ).all()]
     )
     assert "scene-private-marker" not in persisted
+
+
+# ---------------------------------------------------------------------------
+# 9. 1.0.6 兼容：冻结循环语义对 1.0.6 Run 原样成立
+# ---------------------------------------------------------------------------
+
+def test_bounded_loop_frozen_semantics_hold_for_1_0_6_run() -> None:
+    """1.0.6 兼容：迭代错误 continue / partial 降级 / 迭代上限对 1.0.6 Run 不变。
+
+    1.0.6 的批次重试语义全部在 memoir runner 内按 agent_version 门控实现，
+    executor 侧冻结语义必须与版本无关：单轮失败（如 runner 抛出的
+    LOOP_BATCH_OUTPUT_INVALID 受控原因码）只跳过该轮继续，即使后续轮
+    恢复收敛，按冻结语义 7 Run 终态仍降级 partial（发布链路继续走完）。
+    """
+    runner = ScriptedLoopRunner(
+        [
+            IterScript(outcome="continue", output_count=1, coverage_count=2),
+            IterScript(raise_exc=RuntimeError("LOOP_BATCH_OUTPUT_INVALID")),
+            IterScript(outcome="complete", output_count=1, coverage_count=2),
+        ]
+    )
+    scenario = LoopScenario(runner)
+    # 夹具默认建 1.0.5 Run；这里把 Run 与 AgentDefinition 一同切到 1.0.6，
+    # 验证 executor 循环语义不随 agent_version 变化。
+    run = scenario.session.scalar(select(AgentRun))
+    run.agent_version = "1.0.6"
+    definition = scenario.session.scalar(select(AgentDefinition))
+    definition.version = "1.0.6"
+    scenario.session.commit()
+
+    result = scenario.run()
+
+    assert runner.iteration_calls == [1, 2, 3]
+    assert runner.finalize_calls == 1
+    # 预算继承与迭代上限照常：无既有 usage 时上限 = max_model_calls = 4。
+    assert all(budget.max_iterations == 4 for budget in runner.iteration_budgets)
+    # 冻结语义 7：存在被跳过的失败迭代 → 循环收敛 partial，Run 终态降级 partial。
+    assert result.status == "partial"
+    loop_step = scenario.loop_step()
+    assert loop_step.status == "succeeded"
+    assert loop_step.output_summary["loop"]["outcome"] == "partial"
+    assert loop_step.output_summary["loop"]["iterations"] == 3

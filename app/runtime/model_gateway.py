@@ -586,7 +586,7 @@ class HttpProviderAdapter:
             timeout=timeout_seconds,
             follow_redirects=False,
         )
-        self._verify_connected_peer(allowed_peer_ips, route.route_id)
+        self._verify_connected_peer(allowed_peer_ips, route.endpoint, route.route_id)
         response.raise_for_status()
         payload = response.json()
         if route.provider == OPENAI_COMPATIBLE_PROVIDER:
@@ -614,8 +614,14 @@ class HttpProviderAdapter:
             raise ValueError("Provider JSON 响应格式无效")
         return content
 
-    def _verify_connected_peer(self, allowed_peer_ips: frozenset[str], route_id: str) -> None:
-        """仅接受本轮 DNS 公网集合中的真实 TCP 对端，不记录请求或响应内容。"""
+    def _verify_connected_peer(
+        self, allowed_peer_ips: frozenset[str], endpoint: str, route_id: str
+    ) -> None:
+        """连接后校验真实 TCP 对端：公网 IP 且命中发送前/重解析 DNS 集合并集。
+
+        不记录请求或响应内容；DNS/CDN 合法轮换通过一次连接后重解析容忍，
+        其余情况（私网对端、集合外对端、重解析失败）全部 fail-closed。
+        """
         assert self._peer_ip_provider is not None
         peer_ip = self._peer_ip_provider()
         try:
@@ -626,12 +632,40 @@ class HttpProviderAdapter:
                 route_id,
             )
             raise ValueError("MODEL_PROVIDER_PEER_UNVERIFIABLE") from exc
-        if normalized_peer not in allowed_peer_ips:
+        # 对端必须本身是公网地址：私网/回环/保留地址不进入任何集合比对，
+        # 立即拒绝，保持 DNS rebinding/SSRF 防线不变。
+        if not ipaddress.ip_address(normalized_peer).is_global:
             logging.warning(
-                "模型 Provider 对端地址不匹配 route_id=%s code=MODEL_PROVIDER_PEER_MISMATCH",
+                "模型 Provider 对端不是公网地址 route_id=%s code=MODEL_PROVIDER_PEER_MISMATCH",
                 route_id,
             )
             raise ValueError("MODEL_PROVIDER_PEER_MISMATCH")
+        if normalized_peer in allowed_peer_ips:
+            return
+        # peer 未命中发送前快照：合法 Provider 可能在两次 DNS 查询之间轮换公网
+        # 节点，对同一受信任 endpoint 立即补一次解析；仅当 peer 命中
+        # “发送前集合 ∪ 重解析集合”才放行，不做自动重发（重试交给上层预算循环）。
+        try:
+            reresolved_peer_ips = _ensure_public_endpoint(endpoint, "MODEL_PROVIDER_ENDPOINT")
+        except ValueError as exc:
+            # 重解析失败（DNS 瞬时故障/新地址非公网）继续 fail-closed，
+            # 统一按对端不匹配处理，不放宽安全边界。
+            logging.warning(
+                "模型 Provider 对端重解析失败 route_id=%s code=MODEL_PROVIDER_PEER_MISMATCH",
+                route_id,
+            )
+            raise ValueError("MODEL_PROVIDER_PEER_MISMATCH") from exc
+        if normalized_peer in reresolved_peer_ips:
+            logging.info(
+                "模型 Provider 对端命中连接后重解析集合 route_id=%s reason=dns_rotation",
+                route_id,
+            )
+            return
+        logging.warning(
+            "模型 Provider 对端地址不匹配 route_id=%s code=MODEL_PROVIDER_PEER_MISMATCH",
+            route_id,
+        )
+        raise ValueError("MODEL_PROVIDER_PEER_MISMATCH")
 
 
 class LeaseBoundary(Protocol):

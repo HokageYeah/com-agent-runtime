@@ -1,0 +1,5 @@
+version: 1.0.0
+rules:
+  - reject_unknown_source_refs
+  - redact_sensitive_identifiers
+  - block_coercive_or_harassing_language

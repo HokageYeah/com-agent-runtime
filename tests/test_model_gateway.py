@@ -200,6 +200,111 @@ def test_http_provider_adapter_accepts_matching_peer_and_resets_previous_value()
     assert reset_calls == 1
 
 
+def _rotating_dns(monkeypatch: pytest.MonkeyPatch, results: list[list[str]]) -> list[int]:
+    """模拟 Provider 域名 DNS 轮换：按调用次序依次返回每组公网 IPv4 结果。
+
+    返回累计解析次数列表（单元素），供用例断言是否触发了连接后重解析。
+    """
+    call_count = [0]
+
+    def resolve(host: object, port: object, *args: object, **kwargs: object) -> object:
+        call_count[0] += 1
+        ips = results[min(call_count[0], len(results)) - 1]
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return call_count
+
+
+def _peer_adapter(peer_ip: str):
+    """构造带 MockTransport 与受控对端 IP 的 Provider adapter，DNS 由用例另行注入。"""
+    from app.runtime.model_gateway import HttpProviderAdapter
+
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"ok": True}, request=request),
+    ))
+    return HttpProviderAdapter(
+        client,
+        peer_ip_provider=lambda: peer_ip,
+        reset_peer_ip=lambda: None,
+    )
+
+
+def test_http_provider_adapter_allows_preflight_peer_without_reresolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """peer 命中发送前 DNS 快照时直接放行，不触发连接后重解析。"""
+    call_count = _rotating_dns(monkeypatch, [["8.8.8.8", "9.9.9.9"]])
+    adapter = _peer_adapter("8.8.8.8")
+
+    assert adapter.call(_route(), {"message": "private"}, timeout_seconds=1) == {"ok": True}
+    assert call_count[0] == 1
+
+
+def test_http_provider_adapter_allows_peer_from_post_connect_dns_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """peer 只命中连接后一次重解析的新公网集合时放行（合法 DNS/CDN 轮换）。"""
+    # 发送前解析到 8.8.8.8；连接后真实 peer 是轮换出的新公网节点 9.9.9.9。
+    call_count = _rotating_dns(monkeypatch, [["8.8.8.8"], ["9.9.9.9"]])
+    adapter = _peer_adapter("9.9.9.9")
+
+    assert adapter.call(_route(), {"message": "private"}, timeout_seconds=1) == {"ok": True}
+    assert call_count[0] == 2
+
+
+def test_http_provider_adapter_rejects_peer_outside_dns_union(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """peer 不在“发送前集合 ∪ 连接后重解析集合”时仍 fail-closed。"""
+    call_count = _rotating_dns(monkeypatch, [["8.8.8.8"], ["9.9.9.9"]])
+    adapter = _peer_adapter("1.1.1.1")
+
+    with pytest.raises(ValueError, match="MODEL_PROVIDER_PEER_MISMATCH"):
+        adapter.call(_route(), {"message": "private"}, timeout_seconds=1)
+    assert call_count[0] == 2
+
+
+@pytest.mark.parametrize(
+    "peer_ip",
+    ("10.0.0.8", "127.0.0.1", "169.254.169.254", "fd00::8"),
+    ids=("private", "loopback", "link_local", "ipv6_private"),
+)
+def test_http_provider_adapter_rejects_non_public_peer_without_reresolution(
+    monkeypatch: pytest.MonkeyPatch, peer_ip: str
+) -> None:
+    """对端是私网/回环/保留地址时立即拒绝，且不再触发 DNS 重解析。"""
+    call_count = _rotating_dns(monkeypatch, [["8.8.8.8"]])
+    adapter = _peer_adapter(peer_ip)
+
+    with pytest.raises(ValueError, match="MODEL_PROVIDER_PEER_MISMATCH"):
+        adapter.call(_route(), {"message": "private"}, timeout_seconds=1)
+    # 非公网对端不进入集合并集比对：只应有发送前那一次解析。
+    assert call_count[0] == 1
+
+
+def test_http_provider_adapter_fails_closed_when_post_connect_reresolution_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连接后重解析失败（DNS 瞬时故障）时继续 fail-closed。"""
+    call_count = [0]
+
+    def resolve(host: object, port: object, *args: object, **kwargs: object) -> object:
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+        raise OSError("dns temporarily unavailable")
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    adapter = _peer_adapter("9.9.9.9")
+
+    with pytest.raises(ValueError, match="MODEL_PROVIDER_PEER_MISMATCH"):
+        adapter.call(_route(), {"message": "private"}, timeout_seconds=1)
+    assert call_count[0] == 2
+
+
 def _run_session() -> tuple[object, LeaseContext]:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
