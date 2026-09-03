@@ -323,6 +323,14 @@ class WorkflowExecutor:
             run.status_version += 1
             self._outbox.append_callback_event(run, "run_started")
         run.started_at = run.started_at or datetime.now(UTC)
+        # 通用 agent 执行起点打点：所有注册进来的 agent（含未来新增）都会
+        # 经过这里，日志带上 agent 名字+版本号，方便对照 Run 确认线上
+        # 实际执行的包版本是否正确；只记版本元数据，不含任何输入内容。
+        logging.info(
+            "Agent 开始执行 agent=%s version=%s run_id=%s execution_attempt=%s steps=%s",
+            run.agent_id, run.agent_version, run_id,
+            lease_context.execution_attempt, len(static_nodes),
+        )
         completed_steps = len(completed_node_ids)
         # checkpoint 完整状态只存在 Fernet 密文中；恢复时丢弃仅供摘要展示的计数字段。
         if state_data is None:

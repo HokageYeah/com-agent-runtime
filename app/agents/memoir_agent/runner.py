@@ -955,10 +955,12 @@ class MemoirNodeRunner:
         # 结构修复快照随循环状态一并重置，避免 resume 重算时读到上一轮残留。
         self._loop_first_batch = None
         self._loop_final_batch = None
-        # 只记计数与预算快照，不记录素材正文或引用清单本身。
+        # 只记计数与预算快照，不记录素材正文或引用清单本身；
+        # agent_version 用于确认循环语义走的是哪个版本（1.0.6 起游标可重试）。
         logging.info(
-            "MemoirAgent 循环状态初始化完成 run_id=%s material_count=%s max_iterations=%s",
-            run.run_id, len(materials), budget.max_iterations,
+            "MemoirAgent 循环状态初始化完成 run_id=%s agent_version=%s "
+            "material_count=%s max_iterations=%s",
+            run.run_id, run.agent_version, len(materials), budget.max_iterations,
         )
 
     def run_loop_iteration(
