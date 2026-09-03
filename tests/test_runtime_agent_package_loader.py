@@ -314,6 +314,48 @@ def test_loads_memoir_agent_1_0_6_with_frozen_bounded_loop_dag() -> None:
     assert package.version == "1.0.6"
 
 
+def test_loads_memoir_agent_1_0_7_with_frozen_bounded_loop_dag() -> None:
+    """1.0.7 是独立不可变包：图结构与 1.0.6 一致，只扩预算额度。
+
+    1.0.7（预算扩容）不改任何循环语义（批次候选游标 / 首末批在场硬校验 /
+    required_scene_type 修复仍由 runner 按 agent_version >= 1.0.6 门控继承），
+    图结构、loop_policy 与 contract_version 全部冻结不变；线上 60 条素材档案
+    需 8 个正常批次，1.0.6 的 max_model_calls=8 零余量（一次瞬时失败即导致
+    末批跑不到、整 Run 失败），扩至 12 恢复重试余量。
+    """
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    package = service.load("memoir_agent", "1.0.7")
+
+    # 图结构与 1.0.6 完全一致：十节点 DAG，唯一 bounded_loop 节点策略逐字段相同。
+    package_106 = service.load("memoir_agent", "1.0.6")
+    assert [n.node_id for n in package.workflow_nodes] == [
+        n.node_id for n in package_106.workflow_nodes
+    ]
+    loop_nodes = [
+        node for node in package.workflow_nodes if node.node_type == "bounded_loop"
+    ]
+    assert len(loop_nodes) == 1
+    loop_107 = loop_nodes[0].loop_policy
+    loop_106 = next(
+        node for node in package_106.workflow_nodes
+        if node.node_type == "bounded_loop"
+    ).loop_policy
+    assert loop_107 is not None and loop_106 is not None
+    assert loop_107.model_dump() == loop_106.model_dump()
+    # 预算额度：12 = 9 个正常批次（约 72 条素材）+ 2 次瞬时重试 + 1 次修复空间；
+    # token / cost 额度随迭代额度按 12/8 比例同步扩容。
+    assert package.policy.max_model_calls == 12
+    assert package.policy.max_tokens == 150000
+    assert package.policy.max_model_cost == 3.0
+    # digest 与全部历史版本（含 1.0.6）不同，契约版本不随 Agent 版本升级。
+    for version in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6"):
+        assert package.package_digest != service.load("memoir_agent", version).package_digest
+    assert package.contract_version == "1.0.0"
+    assert package.version == "1.0.7"
+
+
 def test_memoir_agent_1_0_6_orders_media_before_safety_and_publish() -> None:
     """1.0.6 图结构与 1.0.5 冻结一致：媒体降级仍在最终安全审核和发布前。"""
     package_root = Path(__file__).parents[1] / "app" / "agents"

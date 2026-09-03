@@ -102,6 +102,9 @@ _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
     # 1.0.6（批次候选游标 + 首/末批结构硬校验）只改 runner 循环语义与 prompt，
     # Tool 合同零变更，沿用 v1.1.0；未登记会导致 load_snapshot 无日志瞬时失败。
     "1.0.6": "1.1.0",
+    # 1.0.7（预算扩容）只调 agent.yaml 额度，循环语义与 1.0.6 一致，
+    # Tool 合同零变更，沿用 v1.1.0；同样必须登记，否则 load_snapshot 瞬时失败。
+    "1.0.7": "1.1.0",
 }
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 

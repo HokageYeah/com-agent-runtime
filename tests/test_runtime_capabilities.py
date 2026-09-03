@@ -89,6 +89,21 @@ def test_tool_wire_version_registers_1_0_6() -> None:
     assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.4"] == "1.1.0"
 
 
+def test_tool_wire_version_registers_1_0_7() -> None:
+    """wire 版本表：1.0.7（预算扩容）必须登记 v1.1.0。
+
+    1.0.7 只调 agent.yaml 额度，Tool wire 合同零变更沿用 1.1.0；
+    未登记时 Worker 发包前以 TOOL_WIRE_VERSION_INVALID 瞬时失败（无日志、
+    无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
+    """
+    from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
+
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.7"] == "1.1.0"
+    # 历史版本的登记不得漂移。
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.6"] == "1.1.0"
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.5"] == "1.1.0"
+
+
 def test_runtime_capabilities_requires_valid_service_signature(client) -> None:
     """能力清单属于服务间协商数据，不能仅凭伪造 client id 获取。"""
     timestamp = str(int(datetime.now(UTC).timestamp()))
@@ -102,7 +117,7 @@ def test_runtime_capabilities_requires_valid_service_signature(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["contract_version"] == "1.0.0"
-    assert payload["agents"] == [{"agent_id": "memoir_agent", "version": "1.0.6"}]
+    assert payload["agents"] == [{"agent_id": "memoir_agent", "version": "1.0.7"}]
     assert set(payload["capabilities"]) == {
         "workflow_agent",
         "native_sse",

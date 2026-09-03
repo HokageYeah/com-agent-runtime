@@ -929,6 +929,49 @@ def test_106_persistent_failures_converge_without_busy_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 8b. 1.0.7 语义继承：预算扩容不改变 1.0.6 批次候选游标行为
+# ---------------------------------------------------------------------------
+# 1.0.7 只调 agent.yaml 额度（max_model_calls 8→12 等），runner 循环语义按
+# agent_version >= 1.0.6 门控对 1.0.7 天然成立；本节锁住这一继承关系，
+# 防止后续版本升级时误把 1.0.7 排除在批次重试语义之外。
+
+
+def test_107_inherits_106_candidate_cursor_retry_semantics() -> None:
+    """1.0.7：瞬时失败不消费批次素材，下一轮同批重试成功（与 1.0.6 同形）。
+
+    该场景正是 1.0.6 生产失败（run ab6fcbfc）的缩影：一次瞬时失败烧掉一轮
+    迭代；区别在于 1.0.7 的 max_model_calls=12 为这种重试留出了额度。
+    """
+    gateway = FlakyModelGateway(
+        outputs=[
+            _payload(
+                _scene("s2-1", "cover", ["diary:m1"]),
+                _scene("s2-2", "summary", ["diary:m2"]),
+            )
+        ],
+        fail_first=1,
+        token_budget=10,  # m1+m2 同批且即收尾批
+    )
+    runner = MemoirNodeRunner(object(), model_gateway=gateway)
+    state = AgentState(sanitized_material=_sanitized(*_token_materials(2, 20)))
+    run = _run("1.0.7")
+    runner.begin_loop(LOOP_NODE, run, state, BUDGET)
+
+    with raises(RuntimeError, match="LOOP_BATCH_MODEL_UNAVAILABLE"):
+        runner.run_loop_iteration(LOOP_NODE, run, state, 1, BUDGET)
+    assert state.scenes is None
+
+    second = runner.run_loop_iteration(LOOP_NODE, run, state, 2, BUDGET)
+    # 恢复后仍是同一批素材（m1+m2），候选游标语义与 1.0.6 完全一致。
+    _, retry_request = gateway.calls[1]
+    assert [item["source_ref"] for item in retry_request["materials"]] == [  # type: ignore[union-attr]
+        "diary:m1", "diary:m2",
+    ]
+    assert retry_request["input"]["is_final_batch"] is True  # type: ignore[index]
+    assert second.outcome == "complete"
+
+
+# ---------------------------------------------------------------------------
 # 9. 1.0.6 定向结构修复：受信任字段 required_scene_type（1.0.5 请求形状不变）
 # ---------------------------------------------------------------------------
 

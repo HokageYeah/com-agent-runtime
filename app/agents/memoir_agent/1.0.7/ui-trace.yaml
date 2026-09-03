@@ -1,0 +1,6 @@
+mode: public_summary
+step_labels:
+  load_snapshot: 读取回忆素材
+  generate_scene_batches: 动态生成回忆场景
+  repair_coverage_gaps: 补齐缺失回忆
+  publish_document: 发布回忆录

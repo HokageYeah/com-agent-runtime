@@ -48,7 +48,8 @@
     "relaxed_agent_versions": [
       "1.0.4",
       "1.0.5",
-      "1.0.6"
+      "1.0.6",
+      "1.0.7"
     ],
     "shared": {
       "scene_count_min": 3,

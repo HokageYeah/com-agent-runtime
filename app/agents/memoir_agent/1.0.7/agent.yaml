@@ -1,0 +1,38 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.7（预算扩容）：循环语义与 1.0.6 逐字节一致（批次候选
+# 游标 / 首末批在场硬校验 / required_scene_type 定向修复全部由 runner 按
+# agent_version >= 1.0.6 门控，1.0.7 天然继承；1.0.5 及更早冻结语义不变），
+# 本版本只扩预算额度——线上 60 条素材档案需 ceil(60/8)=8 个正常批次，
+# 1.0.6 的 max_model_calls=8（按约 40 条素材定容）余量为零：任何一次瞬时
+# 失败烧掉一轮迭代后末批永远跑不到（run ab6fcbfc，LOOP_SUMMARY_MISSING
+# → LOOP_BODY_FAILED 整 Run 失败）。额度扩至 12 恢复重试余量。
+# 契约零变更：Snapshot/Scene/Action/PlaybackDocument wire 不变，
+# contract_version 仍为 1.0.0（Tool/Snapshot/Playback 契约不随 Agent 版本升级）。
+version: 1.0.7
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+  # M7 bounded_loop 预算继承（inherit_run_limits_v1）要求以下额度在 Run 创建时
+  # 全部冻结为有限正值，任一缺失会触发 LOOP_BUDGET_PROFILE_INVALID 并终结 Run
+  # （executor fail closed）。取值与 tests 权威 fixture 一致；额度容量说明：
+  # 1.0.6 候选游标让瞬时失败消耗额外迭代重试同批，max_model_calls=12 可支撑
+  # 9 个正常批次（约 72 条素材，每批至多 8 条）+ 2 次瞬时重试 + 1 次修复空间。
+  max_model_calls: 12
+  # 单 Run 模型 token 总量上限（输入按保守预留计量）：随迭代额度 8→12 按比例
+  # 扩容（100000 × 12/8），避免 token 先于迭代触底复现同类零余量整 Run 失败。
+  max_tokens: 150000
+  # 单 Run 模型成本上限（货币单位与网关计量一致）：与迭代额度同比例扩容。
+  max_model_cost: 3.0
+  # 单 Run 执行时长上限（秒）：实测 8 轮迭代 Loop 约 35s、全链约 44s，
+  # 12 轮约 65s，300s 余量充足，维持不变。
+  max_run_seconds: 300
+  # 单 Run 最大步数（bounded_loop 迭代不占步数、由模型额度单独封顶）。
+  max_steps: 32
+prompts:
+  - scene-batch-generate.v1.md
+  - coverage-repair.v1.md
+  - safety-review.v1.md
+  - structured-output-repair.v1.md
