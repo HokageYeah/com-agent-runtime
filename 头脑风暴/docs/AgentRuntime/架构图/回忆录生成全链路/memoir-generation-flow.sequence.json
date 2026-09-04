@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "回忆录生成全链路时序",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [1080, 1190],
+    "views": [
+      {
+        "id": "create",
+        "label": "① 创建作品",
+        "focus": ["miniapp", "biz"],
+        "note": "点击生成只创建 baseline 作品和快照任务，接口立刻返回。"
+      },
+      {
+        "id": "launch",
+        "label": "② 后台启动",
+        "focus": ["bizworker", "biz", "rtapi"],
+        "note": "业务 Worker 两段握手：held create 占位、绑定 run_id、start 才开跑。"
+      },
+      {
+        "id": "generate",
+        "label": "③ 生成与发布",
+        "focus": ["rtworker", "model", "biz"],
+        "note": "Runtime Worker 十节点工作流读素材、调模型、原子发布作品。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "miniapp",
+      "type": "frontend",
+      "label": "小程序前端",
+      "sublabel": "couple-diary-f"
+    },
+    {
+      "id": "biz",
+      "type": "backend",
+      "label": "业务后端",
+      "sublabel": "couple-diary-b"
+    },
+    {
+      "id": "bizworker",
+      "type": "backend",
+      "label": "业务 Worker",
+      "sublabel": "run_memory_runtime_worker"
+    },
+    {
+      "id": "rtapi",
+      "type": "backend",
+      "label": "Runtime API",
+      "sublabel": "com-agent-runtime"
+    },
+    {
+      "id": "rtworker",
+      "type": "backend",
+      "label": "Runtime Worker",
+      "sublabel": "MemoirAgent 工作流"
+    },
+    {
+      "id": "model",
+      "type": "cloud",
+      "label": "模型网关",
+      "sublabel": "ModelGateway"
+    }
+  ],
+  "segments": [
+    { "from": 90, "to": 360, "label": "① 创建与轮询" },
+    { "from": 380, "to": 660, "label": "② 后台启动" },
+    { "from": 680, "to": 1000, "label": "③ 生成与发布" }
+  ],
+  "messages": [
+    {
+      "from": "miniapp",
+      "to": "biz",
+      "y": 180,
+      "label": "POST /api/v1/memory/manual-generations",
+      "variant": "emphasis",
+      "note": "点击「生成回忆录」；带密码 grant 与幂等键防重复。"
+    },
+    {
+      "from": "biz",
+      "to": "miniapp",
+      "y": 222,
+      "label": "archiveId + contentStatus=baseline",
+      "variant": "return",
+      "note": "建 Archive(rev 0) + Snapshot(pending)，写 outbox 事件后立即返回。"
+    },
+    {
+      "from": "bizworker",
+      "to": "biz",
+      "y": 284,
+      "label": "物化 Snapshot（pending→ready）",
+      "note": "memory_snapshot_materializer：冻结五类素材清单并加密，产生 launch_runtime 事件。"
+    },
+    {
+      "from": "bizworker",
+      "to": "rtapi",
+      "y": 326,
+      "label": "held create：POST /api/v1/runtime/agent-runs",
+      "variant": "security",
+      "note": "MemoryRuntimeAdapterService.held_create，HMAC 签名；只占位不执行。"
+    },
+    {
+      "from": "rtapi",
+      "to": "bizworker",
+      "y": 368,
+      "label": "201 + run_id（held）",
+      "variant": "return"
+    },
+    {
+      "from": "bizworker",
+      "to": "biz",
+      "y": 410,
+      "label": "CAS 绑定 run_id → Archive",
+      "note": "T2 原子绑定；失败则对孤儿 run 做 cancel + purge 补偿。"
+    },
+    {
+      "from": "bizworker",
+      "to": "rtapi",
+      "y": 452,
+      "label": "start：POST /agent-runs/{run_id}/start",
+      "variant": "emphasis"
+    },
+    {
+      "from": "rtapi",
+      "to": "rtworker",
+      "y": 506,
+      "label": "WorkerLoop 认领 Run",
+      "note": "按 checkpoint 边界执行或续跑；崩溃重启后不重头再来。"
+    },
+    {
+      "from": "rtworker",
+      "to": "biz",
+      "y": 550,
+      "label": "memory.get_snapshot（读脱敏素材）",
+      "variant": "security",
+      "note": "业务内部工具端点 /api/v1/internal/agent-tools，HMAC 校验。"
+    },
+    {
+      "from": "biz",
+      "to": "rtworker",
+      "y": 592,
+      "label": "五类素材快照（日记/赌局/手帐/愿望/清单）",
+      "variant": "return"
+    },
+    {
+      "from": "rtworker",
+      "to": "model",
+      "y": 636,
+      "label": "generate_scene_batch 分批生成",
+      "variant": "emphasis",
+      "note": "按批调模型产出 3–8 张 Scene；缺失由 repair_coverage_gaps 补齐。"
+    },
+    {
+      "from": "model",
+      "to": "rtworker",
+      "y": 678,
+      "label": "场景草稿（JSON 契约）",
+      "variant": "return"
+    },
+    {
+      "from": "rtworker",
+      "to": "biz",
+      "y": 722,
+      "label": "memory.publish_playback_document（原子发布）",
+      "variant": "security",
+      "note": "safety_review 通过后整份作品一个事务发布并切换 published_revision；失败播放 baseline。"
+    },
+    {
+      "from": "rtworker",
+      "to": "biz",
+      "y": 766,
+      "label": "callback：run 状态变更",
+      "variant": "dashed",
+      "note": "/api/v1/internal/memory-callbacks 更新 RunRef 状态；重复/乱序不重写。"
+    },
+    {
+      "from": "miniapp",
+      "to": "biz",
+      "y": 820,
+      "label": "GET /archives/{id}/generation-status",
+      "note": "前端退避轮询业务后端，从不直连 Runtime。"
+    },
+    {
+      "from": "biz",
+      "to": "miniapp",
+      "y": 862,
+      "label": "succeeded + publishedRevision",
+      "variant": "return"
+    },
+    {
+      "from": "miniapp",
+      "to": "biz",
+      "y": 904,
+      "label": "GET /archives/{id}/playback"
+    },
+    {
+      "from": "biz",
+      "to": "miniapp",
+      "y": 946,
+      "label": "PlaybackDocument（Scene/Action）",
+      "variant": "return",
+      "note": "前端播放器按 Scene 逐卡展示回忆录。"
+    }
+  ],
+  "activations": [
+    { "participant": "biz", "from": 174, "to": 232, "type": "backend" },
+    { "participant": "bizworker", "from": 278, "to": 464, "type": "backend" },
+    { "participant": "biz", "from": 278, "to": 420, "type": "backend" },
+    { "participant": "rtapi", "from": 320, "to": 380, "type": "backend" },
+    { "participant": "rtapi", "from": 446, "to": 514, "type": "backend" },
+    { "participant": "rtworker", "from": 500, "to": 782, "type": "backend" },
+    { "participant": "biz", "from": 544, "to": 600, "type": "backend" },
+    { "participant": "model", "from": 630, "to": 684, "type": "cloud" },
+    { "participant": "biz", "from": 716, "to": 778, "type": "backend" },
+    { "participant": "biz", "from": 814, "to": 958, "type": "backend" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "创建即返回",
+      "items": [
+        "点击生成只建 baseline 作品 + 快照任务，接口秒回 archiveId",
+        "资格校验和幂等键都在创建事务内完成",
+        "重素材冻结、加密、调模型全部放到后台"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "两段握手启动",
+      "items": [
+        "held create 只占位不执行，不占生成配额",
+        "业务库 CAS 绑定 run_id 成功后才 start",
+        "绑定失败的孤儿 run 自动 cancel + purge"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "发布即终态",
+      "items": [
+        "整份作品 safety_review 通过后一个事务原子发布",
+        "前端只轮询业务后端状态，从不直连 Runtime",
+        "生成失败时展示 revision 0 baseline，可重试"
+      ]
+    }
+  ]
+}
