@@ -2,7 +2,7 @@
 
 **状态：** 部署合同；当前仓库已提供基础 `Dockerfile`、test/production Compose、Docker CI，以及 tag 触发的腾讯云远程部署工作流（见第 9 节）。
 
-**Last Updated:** 2026-08-26
+**Last Updated:** 2026-09-04
 
 本文定义镜像、环境、进程、依赖、探针和回滚边界。实现 Dockerfile 或编排时必须遵守本文；本文不代表 Docker 产物已经构建或已经部署。
 
@@ -70,7 +70,7 @@ docker build --pull \
 - 运行时使用非 root 用户；镜像默认用户的 UID 不得为 `0`。
 - 生产镜像不携带 `.env*`、密钥文件、测试数据库数据或 shell history。
 - 不通过 `ARG`、构建日志、镜像 label 或 tag 传递 secret。
-- API、Worker、launcher、Reconciler 是四个独立 workload；每个容器只运行一个长期进程。
+- API、Worker、Reconciler 是 production 默认的三个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍作为第四个长期 workload 启动，production 通过 `legacy-launcher` profile 默认停用。每个容器只运行一个长期进程。
 - 只有 API 发布 HTTP 端口；Worker、launcher 和 Reconciler 不发布公网端口。
 - 不在任何一个 workload 中调用 `./agent-runtime.sh start`。该命令会把四类进程放入同一 supervisor，适合本机前台启动，不适合拆分后的容器部署。
 
@@ -80,23 +80,23 @@ docker build --pull \
 |---|---|---|
 | API | `python run_app.py` | 提供 HTTP API 和探针 |
 | Worker | `python -m app.worker --worker-id <stable-worker-id>` | 消费 outbox、claim Run 并执行 workflow |
-| launcher | `python -m app.scripts.agent_runtime_cli _launcher-loop` | 周期执行 `app.memory_runtime_launcher`，默认每 5 秒一轮 |
+| launcher | `python -m app.scripts.agent_runtime_cli _launcher-loop` | legacy workload：周期执行 `app.memory_runtime_launcher`，默认每 5 秒一轮；test 默认启动，production 默认停用（见第 7 节应急启用） |
 | Reconciler | `python -m app.reconciler --interval-seconds 300` | 周期执行 lease、状态、purge 和补偿对账 |
 
 `<stable-worker-id>` 必须由编排系统提供稳定且可观测的实例标识，不得把 secret 拼入进程参数。
 
 ### 一次性 prepare 与迁移
 
-迁移是独立的一次性 job，必须在 API/Worker/launcher/Reconciler 滚动发布前成功完成；四类长期 workload 不得各自启动迁移，也不得把迁移塞进每个容器的启动脚本。
+迁移是独立的一次性 job，必须在 API/Worker/Reconciler（及 test 或应急启用时的 launcher）滚动发布前成功完成；长期 workload 不得各自启动迁移，也不得把迁移塞进每个容器的启动脚本。
 
 ```bash
 ./agent-runtime.sh doctor "$ENVIRONMENT"
 ./agent-runtime.sh prepare "$ENVIRONMENT"
 ```
 
-`prepare` 只允许当前环境的固定 Runtime 专库，并执行 `alembic upgrade head` 与单 head 检查。生产发布后保持数据库在 head，不执行自动 downgrade。Package 注册是独立的幂等步骤，顺序为 `doctor -> prepare -> register -> 启动四类 workload`。
+`prepare` 只允许当前环境的固定 Runtime 专库，并执行 `alembic upgrade head` 与单 head 检查。生产发布后保持数据库在 head，不执行自动 downgrade。Package 注册是独立的幂等步骤，顺序为 `doctor -> prepare -> register -> 启动长期 workload`（test 为四个，production 默认为三个）。
 
-仓库 Compose 已把该顺序固化为硬门禁：`prepare` 先迁移，`register` 再对明确的 `AGENT_PACKAGE_VERSION` 执行 dry-run 和幂等注册，四个长期 workload 只依赖 `register: service_completed_successfully`。迁移、Package 校验或注册任一失败，`up` 都不会启动 API/Worker/launcher/Reconciler。
+仓库 Compose 已把该顺序固化为硬门禁：`prepare` 先迁移，`register` 再对明确的 `AGENT_PACKAGE_VERSION` 执行 dry-run 和幂等注册，长期 workload 只依赖 `register: service_completed_successfully`。迁移、Package 校验或注册任一失败，`up` 都不会启动任何长期 workload。production 的 `launcher` 挂 `legacy-launcher` profile，普通 `up` 不会创建它，只有显式 `--profile legacy-launcher` 才启动。
 
 ## 4. 依赖隔离
 
@@ -137,7 +137,7 @@ test/production 分别使用 `memoir-integration-test` / `memoir-integration-pro
 
 Runtime 的日志、trace、callback、audit、Artifact、Checkpoint、测试输出和镜像元数据只允许保存 ID、状态、错误码、计数、预算、版本和时间摘要。以下内容禁止越过隐私边界：prompt、日记或业务正文、模型原文、工具原始 payload、checkpoint 明文、签名 URL、secret、token、key、私有 URL。部署探针响应也不得返回 DSN、配置 URL、凭据或业务内容。
 
-当前仓库的 `app/scripts/docker-entrypoint.sh` 是历史辅助脚本，不是生产 Docker 合同；它带有固定的本地启动假设，禁止用于生产部署。生产入口必须采用本文的 secret 注入、一次性 prepare 和四 workload 拆分。
+当前仓库的 `app/scripts/docker-entrypoint.sh` 是历史辅助脚本，不是生产 Docker 合同；它带有固定的本地启动假设，禁止用于生产部署。生产入口必须采用本文的 secret 注入、一次性 prepare 和长期 workload 拆分（production 默认 API/Worker/Reconciler 三个）。
 
 ## 6. 健康与 readiness 冒烟
 
@@ -167,16 +167,28 @@ docker run --rm --entrypoint id \
 1. 当前 tag Action 采用服务器本地构建：`RUNTIME_IMAGE=com-agent-runtime:<deploy-tag>`，发布记录至少保存 Git commit/tag、本地 image ID、AgentPackage version 和 Alembic head。这不等于 registry digest 发布。
 2. `docker-compose.production.yml` 保留 registry digest 升级路径：接入 TCR 等镜像仓库后，把 `RUNTIME_IMAGE` 切到 `repository@sha256:<digest>` 并设 `RUNTIME_PULL_POLICY=always`。未完成镜像推送、扫描和 digest 记录前，不宣称“不可变 digest 发布已实现”。
 3. 记录旧/新镜像 tag、digest、AgentPackage version、数据库迁移 head 和配置版本；记录中不得包含 secret 或业务正文。
-4. Compose 先执行一次性 `prepare`，再执行 `register --dry-run` 和幂等注册；两道门禁成功后启动 API、Worker、launcher、Reconciler，并完成四个 API 冒烟请求。
+4. Compose 先执行一次性 `prepare`，再执行 `register --dry-run` 和幂等注册；两道门禁成功后启动长期 workload（test 为 API/Worker/launcher/Reconciler，production 默认为 API/Worker/Reconciler），并完成四个 API 冒烟请求。
 5. 回滚时停止新 digest 的 workload，部署已验证的旧 digest，并使用旧 Package version 做 `register --dry-run` 后再按需幂等注册；随后重新执行健康和 readiness 冒烟。
 6. 回滚镜像不等于回滚数据库。禁止为了配合旧镜像自动执行 `alembic downgrade`；若旧镜像不兼容当前 schema，必须恢复兼容镜像或走已审查的前向迁移/数据库恢复方案。
+
+production 默认不启动 legacy launcher；回忆录链路异常需要应急恢复历史补偿入口时，用 `legacy-launcher` profile 显式只拉起 launcher（`--no-deps` 避免牵动其他 workload，env 文件为服务器真实 production 配置路径，此处不含任何密钥）：
+
+```bash
+docker compose \
+  -p com-agent-runtime-production \
+  -f docker-compose.yml \
+  -f docker-compose.production.yml \
+  --env-file "/usr/HokageYeah/服务端系统/env/runtime-production.env" \
+  --profile legacy-launcher \
+  up -d --no-deps launcher
+```
 
 示例只展示引用格式，不代表真实仓库或 digest：
 
 ```bash
 OLD_IMAGE="registry.example.invalid/com-agent-runtime@sha256:<verified-old-digest>"
 docker pull "$OLD_IMAGE"
-# 编排系统将四类 workload 的 image 全部切换为 OLD_IMAGE。
+# 编排系统将长期 workload 的 image 全部切换为 OLD_IMAGE。
 ```
 
 ## 8. 验证命令
@@ -221,8 +233,9 @@ docker run --rm --entrypoint id \
 1. 按 tag 段选择 env 文件与 Compose 组合：test 用 `-f docker-compose.yml -f docker-compose.test.yml`，production 用 `-f docker-compose.yml -f docker-compose.production.yml`。
 2. 强制 `COMPOSE_PROJECT_NAME=com-agent-runtime-<environment>`，确保并创建 `memoir-integration-<environment>` 私有网络。
 3. 同时设置 `RUNTIME_IMAGE_REPOSITORY=com-agent-runtime`、`RUNTIME_IMAGE_TAG=<deploy-tag>` 和 `RUNTIME_IMAGE=com-agent-runtime:<deploy-tag>`，只执行 `build api` 生成所有 Runtime 服务共享的唯一发布镜像。
-4. `up -d --no-build` 按 `prepare -> register --dry-run -> register -> 四个长期 workload` 执行硬门禁，并保证启动阶段不会产生与发布 tag 不同的临时镜像；门禁失败时工作流自动输出 `prepare/register` 状态与最近 200 行安全日志。
-5. 重试检查四个 API 探针，并确认 API/Worker/launcher/Reconciler 全部 running。工作流不再对整台服务器执行全局 `docker image prune -f`。
+4. production 在总 `up` 之前先执行 `docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" rm --stop --force launcher`，清理上一版本遗留的 legacy launcher 容器（只移除该容器，不动 `runtime_logs` 卷和其他服务；失败即中止部署，不追加 `|| true`）。
+5. `up -d --no-build` 按 `prepare -> register --dry-run -> register -> 长期 workload` 执行硬门禁（test 启动四个长期 workload，production 默认启动 API/Worker/Reconciler 三个），并保证启动阶段不会产生与发布 tag 不同的临时镜像；门禁失败时工作流自动输出 `prepare/register` 状态与最近 200 行安全日志。
+6. 重试检查四个 API 探针，并确认长期 workload 全部 running：test 要求 API/Worker/launcher/Reconciler 均运行，production 要求 API/Worker/Reconciler 运行且 launcher 不在 running 服务中。工作流不再对整台服务器执行全局 `docker image prune -f`。
 
 服务器私有 env 文件按 `docker/backend/test.env.example` / `production.env.example` 创建，必须包含 `COMPOSE_PROJECT_NAME`、`ENVIRONMENT`、`MEMOIR_INTEGRATION_NETWORK`、`RUNTIME_ENV_FILE`、`AGENT_PACKAGE_VERSION`、当前环境 DB/Redis 与安全配置。test/production 的项目名、网络名、宿主 API 端口必须不同；当前冻结宿主端口分别是 `18002` / `18003`。
 

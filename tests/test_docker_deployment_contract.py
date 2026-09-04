@@ -11,6 +11,12 @@ def _compose(name: str) -> dict[str, object]:
     return yaml.safe_load((ROOT / name).read_text(encoding="utf-8"))
 
 
+def _workflow() -> str:
+    return (ROOT / ".github/workflows/com-agent-runtime.yml").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_runtime_compose_gates_long_lived_workloads_on_package_registration() -> None:
     """Package 未幂等注册时，任何长期进程都不得启动。"""
 
@@ -66,10 +72,21 @@ def test_runtime_overlays_cover_register_service() -> None:
         ]
 
 
+def test_runtime_production_overlay_gates_launcher_behind_legacy_profile() -> None:
+    """production 默认不启动 legacy launcher，只保留应急 profile 入口。"""
+
+    launcher = _compose("docker-compose.production.yml")["services"]["launcher"]
+    assert launcher["profiles"] == ["legacy-launcher"]
+
+
+def test_runtime_deploy_workflow_removes_stale_production_launcher() -> None:
+    """production 更新前必须清理上一版本遗留的 launcher 容器。"""
+
+    assert "rm --stop --force launcher" in _workflow()
+
+
 def test_runtime_deploy_workflow_serializes_and_verifies_complete_runtime() -> None:
-    workflow = (ROOT / ".github/workflows/com-agent-runtime.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = _workflow()
 
     assert "concurrency:" in workflow
     assert "flock" in workflow
@@ -81,8 +98,13 @@ def test_runtime_deploy_workflow_serializes_and_verifies_complete_runtime() -> N
     assert '--env-file "${ENV_FILE}" up -d --no-build' in workflow
     assert 'ps -a prepare register' in workflow
     assert 'logs --tail=200 prepare register' in workflow
-    for service_name in ("api", "launcher", "worker", "reconciler"):
+    # api/worker/reconciler 是两环境公共长期 workload，workflow 无条件要求 running。
+    for service_name in ("api", "worker", "reconciler"):
         assert f'grep -qx "{service_name}"' in workflow
+    # launcher 运行断言按环境分化：test 分支要求 running，production 出现即报错。
+    assert '[ "${APP_ENV}" = "test" ]; then' in workflow
+    assert 'grep -qx "launcher"' in workflow
+    assert "production 不应运行 legacy launcher" in workflow
 
 
 def test_runtime_server_env_templates_freeze_distinct_test_and_production_identity() -> None:

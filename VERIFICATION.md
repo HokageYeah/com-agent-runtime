@@ -10,7 +10,7 @@
 
 `SERVICE_BASE_URL`、外部 exporter、HMAC、Fernet、JWT 和私有媒体桶的生成与填写规则见 [AgentRuntime 环境配置说明](ENV_CONFIG.md)。本文只保留启动顺序和可观察的验收结果。
 
-Runtime Dockerfile、基础 Compose、test/production Compose、Docker CI 和 tag 触发的远程部署工作流已进入本仓库。Compose 硬门禁顺序是 `prepare -> register --dry-run -> register -> 四个长期 workload`，test/production 使用独立 Compose project 和私有集成网络。当前远端 Action 是服务器本地 tag 构建，registry digest 是未来升级路径。
+Runtime Dockerfile、基础 Compose、test/production Compose、Docker CI 和 tag 触发的远程部署工作流已进入本仓库。Compose 硬门禁顺序是 `prepare -> register --dry-run -> register -> 长期 workload`：test 默认启动 API、Worker、launcher、Reconciler 四个长期 workload；production 默认只启动 API、Worker、Reconciler 三个长期 workload，legacy launcher 挂 `legacy-launcher` profile 默认停用（应急时用 `--profile legacy-launcher` 显式开启）。test/production 使用独立 Compose project 和私有集成网络。当前远端 Action 是服务器本地 tag 构建，registry digest 是未来升级路径。
 
 ## Docker 部署契约验证
 
@@ -50,7 +50,34 @@ curl --fail --silent --show-error "$BASE_URL/api/v1/runtime/health/live"
 curl --fail --silent --show-error "$BASE_URL/api/v1/runtime/health/ready"
 ```
 
-四个请求必须返回 HTTP 200；四类 workload 必须分别运行，prepare/migrations 只能成功执行一次。所有输出不得包含 secret、DSN、私有 URL、prompt、正文、模型原文或工具 payload。
+四个请求必须返回 HTTP 200；长期 workload 必须分别运行（test 为 API/Worker/launcher/Reconciler 四类，production 默认为 API/Worker/Reconciler 三类），prepare/migrations 只能成功执行一次。所有输出不得包含 secret、DSN、私有 URL、prompt、正文、模型原文或工具 payload。
+
+两套 Compose 的默认服务集合可用以下命令核对（`RUNTIME_IMAGE` 用占位值满足 production overlay 的 fail-closed 插值，不是真实镜像引用；命令不读取真实生产凭据）：
+
+```bash
+RUNTIME_IMAGE=com-agent-runtime:services-verify \
+docker compose -f docker-compose.yml -f docker-compose.test.yml \
+  --env-file docker/backend/test.env.example config --services
+```
+
+预期输出包含 `api`、`worker`、`reconciler` 和 `launcher`。
+
+```bash
+RUNTIME_IMAGE=com-agent-runtime:services-verify \
+docker compose -f docker-compose.yml -f docker-compose.production.yml \
+  --env-file docker/backend/production.env.example config --services
+```
+
+预期输出包含 `api`、`worker`、`reconciler`，且不包含 `launcher`。
+
+```bash
+RUNTIME_IMAGE=com-agent-runtime:services-verify \
+docker compose -f docker-compose.yml -f docker-compose.production.yml \
+  --env-file docker/backend/production.env.example \
+  --profile legacy-launcher config --services
+```
+
+预期输出重新包含 `launcher`，证明 production 应急回滚入口有效（完整应急启动命令见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md) 第 7 节）。
 
 ## 一键配置、启动与验收
 
@@ -239,7 +266,7 @@ MODEL_PROVIDER_API_KEYS_JSON={"memoir-private-v1":"<由 secret manager 注入的
 ./agent-runtime.sh prepare production
 ```
 
-预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 和周期 launcher 分为独立 workload，并使用同一权威数据库与配置版本。
+预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 分为独立 workload 并使用同一权威数据库与配置版本，Docker production 默认不启动 legacy launcher（应急启用方式见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)）。
 
 AgentPackage 不会由应用运行时自动选版本：手工部署时须显式执行下列命令；Docker Compose 部署则由 `register` 一次性服务对 `AGENT_PACKAGE_VERSION` 执行同样的 dry-run + 幂等注册，失败时不启动长期 workload：
 

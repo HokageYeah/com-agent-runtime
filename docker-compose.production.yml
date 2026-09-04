@@ -41,6 +41,10 @@ services:
       DB_AUTO_CREATE: "false"
 
   launcher:
+    # production 回忆录由业务侧直接发起，launcher 为 legacy 兼容入口默认不启动。
+    # 应急回滚时加 --profile legacy-launcher 显式启用。
+    profiles:
+      - legacy-launcher
     image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
     pull_policy: ${RUNTIME_PULL_POLICY:-missing}
     environment:

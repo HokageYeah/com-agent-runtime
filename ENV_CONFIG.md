@@ -22,7 +22,7 @@ Docker 发布合同见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)。
 
 - production 不在 Runtime Compose 中部署 MySQL/Redis sidecar；单 CVM 可通过共享私网复用 Couple Diary 实例，但 `DB_NAME` 固定为 `couple_diary_agent_runtime_prod`、账号只授权该 schema、Redis 固定使用 `/15`且 `DB_AUTO_CREATE=false`。上量后替换为 AgentRuntime 专用腾讯云私网实例。
 - test 必须连接与 development、production 完全隔离的数据库和 Redis；本地默认 Redis DB 为 `/14`，临时依赖和随机凭据在验收结束后删除。
-- API、Worker、launcher、Reconciler 分别运行在独立 workload；`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。
+- API、Worker、Reconciler 是 production 默认的三个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动，production 挂 `legacy-launcher` profile 默认停用（应急时显式开启）。`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。
 - Docker 直接注入 JSON 配置时必须注入已经展开的值，不能假设 Compose 会展开 JSON 字符串内的 `${...}`。
 - 生产日志、trace、callback、audit、Artifact、Checkpoint 和探针响应不得包含 secret、DSN、私有 URL、prompt、业务正文、模型原文或工具 payload。
 
@@ -253,7 +253,7 @@ poetry run python -c 'from cryptography.fernet import Fernet; print(Fernet.gener
 MEMORY_SNAPSHOT_FERNET_KEY=
 ```
 
-development/test 由 `configure` 自动生成。production 应由 secret manager 生成或导入，并向 API、Worker、Reconciler 和 launcher 注入同一个版本。
+development/test 由 `configure` 自动生成。production 应由 secret manager 生成或导入，并向 API、Worker、Reconciler（以及应急启用 legacy launcher 时的 launcher 容器）注入同一个版本。
 
 当前运行时不提供旧 Fernet key 钥匙环自动回退解密。直接替换密钥会使旧 Snapshot 无法解密；轮换前必须另行实施受控的旧数据解密/重加密迁移、备份和回滚计划。
 

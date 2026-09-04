@@ -95,6 +95,52 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.production.yml
           config --quiet
 
+      # 服务集合合同：production 默认不得启动 legacy launcher（已移入
+      # legacy-launcher profile），test 默认必须保留 launcher 历史链路，
+      # 防止后续改动把 launcher 误放回 production 默认服务集合。
+      - name: Assert Compose service sets match launcher profile policy
+        env:
+          # 同时携带 test 与 production 两套占位变量（沿用上方校验步骤的
+          # 变量名和值）；ENVIRONMENT/COMPOSE_PROJECT_NAME/NETWORK 两环境
+          # 不同名值冲突，在脚本内按块 export 覆盖，与 deploy 脚本风格一致。
+          COMPOSE_PROJECT_NAME: com-agent-runtime-ci-test
+          RUNTIME_ENV_FILE: .env.example
+          ENVIRONMENT: test
+          MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-test
+          # M7 目标包版本：与 Business 新 Run 默认版本对齐（仅配置校验目标，不构成部署）。
+          AGENT_PACKAGE_VERSION: 1.0.7
+          # test overlay 隔离 MySQL 的插值占位变量（仅 config 插值，不启动容器）。
+          DB_NAME: couple_diary_agent_runtime_test
+          DB_USER: runtime_ci
+          DB_PASSWORD: ci-not-a-secret
+          RUNTIME_MYSQL_ROOT_PASSWORD: ci-not-a-secret
+          # production overlay 的镜像插值占位变量（本地 tag，不访问 registry）。
+          RUNTIME_IMAGE: com-agent-runtime:ci-placeholder
+        run: |
+          echo "校验 test 默认服务集合必须包含 api/launcher/worker/reconciler..."
+          services="$(docker compose -f docker-compose.yml -f docker-compose.test.yml config --services)"
+          printf '%s\n' "${services}" | grep -qx "api"
+          printf '%s\n' "${services}" | grep -qx "launcher"
+          printf '%s\n' "${services}" | grep -qx "worker"
+          printf '%s\n' "${services}" | grep -qx "reconciler"
+
+          echo "校验 production 默认服务集合包含 api/worker/reconciler 且不得包含 launcher..."
+          export ENVIRONMENT="production"
+          export COMPOSE_PROJECT_NAME="com-agent-runtime-ci-production"
+          export MEMOIR_INTEGRATION_NETWORK="memoir-integration-ci-production"
+          services="$(docker compose -f docker-compose.yml -f docker-compose.production.yml config --services)"
+          printf '%s\n' "${services}" | grep -qx "api"
+          printf '%s\n' "${services}" | grep -qx "worker"
+          printf '%s\n' "${services}" | grep -qx "reconciler"
+          if printf '%s\n' "${services}" | grep -qx launcher; then
+            echo "production 默认服务集合不应包含 launcher（launcher 应仅存在于 legacy-launcher profile）"
+            exit 1
+          fi
+
+          echo "校验 production 显式 --profile legacy-launcher 后 launcher 回到服务集合（应急回滚入口有效）..."
+          services="$(docker compose -f docker-compose.yml -f docker-compose.production.yml --profile legacy-launcher config --services)"
+          printf '%s\n' "${services}" | grep -qx "launcher"
+
       - name: Build Runtime Docker image
         env:
           COMPOSE_PROJECT_NAME: com-agent-runtime-ci-test
@@ -326,7 +372,15 @@ jobs:
             echo "开始构建唯一发布镜像（所有 Runtime 服务复用 api 的镜像产物）..."
             docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" build api
 
-            echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动四个长期 workload）..."
+            # production 已把 launcher 移入 legacy-launcher profile，普通 up 不再创建它，
+            # 但不会删除旧版本已运行的容器；总 up 前先清理遗留 launcher。
+            # 失败即中止部署（不加 || true），避免旧 launcher 删除失败时 Action 假成功。
+            if [ "${APP_ENV}" = "production" ]; then
+              echo "移除上一版本遗留的 production legacy launcher 容器（launcher 已移入 legacy-launcher profile）..."
+              docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" rm --stop --force launcher
+            fi
+
+            echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动 ${APP_ENV} 环境的长期 workload：production 三个 / test 四个）..."
             if ! docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" up -d --no-build; then
               echo "Runtime 启动门禁失败，输出 prepare/register 状态与最近日志："
               # 只输出固定诊断和应用日志；Runtime doctor 不回显数据库密码或 DSN。
@@ -356,11 +410,23 @@ jobs:
             smoke_url /api/v1/runtime/health/ready
 
             running_services="$(docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps --status running --services)"
+            # api/worker/reconciler 是两环境公共长期 workload，无条件要求 running。
             printf '%s\n' "${running_services}" | grep -qx "api"
-            printf '%s\n' "${running_services}" | grep -qx "launcher"
             printf '%s\n' "${running_services}" | grep -qx "worker"
             printf '%s\n' "${running_services}" | grep -qx "reconciler"
-            echo "Runtime 四个长期 workload 与四个 API 探针全部通过"
+            # launcher 按环境分化：test 保留历史链路必须 running；
+            # production 默认停用，出现即视为部署异常（set -e 下 if 条件内的 grep 不会误触发退出）。
+            if [ "${APP_ENV}" = "test" ]; then
+              printf '%s\n' "${running_services}" | grep -qx "launcher"
+            elif printf '%s\n' "${running_services}" | grep -qx launcher; then
+              echo "production 不应运行 legacy launcher（应急启用请显式使用 --profile legacy-launcher）"
+              exit 1
+            fi
+            if [ "${APP_ENV}" = "production" ]; then
+              echo "Runtime production 三个长期 workload 与四个 API 探针全部通过"
+            else
+              echo "Runtime test 四个长期 workload 与四个 API 探针全部通过"
+            fi
 
             echo "部署完成，当前容器状态："
             docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps

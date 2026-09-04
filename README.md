@@ -307,7 +307,7 @@ com-agent-runtime/
 
 - 镜像 tag 小写化后必须且只能包含 `test` 或 `production` 之一；两者同时出现或都未出现时拒绝部署。
 - 镜像 tag/digest 只标识代码产物和环境；AgentPackage 版本必须另行通过 `register --version` 明确指定，不能从 tag 推导。
-- API、Worker、launcher、Reconciler 是四个独立 workload；Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，四个长期 workload 只在两道门禁都成功后启动。
+- API、Worker、Reconciler 是 production 默认的三个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动（四个长期 workload），production 通过 `legacy-launcher` profile 默认停用，应急时用 `--profile legacy-launcher` 显式开启。Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，长期 workload 只在两道门禁都成功后启动。
 - Docker 容器内 Runtime API 固定监听 `8002`；腾讯云宿主回环端口使用 test `18002`、production `18003`，情侣日记仍通过私有别名 `http://runtime-api:8002` 访问。
 - production 不在 Runtime Compose 内创建 MySQL/Redis；单 CVM 可通过共享私网复用 Couple Diary 实例，但固定独立库 `couple_diary_agent_runtime_prod`、最小权限账号和 Redis `/15`，并保持 `DB_AUTO_CREATE=false`；test 继续使用完全隔离的依赖和凭据。
 - production Compose 强制显式注入 `RUNTIME_IMAGE`（缺失即 fail-closed）：默认服务器本地构建 tag 模式（`RUNTIME_PULL_POLICY` 默认 `missing`），接镜像仓库后可切 `repository@sha256:<digest>` 加 `RUNTIME_PULL_POLICY: always`，可变兜底 tag 无法进入生产；Worker 设置 `stop_grace_period` 覆盖整个节点执行预算，保证 SIGTERM draining 语义不被强杀破坏。
@@ -451,7 +451,7 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
 - 外部 exporter 未完成数据治理前保持关闭。
 - AgentPackage 已按明确版本注册；磁盘上存在包不等于数据库已注册。
 
-单机部署可以使用 `start production` 前台托管全部进程。容器或 Kubernetes 应把 API、Worker、Reconciler 和周期 launcher 拆成独立 workload，并注入同一套受控配置；不要在多个容器内重复运行 supervisor。
+单机部署可以使用 `start production` 前台托管全部进程。容器或 Kubernetes 应把 API、Worker、Reconciler 拆成独立 workload 并注入同一套受控配置；Docker production 默认不启动 legacy launcher（应急启用见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md) 的 `legacy-launcher` profile 回滚入口）；不要在多个容器内重复运行 supervisor。
 
 ## 启动与运维脚本说明
 
