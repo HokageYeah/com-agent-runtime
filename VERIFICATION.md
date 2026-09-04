@@ -52,10 +52,10 @@ curl --fail --silent --show-error "$BASE_URL/api/v1/runtime/health/ready"
 
 四个请求必须返回 HTTP 200；长期 workload 必须分别运行（test 为 API/Worker/launcher/Reconciler 四类，production 默认为 API/Worker/Reconciler 三类），prepare/migrations 只能成功执行一次。所有输出不得包含 secret、DSN、私有 URL、prompt、正文、模型原文或工具 payload。
 
-两套 Compose 的默认服务集合可用以下命令核对（`RUNTIME_IMAGE` 用占位值满足 production overlay 的 fail-closed 插值，不是真实镜像引用；命令不读取真实生产凭据）：
+两套 Compose 的默认服务集合可用以下命令核对（`RUNTIME_IMAGE` 用占位值满足 production overlay 的 fail-closed 插值，`RUNTIME_ENV_FILE` 显式改用仓库示例文件；命令不读取真实镜像或生产凭据）：
 
 ```bash
-RUNTIME_IMAGE=com-agent-runtime:services-verify \
+RUNTIME_IMAGE=com-agent-runtime:services-verify RUNTIME_ENV_FILE=.env.example \
 docker compose -f docker-compose.yml -f docker-compose.test.yml \
   --env-file docker/backend/test.env.example config --services
 ```
@@ -63,7 +63,7 @@ docker compose -f docker-compose.yml -f docker-compose.test.yml \
 预期输出包含 `api`、`worker`、`reconciler` 和 `launcher`。
 
 ```bash
-RUNTIME_IMAGE=com-agent-runtime:services-verify \
+RUNTIME_IMAGE=com-agent-runtime:services-verify RUNTIME_ENV_FILE=.env.example \
 docker compose -f docker-compose.yml -f docker-compose.production.yml \
   --env-file docker/backend/production.env.example config --services
 ```
@@ -71,7 +71,7 @@ docker compose -f docker-compose.yml -f docker-compose.production.yml \
 预期输出包含 `api`、`worker`、`reconciler`，且不包含 `launcher`。
 
 ```bash
-RUNTIME_IMAGE=com-agent-runtime:services-verify \
+RUNTIME_IMAGE=com-agent-runtime:services-verify RUNTIME_ENV_FILE=.env.example \
 docker compose -f docker-compose.yml -f docker-compose.production.yml \
   --env-file docker/backend/production.env.example \
   --profile legacy-launcher config --services
