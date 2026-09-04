@@ -74,7 +74,7 @@ com-agent-runtime/
 │   │   └── memoir_agent/
 │   │       ├── runner.py                     # MemoirAgent 节点执行与版本门控
 │   │       ├── model_gateway.py              # Memoir 节点到公共 ModelGateway 的适配
-│   │       ├── 1.0.0/ ... 1.0.6/             # 不可变的版本化 AgentPackage
+│   │       ├── 1.0.0/ ... 1.0.7/             # 不可变的版本化 AgentPackage
 │   │       │   ├── agent.yaml                # 包身份、版本、策略、Prompt 清单
 │   │       │   ├── workflow.graph.py         # 受信任静态工作流声明
 │   │       │   ├── input.schema.json         # Run 输入 JSON Schema
@@ -372,8 +372,8 @@ poetry run alembic heads
 chmod 600 .env.development.local
 ./agent-runtime.sh doctor development
 ./agent-runtime.sh prepare development
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.6 --dry-run
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.6
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.7 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.7
 ./agent-runtime.sh start development
 ```
 
@@ -407,8 +407,8 @@ development 流控状态混用，在 `Redis URL` 提示处请明确输入
 chmod 600 .env.test.local
 ./agent-runtime.sh doctor test
 ./agent-runtime.sh prepare test
-./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.6 --dry-run
-./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.6
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.7 --dry-run
+./agent-runtime.sh register test --agent-id memoir_agent --version 1.0.7
 ./agent-runtime.sh start test
 ```
 
@@ -436,8 +436,8 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
 ```bash
 ./agent-runtime.sh doctor production
 ./agent-runtime.sh prepare production
-./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.6 --dry-run
-./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.6
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.7 --dry-run
+./agent-runtime.sh register production --agent-id memoir_agent --version 1.0.7
 ./agent-runtime.sh start production
 ```
 
@@ -621,7 +621,8 @@ AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不
 - `1.0.3`：媒体节点进入发布前链路，只为 `image` 场景生成配图。
 - `1.0.4`：已部署磁盘包；至少生成 3 个场景，场景数和正文长度不设上限。媒体开启时仅用场景正文逐场景尝试文生图，不读取用户照片；预算耗尽、媒体关闭或单图失败时降级为文字卡。
 - `1.0.5`：M7 目标版本，已在本仓实现（通用 `bounded_loop` + 五类素材动态生成 + 网关注册 `generate_scene_batch`/`repair_coverage_gaps` 模型节点；收口轮放开旧版八条素材引用上限，workflow 固定 `generate_actions → enqueue_media_tasks → safety_review → publish_document`，媒体节点位于安全审核前且失败降级同 Scene 文本卡），尚未部署、未注册到任何目标环境。
-- `1.0.6`：当前活跃版本（批次候选游标：模型调用与全部校验成功后才提交素材游标，模型瞬时失败不再消耗素材；首批强制 cover、末批强制 summary 的结构硬校验；结构修复支持受信任 `required_scene_type` 指定目标卡）。Tool/Snapshot/PlaybackDocument wire 合同仍为 `1.1.0`，无数据库迁移，不新增模型 route。`1.0.0`–`1.0.5` 均为不可变历史包，旧 Run 按已绑定版本 resume/retry。
+- `1.0.6`：批次稳定性修复版本（批次候选游标：模型调用与全部校验成功后才提交素材游标，模型瞬时失败不再消耗素材；首批强制 cover、末批强制 summary 的结构硬校验；结构修复支持受信任 `required_scene_type` 指定目标卡）。Tool/Snapshot/PlaybackDocument wire 合同仍为 `1.1.0`，无数据库迁移，不新增模型 route。
+- `1.0.7`：当前活跃版本（预算扩容）。循环语义与 `1.0.6` 完全一致（由 runner 按 `agent_version >= 1.0.6` 门控天然继承），仅扩预算额度：`max_model_calls` 8→12（9 个正常批次约 72 条素材 + 2 次瞬时重试 + 1 次修复空间）、`max_tokens` 100000→150000、`max_model_cost` 2.0→3.0，`max_run_seconds`/`max_steps` 不变。动机：线上 60 条素材档案需恰好 8 个正常批次，1.0.6 的 `max_model_calls=8` 零余量，任一轮瞬时失败（如 run ab6fcbfc 的 JSON_PARSE_FAILED）烧掉迭代额度后末批永远跑不到，finalize 因末批快照从未暂存而 fail closed。契约零变更，wire 合同仍为 `1.1.0`。`1.0.0`–`1.0.6` 均为不可变历史包，旧 Run 按已绑定版本 resume/retry。
 
 `memoir_agent@1.0.5` 与通用 `bounded_loop` 的设计记录在
 [`头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md`](头脑风暴/docs/AgentRuntime/plans/2026-08-31-通用受控循环与Memoir动态生成设计说明.md)。**2026-09-01 更新（含最小收口轮）：该能力已实现——实施轮全量 958 passed/16 skipped（含最终评审修复轮补齐的 `repair_coverage_gaps` 节点实现与 1.0.5 全图集成测试），收口轮聚焦五件套 132 passed（含评审补齐的媒体预算耗尽降级用例；命令与预期见 [VERIFICATION.md](VERIFICATION.md)「M7 `memoir_agent@1.0.5` 聚焦回归」）。改动停留在工作区，`1.0.5` 未部署、未注册到任何目标环境；本 README 与 CI 的注册/校验命令已按 M7 目标切到 `1.0.5`，线上当前实际运行的仍是 `1.0.4`，直至按部署流程完成注册。注册 `1.0.5` 前须同步服务器 env（`AGENT_PACKAGE_VERSION` 升 1.0.5、`MEMOIR_MODEL_NODE_ROUTES_JSON` 增补 `generate_scene_batch` 与 `repair_coverage_gaps` 键），否则 register 仍会注册 `1.0.4`。**
@@ -634,6 +635,8 @@ AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不
 ```
 
 **2026-09-03 更新（1.0.6 现行状态）**：当前活跃版本为 `1.0.6`（见上方版本列表）。`docker/backend/test.env.example`、`docker/backend/production.env.example`、`configure-runtime-env.sh` 默认值与 CI 的 `AGENT_PACKAGE_VERSION` 已全部切到 `1.0.6`；capabilities 暴露 `1.0.6` 的 package digest。设计与验收记录见 [`头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-09-03-MemoirAgent-1.0.6模型稳定性修复执行方案.md`](头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-09-03-MemoirAgent-1.0.6模型稳定性修复执行方案.md)；上面 M7 段落中的注册命令与“线上当前运行 1.0.4”表述是 2026-09-01 的历史记录，按该日期理解。
+
+**2026-09-04 更新（1.0.7 现行状态）**：当前活跃版本为 `1.0.7`（见上方版本列表）。1.0.6 部署后线上出现迭代额度零余量整 Run 失败（60 条素材 = 恰好 8 批 vs `max_iterations=8`，run ab6fcbfc），1.0.7 仅扩预算额度修复该问题，循环语义与 1.0.6 一致。`docker/backend/test.env.example`、`docker/backend/production.env.example`、`configure-runtime-env.sh` 默认值、CI 的 `AGENT_PACKAGE_VERSION` 与 wire 版本登记表已全部切到 `1.0.7`；capabilities 暴露 `1.0.7` 的 package digest。部署前置：服务器 env 的 `AGENT_PACKAGE_VERSION` 须升 1.0.7，先部署 Runtime 再发业务仓；上一段 1.0.6 表述按 2026-09-03 历史记录理解。
 
 ## 开发与验证
 

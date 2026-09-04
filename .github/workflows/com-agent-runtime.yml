@@ -55,7 +55,7 @@ jobs:
           ENVIRONMENT: test
           MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-test
           # M7 目标包版本：与 Business 新 Run 默认版本对齐（仅配置校验目标，不构成部署）。
-          AGENT_PACKAGE_VERSION: 1.0.6
+          AGENT_PACKAGE_VERSION: 1.0.7
           # 库名必须与 Docker 部署契约的固定 test 库一致，不得使用 CI 专用别名。
           DB_NAME: couple_diary_agent_runtime_test
           DB_USER: runtime_ci
@@ -72,7 +72,7 @@ jobs:
           ENVIRONMENT: production
           MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-production
           # M7 目标包版本：与 Business 新 Run 默认版本对齐（仅配置校验目标，不构成部署）。
-          AGENT_PACKAGE_VERSION: 1.0.6
+          AGENT_PACKAGE_VERSION: 1.0.7
           # 服务器本地构建模式：RUNTIME_IMAGE 是本地 tag，pull_policy 默认 missing。
           RUNTIME_IMAGE: com-agent-runtime:ci-placeholder
         run: >-
@@ -86,7 +86,7 @@ jobs:
           ENVIRONMENT: production
           MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-production
           # M7 目标包版本：与 Business 新 Run 默认版本对齐（仅配置校验目标，不构成部署）。
-          AGENT_PACKAGE_VERSION: 1.0.6
+          AGENT_PACKAGE_VERSION: 1.0.7
           # 占位 digest 仅用于 Compose 插值校验，证明 registry digest 模式
           # 同样可插值，且缺失 RUNTIME_IMAGE 时会 fail-closed；不是真实镜像引用。
           RUNTIME_IMAGE: registry.example.invalid/com-agent-runtime@sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -102,7 +102,7 @@ jobs:
           ENVIRONMENT: test
           MEMOIR_INTEGRATION_NETWORK: memoir-integration-ci-test
           # M7 目标包版本：与 Business 新 Run 默认版本对齐（仅配置校验目标，不构成部署）。
-          AGENT_PACKAGE_VERSION: 1.0.6
+          AGENT_PACKAGE_VERSION: 1.0.7
         run: docker compose build api
 
       - name: Verify image runs as non-root

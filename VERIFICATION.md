@@ -414,6 +414,21 @@ poetry run ruff check app/runtime/model_gateway.py app/db/sqlalchemy_db.py app/r
 
 预期：`121 passed`、Ruff 全绿（2026-09-03 实测一致）。覆盖：HttpProviderAdapter 连接后 peer 校验容忍合法 DNS/CDN 轮换——peer 命中发送前快照时不触发重解析（getaddrinfo 仅 1 次）；peer 命中「发送前 ∪ 连接后重解析」集合才放行（记 `reason=dns_rotation`）；私网/回环/保留地址不进集合比对、立即 `MODEL_PROVIDER_PEER_MISMATCH`；重解析失败 fail-closed 归一为 MISMATCH；adapter 内不自动重发 Provider POST（重试交给受预算管理的 bounded loop）。同时覆盖 `create_engine` 新增 `pool_pre_ping=True`（保留 `pool_recycle`）、Tool wire 版本表登记 `"1.0.6": "1.1.0"`（未登记会导致 `load_snapshot` 无日志瞬时失败）、capabilities 活跃版本切到 `memoir_agent@1.0.6`（依赖 1.0.6 包目录通过 `AgentPackageService.load` 校验），以及 test/production env 模板、`configure-runtime-env.sh` 默认值与 GitHub Actions 四处 `AGENT_PACKAGE_VERSION` 均为 `1.0.6` 的部署契约。
 
+`memoir_agent@1.0.7` 预算扩容定向回归（2026-09-04）：
+
+```bash
+poetry run pytest -q \
+  tests/test_runtime_agent_package_loader.py \
+  tests/test_runtime_capabilities.py \
+  tests/test_docker_deployment_contract.py \
+  tests/test_github_workflow_template.py \
+  tests/test_configure_runtime_env_script.py \
+  tests/runtime_test_memoir_loop_runner.py
+poetry run ruff check .
+```
+
+预期：`79 passed`、Ruff 全绿（2026-09-04 实测一致）。覆盖：1.0.7 不可变包通过 `AgentPackageService.load` 校验（图结构与 1.0.6 逐节点一致、唯一 `bounded_loop` 策略逐字段相同、预算断言 `max_model_calls=12`/`max_tokens=150000`/`max_model_cost=3.0`、digest 与全部历史版本不同）；Tool wire 版本表登记 `"1.0.7": "1.1.0"`；capabilities 活跃版本切到 `memoir_agent@1.0.7`；loop runner 1.0.7 候选游标语义继承用例（瞬时失败不消费批次素材、下一轮同批重试成功，与 1.0.6 同形）；test/production env 模板、`configure-runtime-env.sh` 默认值与 GitHub Actions 四处 `AGENT_PACKAGE_VERSION` 均为 `1.0.7` 的部署契约。周边回归（`runtime_test_memoir_106_full_graph`/`runtime_test_bounded_loop_executor`/`test_memoir_media_channel`/`runtime_test_memoir_coverage_repair`）108 passed，确认 1.0.5/1.0.6 冻结语义零改动。
+
 迁移前先在隔离数据库备份并检查旧状态分布：
 
 ```sql

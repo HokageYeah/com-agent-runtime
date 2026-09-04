@@ -218,7 +218,7 @@ prompt_value runtime_api_host_port "Runtime 宿主回环端口" "${default_api_p
 (( runtime_api_host_port >= 1024 && runtime_api_host_port <= 65535 )) || fail "Runtime 端口必须在 1024-65535 之间"
 prompt_value runtime_worker_id "Runtime Worker ID" "${default_worker_id}"
 validate_token "Runtime Worker ID" "${runtime_worker_id}"
-prompt_value agent_package_version "Memoir AgentPackage 版本" "1.0.6"
+prompt_value agent_package_version "Memoir AgentPackage 版本" "1.0.7"
 [[ "${agent_package_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "AgentPackage 版本必须类似 1.0.4"
 
 if [[ "${environment}" == "production" ]]; then
