@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AgentRuntime：业务 Agent 注册与运行全流程",
+    "locale": "zh-CN",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "output": "头脑风暴/docs/AgentRuntime/架构图/agent-runtime-业务注册与运行全流程.html"
+  },
+  "lanes": [
+    { "id": "registration", "label": "AgentPackage 发布与注册" },
+    { "id": "business", "label": "业务产品与事实源" },
+    { "id": "runtime", "label": "公共 AgentRuntime 底座" },
+    { "id": "integration", "label": "模型、工具与可靠回传" }
+  ],
+  "phases": [
+    { "id": "onboard", "label": "接入", "fromCol": 0, "toCol": 1 },
+    { "id": "admit", "label": "受理与持久化", "fromCol": 2, "toCol": 3, "variant": "security" },
+    { "id": "execute", "label": "执行与交付", "fromCol": 4, "toCol": 4, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "runtime_core", "label": "与业务无关的运行时骨架", "lane": "runtime", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "agent_extension", "label": "业务 Agent 扩展点", "lane": "runtime", "fromCol": 4, "toCol": 4, "variant": "dashed" }
+  ],
+  "mainPath": [
+    "client",
+    "business_backend",
+    "runtime_api",
+    "runtime_store",
+    "worker",
+    "delivery"
+  ],
+  "semanticChecks": {
+    "allowedRoots": ["client", "package_source"],
+    "allowedTerminals": ["business_store", "agent_registry", "delivery", "model_gateway", "business_tools"],
+    "requiredPaths": [
+      { "from": "package_source", "to": "agent_registry" },
+      { "from": "business_backend", "to": "worker" },
+      { "from": "worker", "to": "business_tools" },
+      { "from": "worker", "to": "model_gateway" }
+    ]
+  },
+  "nodes": [
+    { "id": "client", "lane": "business", "col": 0, "type": "frontend", "label": "业务客户端", "sublabel": "只调用自己的业务后端", "width": 150 },
+    { "id": "business_backend", "lane": "business", "col": 1, "type": "backend", "label": "业务后端", "sublabel": "权限、状态与编排", "width": 168 },
+    { "id": "business_store", "lane": "business", "col": 4, "type": "database", "label": "业务事实库", "sublabel": "Snapshot / Playback / 工单", "width": 164 },
+    { "id": "package_source", "lane": "registration", "col": 0, "type": "backend", "label": "版本化 AgentPackage", "sublabel": "workflow / tools / policy", "tag": "memoir 或新业务 Agent", "width": 178 },
+    { "id": "agent_registry", "lane": "registration", "col": 1, "type": "security", "label": "校验并注册", "sublabel": "schema / digest / lifecycle", "tag": "Admission 按精确版本查询", "width": 184 },
+    { "id": "runtime_api", "lane": "runtime", "col": 2, "type": "security", "label": "Runtime API + Admission", "sublabel": "验签、准入、held create/start", "width": 208 },
+    { "id": "runtime_store", "lane": "runtime", "col": 3, "type": "database", "label": "Runtime 权威库", "sublabel": "Run / Plan / Outbox / Lease", "width": 174 },
+    { "id": "worker", "lane": "runtime", "col": 4, "type": "backend", "label": "Worker + Executor + Runner", "sublabel": "租约、策略、预算、检查点", "tag": "当前 Runner 接线 Memoir", "width": 198 },
+    { "id": "model_gateway", "lane": "integration", "col": 2, "type": "cloud", "label": "ModelGateway", "sublabel": "路由、流控、成本、结构化输出", "width": 190 },
+    { "id": "business_tools", "lane": "integration", "col": 3, "type": "security", "label": "ToolGateway → 业务工具", "sublabel": "验签、幂等、快照与原子发布", "width": 190 },
+    { "id": "delivery", "lane": "integration", "col": 4, "type": "messagebus", "label": "可靠回传 → 业务后端", "sublabel": "callback outbox + 主动对账", "width": 194 }
+  ],
+  "edges": [
+    { "id": "client_request", "from": "client", "to": "business_backend", "label": "创建业务目标", "variant": "default", "role": "main" },
+    { "id": "package_register", "from": "package_source", "to": "agent_registry", "label": "CI / 管理员注册", "variant": "security" },
+    { "id": "create_run", "from": "business_backend", "to": "runtime_api", "label": "HMAC：held create → bind → start", "variant": "emphasis", "role": "main" },
+    { "id": "persist_dispatch", "from": "runtime_api", "to": "runtime_store", "label": "同事务保存 Run / Plan / outbox", "variant": "emphasis", "role": "main" },
+    { "id": "claim_run", "from": "runtime_store", "to": "worker", "label": "dispatch + lease；加载冻结包", "variant": "emphasis", "role": "main" },
+    { "id": "call_model", "from": "worker", "to": "model_gateway", "label": "预算治理下调用模型", "variant": "default", "role": "branch" },
+    { "id": "call_business_tool", "from": "worker", "to": "business_tools", "label": "只走已注册 connector", "variant": "security", "role": "branch" },
+    { "id": "persist_business", "from": "business_backend", "to": "business_store", "label": "业务事务写入", "variant": "default" },
+    { "id": "run_delivery", "from": "worker", "to": "delivery", "label": "安全状态事件", "variant": "default", "role": "main" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "公共底座",
+      "items": [
+        "Runtime 负责 Run、Plan、Worker、模型/工具治理、恢复和审计",
+        "业务后端仍是权限、业务数据和最终业务状态的事实源"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "当前实现边界",
+      "items": [
+        "AgentPackage/Registry/Plan/Outbox/Executor 已具备通用骨架",
+        "Worker 的生产 Runner 工厂目前只接线 memoir_agent"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "新增客服 Agent",
+      "items": [
+        "新增不可变 AgentPackage、业务工具 connector、Runner 与测试后注册版本",
+        "复用同一 API、权威库、lease、Gateway、callback 与治理边界"
+      ]
+    }
+  ]
+}
