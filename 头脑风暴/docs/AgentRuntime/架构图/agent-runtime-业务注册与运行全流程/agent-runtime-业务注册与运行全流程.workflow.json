@@ -1,0 +1,75 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AgentRuntime：从 AgentPackage 发布到业务交付",
+    "locale": "zh-CN",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "package-release", "label": "1. Package 发布注册", "focus": ["package_source", "package_validate", "agent_registry", "runtime_api"], "note": "不可变 agent_id@version 经 CI 验证、digest 校验和管理员注册后，才能被 Admission 使用。" },
+      { "id": "business-onboarding", "label": "2. 业务接入与启动", "focus": ["client", "business_system", "business_worker", "runtime_api", "runtime_store"], "note": "业务先冻结自己的快照，再 held create、绑定 run_id、start，避免孤儿 Run 和跨网络持锁。" },
+      { "id": "runtime-core", "label": "3. Runtime 公共核心", "focus": ["runtime_api", "runtime_store", "worker_executor", "model_gateway", "tool_delivery"], "note": "Run、Plan、outbox、lease/fencing、预算、checkpoint、模型与工具治理可被不同业务 Agent 复用。" },
+      { "id": "agent-extension", "label": "4. 业务 Agent 扩展点", "focus": ["agent_registry", "agent_runner", "business_system", "model_gateway", "tool_delivery"], "note": "每个新 Agent 需要自己的 Package、Runner 接线、业务工具 connector 和授权配置。" },
+      { "id": "result-return", "label": "5. 发布与可靠回传", "focus": ["agent_runner", "tool_delivery", "business_system", "runtime_store"], "note": "业务工具负责原子发布；Runtime 通过 callback outbox 送状态，业务可主动查询补偿。" }
+    ],
+    "output": "agent-runtime-业务注册与运行全流程.html"
+  },
+  "lanes": [
+    { "id": "release", "label": "01 / AgentPackage 开发、发布与注册" },
+    { "id": "business", "label": "02 / 用户与业务系统（业务事实源）" },
+    { "id": "runtime_control", "label": "03 / 公共 AgentRuntime 控制面" },
+    { "id": "runtime_execution", "label": "04 / 公共执行骨架 + Agent 扩展" },
+    { "id": "governed_io", "label": "05 / 模型、业务工具与可靠回传" }
+  ],
+  "phases": [
+    { "id": "author", "label": "定义与触发", "fromCol": 0, "toCol": 1 },
+    { "id": "admit", "label": "校验、注册与准入", "fromCol": 2, "toCol": 2, "variant": "security" },
+    { "id": "execute", "label": "持久化、执行与交付", "fromCol": 3, "toCol": 3, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "common_control", "label": "通用公共底座", "lane": "runtime_control", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "common_execution", "label": "通用执行器", "lane": "runtime_execution", "fromCol": 2, "toCol": 2, "variant": "emphasis" },
+    { "id": "business_extension", "label": "Agent 专属扩展", "lane": "runtime_execution", "fromCol": 3, "toCol": 3, "variant": "dashed" },
+    { "id": "governance", "label": "受治理外部 I/O", "lane": "governed_io", "fromCol": 2, "toCol": 3, "variant": "security" }
+  ],
+  "mainPath": ["client", "business_system", "business_worker", "runtime_api", "runtime_store"],
+  "semanticChecks": {
+    "allowedRoots": ["client", "package_source"],
+    "allowedTerminals": ["model_gateway", "tool_delivery"],
+    "requiredPaths": [
+      { "from": "package_source", "to": "runtime_api" },
+      { "from": "client", "to": "agent_runner" },
+      { "from": "runtime_api", "to": "agent_runner" },
+      { "from": "agent_runner", "to": "model_gateway" },
+      { "from": "agent_runner", "to": "tool_delivery" }
+    ]
+  },
+  "nodes": [
+    { "id": "package_source", "lane": "release", "col": 0, "type": "backend", "label": "不可变 AgentPackage", "sublabel": "workflow / schema / tools", "width": 148 },
+    { "id": "package_validate", "lane": "release", "col": 1, "type": "security", "label": "CI / 部署校验", "sublabel": "contract / evals / digest", "width": 140 },
+    { "id": "agent_registry", "lane": "release", "col": 3, "type": "database", "label": "AgentDefinition 注册", "sublabel": "version / digest / active", "width": 154 },
+    { "id": "client", "lane": "business", "col": 0, "type": "frontend", "label": "用户端", "sublabel": "访问业务 API", "width": 136 },
+    { "id": "business_system", "lane": "business", "col": 1, "type": "backend", "label": "业务 API + 事实库", "sublabel": "权限、快照、作品 / 工单", "width": 164 },
+    { "id": "business_worker", "lane": "business", "col": 2, "type": "messagebus", "label": "业务 Runtime Worker", "sublabel": "快照 / outbox / 绑定启动", "width": 158 },
+    { "id": "runtime_api", "lane": "runtime_control", "col": 2, "type": "security", "label": "Runtime API + Admission", "sublabel": "HMAC / 幂等 / 精确版本", "width": 164 },
+    { "id": "runtime_store", "lane": "runtime_control", "col": 3, "type": "database", "label": "Runtime 权威状态库", "sublabel": "Run / Plan / outbox / lease", "width": 164 },
+    { "id": "worker_executor", "lane": "runtime_execution", "col": 2, "type": "backend", "label": "Worker + Executor", "sublabel": "dispatch / fencing / checkpoint", "width": 164 },
+    { "id": "agent_runner", "lane": "runtime_execution", "col": 3, "type": "backend", "label": "Agent Runner 扩展", "sublabel": "当前：MemoirNodeRunner", "width": 156 },
+    { "id": "model_gateway", "lane": "governed_io", "col": 2, "type": "cloud", "label": "ModelGateway", "sublabel": "route / permit / cost / usage", "width": 156 },
+    { "id": "tool_delivery", "lane": "governed_io", "col": 3, "type": "security", "label": "Tool / Callback ↔ 业务", "sublabel": "connector / 发布 / 对账", "width": 160 }
+  ],
+  "edges": [
+    { "id": "author_package", "from": "package_source", "to": "package_validate", "label": "新版本目录", "variant": "default", "role": "main" },
+    { "id": "register_definition", "from": "package_validate", "to": "agent_registry", "label": "幂等注册", "variant": "security", "role": "main" },
+    { "id": "registry_admission", "from": "agent_registry", "to": "runtime_api", "label": "精确版本准入", "variant": "security", "role": "branch" },
+    { "id": "user_goal", "from": "client", "to": "business_system", "label": "创建业务目标", "variant": "default", "role": "main" },
+    { "id": "enqueue_business", "from": "business_system", "to": "business_worker", "label": "事务：快照 + outbox", "variant": "emphasis", "role": "main" },
+    { "id": "held_create", "from": "business_worker", "to": "runtime_api", "label": "HMAC：held → bind → start", "variant": "security", "role": "main" },
+    { "id": "freeze_run", "from": "runtime_api", "to": "runtime_store", "label": "Run + Plan + outbox", "variant": "emphasis", "role": "main" },
+    { "id": "dispatch_claim", "from": "runtime_store", "to": "worker_executor", "label": "outbox + lease/fencing", "variant": "emphasis", "role": "main" },
+    { "id": "select_runner", "from": "worker_executor", "to": "agent_runner", "label": "验 digest → 选 Runner", "variant": "emphasis", "role": "main" },
+    { "id": "call_model", "from": "agent_runner", "to": "model_gateway", "label": "受预算治理的模型调用", "variant": "default", "role": "branch" },
+    { "id": "call_business_tools", "from": "agent_runner", "to": "tool_delivery", "label": "Tool + callback outbox", "variant": "security", "role": "main" }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "AgentRuntime：AgentPackage、控制面与执行内核详解",
+    "locale": "zh-CN",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "package-release",
+        "label": "1. AgentPackage 发布注册",
+        "focus": ["package_source", "package_ci", "package_loader", "agent_definition", "admission"],
+        "note": "版本目录包含 agent.yaml、schema、workflow、tools、guardrails、callbacks、ui-trace、prompts 与 evals；部署后精确加载并幂等注册。"
+      },
+      {
+        "id": "control-plane",
+        "label": "2. Runtime 控制面",
+        "focus": ["runtime_api", "admission", "run_plan_tx", "dispatch_outbox"],
+        "note": "API 完成 HMAC、调用方授权和幂等；Admission 校验 active 精确版本、业务类型与容量；同事务冻结 Run、Plan、能力和 dispatch outbox。"
+      },
+      {
+        "id": "execution-core",
+        "label": "3. 公共执行骨架",
+        "focus": ["dispatch_outbox", "dispatcher_claim", "workflow_executor"],
+        "note": "Dispatcher 投递持久事件，Worker 通过 lease/fencing 独占 Run；WorkflowExecutor 按静态 Plan 执行步骤并写安全 checkpoint。"
+      },
+      {
+        "id": "agent-extension",
+        "label": "4. Agent 专属扩展",
+        "focus": ["agent_definition", "workflow_executor", "agent_runner"],
+        "note": "公共 Executor 不包含业务推理；它按 agent_id 选择 Runner。当前接线为 MemoirNodeRunner，新客服 Agent 需新增 Package、Runner 映射、connector 与授权配置。"
+      }
+    ],
+    "output": "agent-runtime-核心三段详细流程.html"
+  },
+  "lanes": [
+    { "id": "package", "label": "总览层 01：AgentPackage 开发、发布与注册" },
+    { "id": "control", "label": "总览层 03：公共 AgentRuntime 控制面" },
+    { "id": "execution", "label": "总览层 04：公共执行骨架 + Agent 扩展" }
+  ],
+  "phases": [
+    { "id": "define", "label": "定义与入口", "fromCol": 0, "toCol": 0 },
+    { "id": "validate", "label": "校验与冻结", "fromCol": 1, "toCol": 2, "variant": "security" },
+    { "id": "dispatch", "label": "持久派发", "fromCol": 3, "toCol": 3, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "managed_package", "label": "不可变发布物与注册事实", "lane": "package", "fromCol": 0, "toCol": 3, "variant": "dashed" },
+    { "id": "common_control", "label": "通用公共底座：认证、准入、状态与计划", "lane": "control", "fromCol": 0, "toCol": 3, "variant": "emphasis" },
+    { "id": "common_execution", "label": "通用执行骨架", "lane": "execution", "fromCol": 1, "toCol": 2, "variant": "emphasis" },
+    { "id": "agent_extension", "label": "Agent 专属代码扩展", "lane": "execution", "fromCol": 0, "toCol": 0, "variant": "dashed" }
+  ],
+  "mainPath": ["runtime_api", "admission", "run_plan_tx", "dispatch_outbox"],
+  "semanticChecks": {
+    "allowedRoots": ["package_source", "runtime_api"],
+    "allowedTerminals": ["agent_runner"],
+    "requiredPaths": [
+      { "from": "package_source", "to": "admission" },
+      { "from": "runtime_api", "to": "dispatch_outbox" },
+      { "from": "dispatch_outbox", "to": "agent_runner" }
+    ]
+  },
+  "nodes": [
+    { "id": "package_source", "lane": "package", "col": 0, "type": "backend", "label": "不可变版本目录", "sublabel": "agent_id@version / 契约", "width": 156 },
+    { "id": "package_ci", "lane": "package", "col": 1, "type": "security", "label": "CI / 发布门禁", "sublabel": "schema / graph / evals", "width": 156 },
+    { "id": "package_loader", "lane": "package", "col": 2, "type": "backend", "label": "部署包精确加载", "sublabel": "路径边界 / identity / digest", "width": 158 },
+    { "id": "agent_definition", "lane": "package", "col": 3, "type": "database", "label": "注册 AgentDefinition", "sublabel": "幂等 upsert / active 状态", "width": 164 },
+
+    { "id": "runtime_api", "lane": "control", "col": 0, "type": "security", "label": "Runtime API 边界", "sublabel": "HMAC / caller / 幂等键", "width": 156 },
+    { "id": "admission", "lane": "control", "col": 1, "type": "security", "label": "Admission 准入", "sublabel": "精确版本 / 业务类型 / 容量", "width": 164 },
+    { "id": "run_plan_tx", "lane": "control", "col": 2, "type": "database", "label": "冻结 Run + Plan", "sublabel": "digest / capability / policy", "width": 160 },
+    { "id": "dispatch_outbox", "lane": "control", "col": 3, "type": "messagebus", "label": "held / queued + outbox", "sublabel": "同事务持久化派发意图", "width": 166 },
+
+    { "id": "dispatcher_claim", "lane": "execution", "col": 2, "type": "messagebus", "label": "Dispatcher + Worker 认领", "sublabel": "outbox / lease / fencing / drain", "width": 174 },
+    { "id": "workflow_executor", "lane": "execution", "col": 1, "type": "backend", "label": "WorkflowExecutor", "sublabel": "Plan / Step / checkpoint", "width": 160 },
+    { "id": "agent_runner", "lane": "execution", "col": 0, "type": "backend", "label": "Agent Runner 扩展", "sublabel": "当前：MemoirNodeRunner", "width": 160 }
+  ],
+  "edges": [
+    { "id": "author_package", "from": "package_source", "to": "package_ci", "label": "提交新版本", "variant": "default", "role": "main" },
+    { "id": "validate_package", "from": "package_ci", "to": "package_loader", "label": "构建并部署受管目录", "variant": "security", "role": "main" },
+    { "id": "register_definition", "from": "package_loader", "to": "agent_definition", "label": "digest 后幂等注册", "variant": "security", "role": "main" },
+    { "id": "definition_admission", "from": "agent_definition", "to": "admission", "label": "active 精确版本", "variant": "security", "role": "branch" },
+
+    { "id": "authenticate_request", "from": "runtime_api", "to": "admission", "label": "认证后的 CreateRun", "variant": "security", "role": "main" },
+    { "id": "freeze_runtime_state", "from": "admission", "to": "run_plan_tx", "label": "准入通过后冻结能力", "variant": "emphasis", "role": "main" },
+    { "id": "persist_dispatch", "from": "run_plan_tx", "to": "dispatch_outbox", "label": "Run + Plan + outbox 同事务", "variant": "emphasis", "role": "main" },
+
+    { "id": "dispatch_pending", "from": "dispatch_outbox", "to": "dispatcher_claim", "label": "异步通知，可重复投递", "variant": "emphasis", "role": "async" },
+    { "id": "execute_plan", "from": "dispatcher_claim", "to": "workflow_executor", "label": "唯一认领 + fencing context", "variant": "security", "role": "main" },
+    { "id": "select_runner", "from": "workflow_executor", "to": "agent_runner", "label": "按冻结 agent_id 选择 Runner", "variant": "emphasis", "role": "main" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Package 不变量",
+      "items": [
+        "同一 agent_id@version 的 digest 不可漂移",
+        "只有 active 精确版本可创建新 Run"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "控制面不变量",
+      "items": [
+        "Run、静态 Plan 与 dispatch outbox 同事务落库",
+        "能力、预算、授权版本在创建 Run 时冻结"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "执行扩展边界",
+      "items": [
+        "公共骨架负责派发、租约、步骤与 checkpoint",
+        "业务推理由 Runner、模型路由和 connector 扩展"
+      ]
+    }
+  ]
+}
