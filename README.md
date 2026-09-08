@@ -1,5 +1,7 @@
 # com-agent-runtime
 
+> **2026-09-08 当前文档状态：** M7 已完成部署与测试（用户确认），实际最新包1.0.7；旧日期“待部署”仅为历史记录。M8 语音/配乐已完成设计与计划，尚未实现；仅新建作品、新包预定1.0.8，公共 Runtime 消息/调度不改。阅读 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)、[R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md) 与 [ENV_CONFIG M8](ENV_CONFIG.md)。TTS独立语音Key、音乐AK/SK、两环境四OSS前缀和Dockerfile/Compose配置位置已列明，当前变量/服务还需按计划实现。
+
 `com-agent-runtime` 是独立部署的公共 Agent 执行服务。它负责 AgentPackage、AgentRun、计划与步骤执行、模型和工具调用、Checkpoint、Artifact、Worker、callback、对账、观测与治理。
 
 当前首个业务 Agent 是 `MemoirAgent`。它通过情侣日记业务后端提供的 Business Tool 读取脱敏快照并发布回忆录作品，但 Runtime 不拥有用户、关系、Archive、Snapshot、密码或 PlaybackDocument 等业务事实，也不直连情侣日记业务数据库。

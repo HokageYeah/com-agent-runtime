@@ -1,5 +1,81 @@
 # AgentRuntime 敏感与条件环境配置
 
+## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；未实施）
+
+以下为后续开发必须增加的配置，当前 Settings/Compose/Dockerfile 尚未实现音频能力。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
+
+### A. 凭据在哪里申请、填到哪里
+
+1. **旁白：独立豆包语音 API Key。** 在[豆包语音控制台 → API Key 管理](https://console.volcengine.com/speech/new/setting/apikeys)完成语音合成服务开通并创建 Key，确认可使用 `seed-tts-2.0` 资源，将其填入下述 Runtime 私有 env 的 `MEMOIR_TTS_API_KEY`。不是方舟 Key，也不是现有图片 AK/SK。[字节官方开通指南](https://github.com/bytedance/agentkit-samples/blob/main/skills/byted-text-to-speech/references/setup-guide.md)中的样例变量 `MODEL_SPEECH_API_KEY` 在本工程映射为 `MEMOIR_TTS_API_KEY`，不同时维护两套变量。
+2. **背景纯音乐：本设计不使用独立语音 Key。** `GenBGM` / `GenBGMForTime` 使用火山 AK/SK。可复用已配置 `VOLCANO_CV_ACCESS_KEY`、`VOLCANO_CV_SECRET_KEY`，前提是[音乐服务开通](https://www.volcengine.com/docs/84992/1404662)和所选计费产品的 IAM 权限已满足；已有图片成功不证明音乐可用。按[接入指引](https://www.volcengine.com/docs/84992/1404668)选择已开通的一个 Action，禁止失败后自动切换计费产品。音乐签名 Region 固定 `cn-beijing`、Service `imagination`，不沿用图片的 `VOLCANO_CV_REGION` 默认值。
+3. **阿里云 OSS：独立于火山凭据。** 在阿里云控制台 RAM 的访问控制中为 Runtime 音频上传/孤儿清理设置最小权限访问凭据；OSS 控制台配置私有桶/对象访问控制和本环境两前缀。Runtime 用写入、对账所需读取和删除权限；Business 用其独立读取签名/删除凭据，测试凭据不授权正式前缀。不得使用火山 AK/SK 填 OSS 变量。
+4. **真实填写文件：** 沿用 `docker/backend/test.env.example` 所示 `/usr/HokageYeah/服务端系统/env/runtime-test.env`，生产使用 `docker/backend/production.env.example` 所示 `/usr/HokageYeah/服务端系统/env/runtime-production.env`，最终以已部署 `RUNTIME_ENV_FILE` 为准。本地开发使用根 `.env.development.local`，仅由开发者填写；现有加载器按环境加载 `.env.<environment>`、`.env.<environment>.local` 和 `.env.local`，根 `.env` 不会自动加载；智能体不读取真实值。例子/文档只写占位，真实文件不提交 Git、不复制进镜像。
+
+### B. Settings 与环境模板的固定变量
+
+全部在 `app/core/config.py` 声明、校验；根 `.env.example` 与 `docker/backend/{test,production}.env.example` 列出说明与占位。除明确复用的图片 AK/SK 外均为 M8 新增，默认不开启。
+
+| 变量 | 默认/约束与用途 |
+|---|---|
+| `MEMOIR_AUDIO_ENABLED` | `false`；服务端新包音频能力开关，不授予旧 Archive 资格 |
+| `MEMOIR_TTS_API_KEY` | 空；开音频时必填，敏感字段/异常不可回显 |
+| `MEMOIR_TTS_RESOURCE_ID` | `seed-tts-2.0`；首期固定 |
+| `MEMOIR_TTS_SPEAKER` | `zh_female_wenroushunv_uranus_bigtts`，温柔淑女2.0；同作品冻结参数 |
+| `MEMOIR_TTS_SPEECH_RATE` | `-10`，服务范围 -50～100；首期统一略慢 |
+| `MEMOIR_TTS_REQUEST_TIMEOUT_SECONDS` | `45`，仍受节点/Run 剩余预算约束 |
+| `MEMOIR_TTS_SCENE_CONCURRENCY` | `2`；场景内分段串行，不等于不限 Worker 总并发 |
+| `VOLCANO_CV_ACCESS_KEY` / `VOLCANO_CV_SECRET_KEY` | 复用既有变量，仅用于音乐 AK/SK 签名；必须确认对应音乐权限 |
+| `MEMOIR_MUSIC_ACTION` | 空；启用时显式选 `GenBGM` 或 `GenBGMForTime`，无自动兜底 |
+| `MEMOIR_MUSIC_DURATION_SECONDS` | `60`，本期固定请求时长；每作品一首 |
+| `MEMOIR_MUSIC_POLL_INTERVAL_SECONDS` | `5`，同时受节点 deadline 约束 |
+| `MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON` | `[]`；部署通过官方响应域名/文档核验后填精确 host 清单，不用通配全部 HTTPS 域名；缺清单不启音乐下载 |
+| `MEMOIR_AUDIO_NODE_TIMEOUT_SECONDS` | `300`；实际取 min(本值, Run 剩余减发布预留) |
+| `MEMOIR_AUDIO_PUBLISH_RESERVE_SECONDS` | `30`；到预留时停止新音频提交，收集成功资源后发布 |
+| `MEMOIR_AUDIO_WORKER_CONCURRENCY` | `4`；每进程总信号量，扩副本须合并核算账号配额 |
+| `MEMOIR_AUDIO_COST_CURRENCY` | 空；启用前明确与部署费用预算相同币种，不默认换汇 |
+| `MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS` | 空；按已开通计费规格换算为每千 `text_words` 的单价，十进制非负；未知不能填0 |
+| `MEMOIR_MUSIC_PRICE_PER_SECOND` | 空；按所选音乐产品额度消耗或计费规格换算，十进制非负；套餐不等于免费 |
+| `MEMOIR_AUDIO_MAX_COST_PER_RUN` | 空；本 Run 音频独立上限，十进制正数；缺失禁止开启，不更改通用模型费用门禁 |
+| `MEMOIR_AUDIO_MAX_FILE_BYTES` | `20971520`，单个输入下载/合成最终文件20MiB；超限降级资源，不发布截断文件 |
+| `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS` | `24`，正整数且至少1小时；只清理经publish query明确未发布且最后更新超过窗口的对象；未知/在途/已发布均不得按时长删除 |
+| `MEMOIR_AUDIO_FFMPEG_PATH` / `MEMOIR_AUDIO_FFPROBE_PATH` | `/usr/bin/ffmpeg` / `/usr/bin/ffprobe`；启用时检查可执行及受限临时目录，非 root 运行 |
+| `MEMORY_AUDIO_OSS_ENDPOINT` | 空；Runtime 可用部署网络适合的 HTTPS OSS endpoint；Business 签名用小程序可达域名 |
+| `MEMORY_AUDIO_OSS_BUCKET` | 空；同环境 Business 相同私有音频桶 |
+| `MEMORY_AUDIO_OSS_ACCESS_KEY_ID` / `MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET` | 空；Runtime 专用最小权限，禁止复用图片 public-read 上传路径 |
+| `MEMORY_AUDIO_NARRATOR_PREFIX` | 按下表明确配置；与 Business 同环境同角色一致 |
+| `MEMORY_AUDIO_BACKGROUND_PREFIX` | 按下表明确配置；与 Business 同环境同角色一致 |
+| `MEMORY_AUDIO_SCOPE_HMAC_KEY` | 空；两仓同环境共享的专用高熵密钥，不复用 Snapshot/密码密钥；轮换先排空在途作业 |
+
+API host、SSE path、音频 MP3/24000Hz/64000bit、音乐 API Version `2024-08-12`/模型 `v5.0` 与签名 service/region作为 Memoir adapter 固定协议常量，不能从不可信请求改写。新包 `agent.yaml` 的 Run deadline 设为1200秒，仅新包生效；不得为 M8 提高所有 Agent 全局超时。
+
+| 环境 | `MEMORY_AUDIO_BACKGROUND_PREFIX` | `MEMORY_AUDIO_NARRATOR_PREFIX` |
+|---|---|---|
+| test | `memoir-test/audios/background/` | `memoir-test/audios/narrator/` |
+| production | `memoir/audios/background/` | `memoir/audios/narrator/` |
+
+前缀是 OSS 对象 key，不是本地目录或 URL；末尾保留 `/`，追加 `<HMAC-scope>/<opaque-asset>.mp3`。拒绝跨环境/角色、`..`、URL、重叠前缀。两种音频都必须上传 OSS 后再发布；私有 ACL 不可被匿名 bucket policy/CDN 绕过。Business endpoint 可与 Runtime 上传 endpoint 不同，但 bucket/prefix/scope 必须匹配。
+
+### C. Docker 文件具体改哪里
+
+| 文件 | 待实施变更 |
+|---|---|
+| `app/core/config.py` | 上表 Settings 字段和条件校验，Key 安全类型；能力关闭不阻断其他 Agent 启动 |
+| `.env.example` | 开发占位与各变量说明；不含真实 Key |
+| `docker/backend/test.env.example`、`docker/backend/production.env.example` | 同名变量，无 `CD_` 前缀；填各自固定音频前缀、其余敏感占位；与运维外置私有文件同步 |
+| `docker-compose.yml` | 复用实际 `x-runtime-env-file` → `env_file: *runtime-env-file`，其路径来自 `RUNTIME_ENV_FILE`；`prepare/register/api/launcher/worker` 均已有该链。不得把 Key 加进 build args 或用空 `environment` 值遮蔽 env_file。必要的非敏感配置沿 `x-runtime-environment`；补占位渲染/进程读取测试，不能照抄 Business 的 `CD_` 插值方式 |
+| `docker-compose.test.yml`、`docker-compose.production.yml` | 核对 override 没覆盖 env_file/工作目录/临时目录，保持网络、端口、项目名隔离；非必要不制造配置重复 |
+| `docker/backend/Dockerfile` | 在 `USER runtime` 前以系统包管理器安装 ffmpeg（含 ffprobe），清理 apt 索引；保留非 root 运行，依赖在镜像构建时安装，不能运行时联网安装；无秘密进入镜像层 |
+| `app/worker.py` | Memoir 专属音频服务注入，读取上表 Settings；公共 Worker 消息/调度语义不变 |
+| `tests/test_config.py`、`tests/test_docker_deployment_contract.py` | 条件配置、秘密脱敏、两环境前缀、env_file链及转码二进制合同回归 |
+
+部署时仍通过现有 `docker compose --env-file <部署插值文件>` 加载 `RUNTIME_ENV_FILE`，容器再从其指向的私有文件注入设置；两者即使采用同一文件，也不能把“Compose 插值”和“容器环境”混为一谈。仅更新 example 不会让已运行容器获得新值，需按现有部署流程重建含 ffmpeg 的镜像并重建相关容器；本轮不执行。
+
+### D. 验证与开关顺序
+
+用纯占位 env 检查 Compose 合成模型，禁止输出真实 `docker compose config` 或容器全量 env。构建后在一次性容器核验 `ffmpeg -version`、`ffprobe -version` 和仅布尔形式的必要配置存在性；密钥校验错误不打印值。账号音乐/TTS权限、单价/配额、官方下载域名、私有上传与播放域名须真实小样本验收，不能由图片业务成功推断。
+
+先发布 Business v2 reader/资格迁移/签名与清理（新资格关闭）→ 注册 Runtime 新包并配置 → 前端 → 隔离端到端与微信真机 → 运维开启 Business `MEMORY_AUDIO_NEW_ARCHIVES_ENABLED`。Runtime 开关只控制能力，不能决定旧作品资格。回滚先关新资格，保留旧有声作品的 Business reader/签名/清理；不会自动降级已冻结新包作品到旧包。
+
 本文说明 `development` / `test` / `production` 中的 Runtime 服务地址、外部观测治理、HMAC、Snapshot 加密、JWT 验签、私有媒体桶和模型路由配置。完整启动和真实验收流程见 [VERIFICATION.md](VERIFICATION.md)。
 
 ## 1. 安全前提

@@ -1,5 +1,17 @@
 # AgentRuntime 总控 Implementation Plan
 
+> **2026-09-08 当前增量：M8 设计/计划完成，实施未开始。** M7部署测试完成来自用户确认，实际基线最新包1.0.7；旧日期状态仅为历史证据。跨工程唯一入口仍为 [Business总控](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md)，本仓执行 [M8设计](2026-09-07-Memoir语音与配乐设计说明.md) 与 [R6–R8子计划](../backend/2026-09-07-Memoir语音与配乐开发计划.md)。
+
+### M8 Runtime任务入口
+
+- [ ] R6：TTS/BGM provider、完整转码、private OSS；依赖M8-C共享契约。
+- [ ] R7：专属作业账本、费用预留、取消/恢复与孤儿清理；依赖R6。
+- [ ] R8：新包1.0.8、runner/Worker注入、配置/Docker与全链路回归；依赖R7、Business B17/B18。
+- [ ] M8-V：与Business B21、前端F16集成和双轴评审；主Agent持有共享fixture/计划，Runtime只改分配文件。
+
+先adaptive-workflow，沿跨工程总控选择一个执行主流程；所有Agent知道存在其他工作者，不覆盖/回退他人文件。具体文件、步骤、测试、凭据配置落点和发布/回滚由子计划与ENV_CONFIG持有。既有完成勾选不得用于M8；本轮只更新文档。
+
+
 > **2026-08-13 当前跨仓门禁：M3 COMPLETE / M4 GO。** 业务 bootstrap 已把 CREATE USER 密码从 mysql argv 移至 stdin；离线 bootstrap/guard `28 passed` 证明密码不进入 fake mysql argv、调用日志或 stdout/stderr，且失败补偿未回退。Runtime v1.1 fixture 跨仓门禁 `9 passed`，本仓只读合同回归 `81 passed`、Ruff/Mypy 通过。凭据边界改动后，隔离 Docker MySQL `127.0.0.1:33306` 已重跑权限负测、same fingerprint、conflicting fingerprint 三项，结果 `3 passed, 47 deselected`。M4 仅获准开始 B11、F5–F7，尚未标记完成。
 
 > **2026-09-01 当前实现校准：** 公共 `bounded_loop` 静态 DAG 节点与

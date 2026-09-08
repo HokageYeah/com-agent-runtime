@@ -1,5 +1,18 @@
 # AgentRuntime 验证流程
 
+## M8 待实施验证（2026-09-08 文档收口）
+
+本节是验收计划，不是测试通过记录；M7部署成功来自用户确认，不能据此勾选M8。按 [R6–R8](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md) §6执行新增音频测试、旧包/公共wire回归、Ruff/Mypy、隔离迁移和Docker验证。旧包TTS禁用用例仍应通过；新包另测旁白/BGM。
+
+- [ ] TTS完整终态/分段/括号数字/重复正文不同scene，音乐已知TaskID与提交未知窗口；不发布半段，不重复付费重提。
+- [ ] 预算并发预留、费用未知不归零、cancel/lease/epoch、完整资产复用、未发布孤儿对账；不误删已发布资产。
+- [ ] 私有OSS四前缀、匿名拒绝/短期签名、Business/Runtime配置一致、无URL/正文/秘密进入日志与持久化。
+- [ ] 占位env验证实际env_file注入链、ffmpeg/ffprobe非root可执行；真实Key不进入镜像/测试输出。
+- [ ] 双仓fixture和旧包digest一致性、新旧作品/客户端、owner/visitor、撤分享/删除/隐私撤销、微信iOS/Android双音轨真机。
+
+完成实施后按“日期/精确命令/实际结果/跳过原因/真实服务与真机证据”更新；本轮只做文档差异/链接/契约审查，未运行音频生成、构建、迁移或部署。
+
+
 > **2026-08-07 R1 路由门禁边界（迁移源盘点，非重做）：** 本文件涉及的回忆录业务路由（用户 `/api/v1/memory/*`、本地 `/api/v1/internal/agent-tools/memory.*`、业务回调 `/api/v1/internal/agent-callbacks/memory`、`memory_status_api`、`memory_callbacks_api` 以及 `app.memory_runtime_launcher` legacy 启动器）均判定为“仓内历史实现已完成、目标架构待迁移”——代码保留作为迁移证据，不删除、不重写。R1 已在 `app/api/api.py` 落地环境门禁：`production` 注册 `/api/v1/runtime/*` 公共 provider 并保留模板工程的 `demo/diary` 示例，但不注册上述回忆录业务路由；`development` / `test` 仍按现状注册以便审计与跨仓联调。原有验证步骤不变，R1 路由表测试 `tests/test_runtime_route_gating.py` 作为门禁回归证据。
 
 ## 安全前提
