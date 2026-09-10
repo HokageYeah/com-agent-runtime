@@ -741,3 +741,25 @@ git diff --check
 ```
 
 覆盖要点（详见[第二轮必要修复完成记录](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/verification/2026-09-10-M8第二轮必要修复完成记录.md)，含 S1/F1/F4/F5 两外仓项）：R3 外层 `generate()` 墙钟断言（elapsed<0.7s vs 上传 1.2s）证明 executor 退出与迟到副作用被拒；R4 第三独立 Session 验权威态用例 + 并发 rotate 仅一 owner 成功（真线程并发仅 Postgres 门禁）；R5 隔离跨仓测试走真实网关消费者路径。未验证项：真实 MySQL RR 快照语义复现用例（本地 skipif 跳过，SQLite 逻辑等价证据）、真实 PostgreSQL 并发（需显式 DSN）、真实 OSS 删除与真实 Business 联调（由部署演练验收）。
+
+## M8 第三轮必要补缺验证（2026-09-10）
+
+范围：C1 超时音频孤儿生命周期。节点按时返回后后台 OSS 仍可能上传成功，账本带着 `object_key` 停在 reserved/submitted/processing，不在 `_ORPHAN_STATES`。落地三件套：内层非超时异常才 `mark_failed`（`TimeoutError` 不转 failed）；`fail_abandoned_keyed_jobs` 条件 UPDATE 收割过窗持键 active 为 failed（`AUDIO_LEASE_ABANDONED`，显式保留 `updated_at`）；维护 execute 先 reap 再扫描，`keep_published` 按 `job.object_key ∈ audio_object_keys` 成员关系判定。不扩 `_ORPHAN_STATES`。Business lookup additive 字段见第三轮完成记录。第二轮 §1 R3「副作用为零」是节点返回当时的 fencing，不是维护终态。
+
+```bash
+.venv/bin/pytest -q tests/test_memoir_audio_jobs.py \
+  tests/test_memoir_audio_ledger_recovery.py \
+  tests/test_memoir_audio_maintenance.py --tb=short
+# 78 passed, 1 skipped in 10.66s
+# SKIPPED tests/test_memoir_audio_jobs.py:1268 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+
+.venv/bin/ruff check app/scripts/memoir_audio_maintenance.py \
+  app/services/memoir/memoir_audio_jobs.py \
+  app/services/memoir/memoir_audio_service.py \
+  tests/test_memoir_audio_jobs.py \
+  tests/test_memoir_audio_ledger_recovery.py \
+  tests/test_memoir_audio_maintenance.py
+# All checks passed!
+```
+
+覆盖要点（详见[第三轮必要补缺完成记录](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/verification/2026-09-10-M8第三轮必要补缺完成记录.md)）：旁白真实 `generate` 超时→持键 reserved→reap failed→含键 `keep_published` / 空列表超窗 `cleaned`；BGM 同语义在 ledger_recovery；已引用零删除、未知零删除、在途不 reap、dry-run 不 reap；墙钟金丝雀 `test_execute_reaps_abandoned_then_classifies` 证明 reaper 不刷新 `updated_at`。未验证项：真实 PostgreSQL、真实 OSS 删除、真实 Business 联调维护、收费样本、部署。第二轮历史数字（101 passed 1 skipped / 16 passed / 11 passed）不改。

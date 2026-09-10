@@ -56,13 +56,18 @@ class OssDeleter(Protocol):
 
 
 # 发布探测口协议（R5 三态语义，替代 Runtime 本地 publish 表对账）：
-# - 返回 dict → 对象已被业务发布引用（keep_published，Runtime 不删）；
+# - 返回 dict → 整 Run 已发布；再按 audio_object_keys 成员关系判定该对象
+#   是否已被引用（缺字段按空列表，兼容旧 Business 包）；
 # - 返回 None → 业务明确未发布（超过保留窗才可进删除候选）；
 # - 抛异常 → 发布状态未知（keep_unknown，fail-safe 保留人工复核）。
 class PublishProbe(Protocol):
     """发布探测口协议：可调用对象，入参为账本作业行。"""
 
     def __call__(self, job: MemoirAudioJob) -> dict[str, Any] | None: ...
+
+
+# 探测异常 / 未注入探测口的哨兵。绝不能用 None：None = 明确未发布 404。
+_PROBE_UNKNOWN = object()
 
 
 class PublishStateUnknownError(Exception):
@@ -247,13 +252,24 @@ def run_maintenance(
     分类顺序（先命中先保留，兜底才是删除）：
     1. lease 未过期 → 在途，保留；
     2. submission_unknown → 账本未清（预留未对账），保留；
-    3. 探测确认已发布 → 保留；
+    3. 探测返回 dict 且 audio_object_keys 含该键 → 已引用，保留；
+       dict 但未引用 / 探测返回 None（明确未发布）→ 落入④窗检查；
     4. 仍在保留窗内 → 保留；
-    5. 探测明确未发布 → 超窗可删（唯一删除路径）；
+    5. 明确未发布或已发布但未引用该对象 → 超窗可删（唯一删除路径）；
     6. 探测失败或未注入探测口 → 状态未知，保留人工复核，绝不自动删。
+
+    execute=True 时先 fail_abandoned_keyed_jobs（grace=保留窗），再扫描，
+    本轮收割的 failed 行立刻进入视野。dry-run 零写入（含不 reap）。
     """
     moment = now or datetime.now(UTC)
     service = MemoirAudioJobsService(session)
+    # 先收割过窗持键 active，再 list：failed ∈ _ORPHAN_STATES。
+    # dry-run 连 reap 也不跑，保证零写入。
+    if execute:
+        service.fail_abandoned_keyed_jobs(
+            now=moment,
+            grace_seconds=float(retention_hours) * 3600.0,
+        )
     candidates = service.list_orphan_candidates(limit=limit)
     report = MaintenanceReport(scanned=len(candidates))
     retention_edge = moment - timedelta(hours=retention_hours)
@@ -267,23 +283,31 @@ def run_maintenance(
         if job.state == STATE_SUBMISSION_UNKNOWN:
             report = _bump(report, "keep_ledger_pending")
             continue
-        # 3. 发布三态探测（R5）：未注入探测口按未知处理（fail-safe 只
-        #    报告不删除）；探测抛异常同样按未知，绝不进入删除路径。
-        published: bool | None = None
-        if publish_probe is not None:
+        # 3. 发布探测。未注入探测口 ≠ probe 返回 None（明确未发布 404）。
+        if publish_probe is None:
+            probe: object = _PROBE_UNKNOWN
+        else:
             try:
-                published = publish_probe(job) is not None
+                probe = publish_probe(job)
             except Exception:  # noqa: BLE001 探测任何失败都按未知兜底
-                published = None
-        if published is True:
-            report = _bump(report, "keep_published")
-            continue
+                probe = _PROBE_UNKNOWN
+        if isinstance(probe, dict):
+            # 缺 audio_object_keys 按空列表：兼容旧 Business 包。
+            keys = probe.get("audio_object_keys", [])
+            if not isinstance(keys, list):
+                keys = []
+            if job.object_key in keys:
+                report = _bump(report, "keep_published")
+                continue
+            # 图文已发布但该对象未被引用：落入④窗检查。
+        # probe is None → 明确未发布，落入④窗检查。
+        # probe is _PROBE_UNKNOWN → 先④窗，超窗再⑥，不删。
         # 4. 保留窗内：无论后续判定为何，都未到清理时点。
         if _as_aware(job.updated_at) > retention_edge:
             report = _bump(report, "keep_within_retention")
             continue
-        # 5. 明确未发布：Business 权威确认该 Run 未发布此对象，超窗可删。
-        if published is False:
+        # 5. 唯一删除路径：明确未发布，或已发布但未引用该对象。
+        if probe is None or isinstance(probe, dict):
             report = _bump(report, "delete_candidates")
             if not execute:
                 continue

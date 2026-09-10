@@ -806,6 +806,58 @@ class MemoirAudioJobsService:
             )
         )
 
+    def fail_abandoned_keyed_jobs(
+        self, *, now: datetime | None = None, grace_seconds: float
+    ) -> int:
+        """把过保留窗的持键在途作业收割为 failed（AUDIO_LEASE_ABANDONED）。
+
+        不扩 _ORPHAN_STATES：mark_cleaned 非 CAS，若把 active 扫进去会与
+        rotate_lease 竞态（恢复旋转后对象被删 → 迟到上传重建但 job=cleaned
+        → 泄漏）。本方法用条件 UPDATE 本身做 fencing：恢复 worker 先
+        rotate_lease → expires_at 刷新 → 本条件不命中。
+
+        复活安全性（冻结文档 §2.4）：
+        - 持键作业费用已入账（旁白零成本槽 / BGM 在 _finalize 最前 settle），
+          mark_failed 与复活不重复收费。
+        - 复活保留同一 object_key，重试上传同键；对象已被删则重建。
+        - 迟到上传重建时 state 已是 active 且 expires_at 已刷新，既不在
+          _ORPHAN_STATES 也不满足本收割条件，不会二次删除。
+        - 24h 窗 ≫ Run 生命周期，实际不可观测。
+
+        submission_unknown 不在 _ACTIVE_STATES，天然不收割。
+        不持键 active 无对象可清，且 BGM 未持键=未结算，不收割。
+        """
+        moment = now or datetime.now(UTC)
+        cutoff = moment - timedelta(seconds=grace_seconds)
+        result = self._session.execute(
+            sa.update(MemoirAudioJob)
+            .where(
+                MemoirAudioJob.state.in_(_ACTIVE_STATES),
+                MemoirAudioJob.object_key.is_not(None),
+                MemoirAudioJob.expires_at.is_not(None),
+                MemoirAudioJob.expires_at < cutoff,
+            )
+            .values(
+                state=STATE_FAILED,
+                error_code="AUDIO_LEASE_ABANDONED",
+                # reaper 不得刷新 updated_at，否则保留窗被重置，同轮无法删除。
+                # 显式 SET updated_at = 列自身，压住 ORM onupdate 与 MySQL
+                # ON UPDATE CURRENT_TIMESTAMP。
+                updated_at=MemoirAudioJob.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        # 条件 UPDATE 不刷新身份映射；同一 Session 紧接着
+        # list_orphan_candidates 必须看到 failed，否则 mark_cleaned 会因
+        # 缓存的 reserved 态误判「非孤儿」。
+        self._session.expire_all()
+        count = int(result.rowcount or 0)
+        logger.info(
+            "Memoir 音频持键弃置作业已收割，code=MEMOIR_AUDIO_LEASE_ABANDONED，count=%d",
+            count,
+        )
+        return count
+
     def mark_cleaned(self, job_id: str) -> MemoirAudioJob:
         """维护专用：孤儿态对象已删除/确认移交后标记 cleaned。"""
         job = self._session.scalar(

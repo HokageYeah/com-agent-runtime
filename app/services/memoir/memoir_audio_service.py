@@ -703,11 +703,31 @@ class MemoirAudioService:
         except MemoirAudioJobsError as exc:
             self._absorb_jobs_error(ctx, exc.code, "narration_upload")
             return None
-        except Exception:
+        except Exception as exc:
             logging.warning(
                 "MemoirAgent 旁白上传失败降级 run_id=%s scene=%s code=AUDIO_UPLOAD_FAILED",
                 refs.run_id, scene_id,
             )
+            # 节点内 wait_for 超时会落入本 except，但不得 mark_failed：
+            # 超时后账本保持持键 reserved，迟到 record_upload 仍走 token
+            # fencing（R3）；收敛交给 fail_abandoned_keyed_jobs（§2.2）。
+            # concat 失败在 reserve 之前，由上方独立 except 返回，不 mark。
+            if not isinstance(exc, TimeoutError):
+                try:
+                    # 复活安全性（冻结文档 §2.4）：持键旁白费用已入账（零成本槽），
+                    # mark_failed / 复活不重复收费；复活保留同一 object_key，
+                    # 重试上传同键，对象被删则重建。迟到 token 已被 rotate 时
+                    # fencing 拒绝是正常竞态，此处吸收。24h 窗 ≫ Run 生命周期。
+                    self._jobs.mark_failed(
+                        job.job_id, token, error_code="AUDIO_UPLOAD_FAILED"
+                    )
+                    self._commit_ledger(ctx)
+                except Exception:
+                    logging.warning(
+                        "MemoirAgent 旁白失败入账被吸收 run_id=%s "
+                        "code=AUDIO_UPLOAD_FAILED",
+                        refs.run_id,
+                    )
             return None
         self._commit_ledger(ctx)
         self._heartbeat_run_lease(ctx, refs, lease_context)
@@ -986,7 +1006,7 @@ class MemoirAudioService:
             self._jobs.record_upload(
                 job.job_id, token, duration_ms=concat.duration_ms
             )
-        except Exception:
+        except Exception as exc:
             # 下载/转码/上传失败：费用已按请求秒数结算（任务已成功），资产
             # 缺失按无配乐降级；恢复重提会被 _bgm_slot_retryable 的已结算
             # 判定拦下，绝不重复付费。
@@ -994,6 +1014,26 @@ class MemoirAudioService:
                 "MemoirAgent 配乐交付失败降级 run_id=%s code=MEMOIR_AUDIO_BGM_DELIVERY_FAILED",
                 refs.run_id,
             )
+            # 节点内 wait_for 超时同样落入本 except，但不得 mark_failed（R3
+            # 墙钟 + fencing：迟到 record_upload 仍被旧 token 拒绝）。超时
+            # 与进程中断由 reaper 兜底。其余交付失败立即转 failed，释放槽位。
+            if not isinstance(exc, TimeoutError):
+                try:
+                    # 复活安全性（冻结文档 §2.4）：BGM 持键 ⇒ settle_music_usage
+                    # 已在本函数 try 外完成，mark_failed / 复活不重复收费。
+                    # 复活保留同一 object_key，重试上传同键；对象被删则重建。
+                    # 迟到 token 被 rotate 后 fencing 拒绝是正常竞态。
+                    # 24h 窗 ≫ Run 生命周期，active 不再二次删。
+                    self._jobs.mark_failed(
+                        job.job_id, token, error_code="AUDIO_BGM_DELIVERY_FAILED"
+                    )
+                    self._commit_ledger(ctx)
+                except Exception:
+                    logging.warning(
+                        "MemoirAgent 配乐失败入账被吸收 run_id=%s "
+                        "code=AUDIO_BGM_DELIVERY_FAILED",
+                        refs.run_id,
+                    )
             return None
         self._commit_ledger(ctx)
         self._heartbeat_run_lease(ctx, refs, lease_context)

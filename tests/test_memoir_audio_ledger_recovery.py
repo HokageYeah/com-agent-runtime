@@ -43,6 +43,7 @@ from app.models.memoir_audio_job import (
     ROLE_BACKGROUND_MUSIC,
     ROLE_NARRATION,
     ROLE_SEGMENT,
+    STATE_FAILED,
     STATE_RESERVED,
     STATE_SUBMITTED,
     STATE_SUBMITTING,
@@ -794,6 +795,42 @@ def test_r3_slow_upload_does_not_block_node_return_and_late_write_is_fenced(
         assert after.duration_ms is None
         assert after.lease_token == old_token + 1
 
+        # C1：持键 reserved 走 reaper + 维护链可收敛（不扩 _ORPHAN_STATES）。
+        from app.scripts.memoir_audio_maintenance import run_maintenance
+
+        class _Del:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def delete_object(self, object_key: str) -> bool:
+                self.deleted.append(object_key)
+                return True
+
+        reap_now = datetime.now(UTC) + timedelta(hours=25)
+        deleter = _Del()
+        with harness.factory() as maint:
+            jobs = MemoirAudioJobsService(maint, harness.policy)
+            assert jobs.fail_abandoned_keyed_jobs(
+                now=reap_now, grace_seconds=24 * 3600,
+            ) == 1
+            report = run_maintenance(
+                maint,
+                oss_deleter=deleter,
+                retention_hours=24,
+                limit=100,
+                execute=True,
+                now=reap_now,
+                publish_probe=lambda job: None,
+            )
+            maint.commit()
+        assert report.deleted == 1
+        with harness.factory() as probe:
+            cleaned = probe.execute(
+                select(MemoirAudioJob).where(MemoirAudioJob.job_id == job_id)
+            ).scalar_one()
+        assert cleaned.state == "cleaned"
+        assert cleaned.error_code == "AUDIO_LEASE_ABANDONED"
+
         # 上传线程池无残留线程（shutdown(wait=False) 后线程自行退出）。
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and not _no_residual_upload_threads():
@@ -890,6 +927,156 @@ def test_r3_near_zero_budget_returns_promptly_without_upload(tmp_path: Any) -> N
         assert elapsed < 0.5
         # 上传从未进入专用线程池。
         assert slow.uploads == []
+    finally:
+        harness.session.close()
+        harness.engine.dispose()
+
+
+class BoomUploader(FakeUploader):
+    """非超时交付失败：触发 §2.1 mark_failed，不走 reaper。"""
+
+    def upload_private_bytes(self, data: bytes, object_key: str, mime: str) -> None:
+        self.uploads.append((object_key, mime))
+        raise RuntimeError("oss down")
+
+
+def test_narration_upload_exception_marks_failed_without_timeout(
+    tmp_path: Any,
+) -> None:
+    """旁白上传非超时异常 → AUDIO_UPLOAD_FAILED，进入孤儿态。"""
+    harness = _build_harness(
+        tmp_path,
+        music=FakeMusicClient(fail_submit=True),
+        uploader=BoomUploader(),
+    )
+    try:
+        result = harness.service.generate(harness.run, _playback())
+        assert result == {"narrations": [], "background_music": None}
+        with harness.factory() as probe:
+            narr = probe.execute(
+                select(MemoirAudioJob).where(
+                    MemoirAudioJob.run_id == RUN_ID,
+                    MemoirAudioJob.role == ROLE_NARRATION,
+                )
+            ).scalar_one()
+        assert narr.state == STATE_FAILED
+        assert narr.error_code == "AUDIO_UPLOAD_FAILED"
+        assert narr.object_key is not None
+    finally:
+        harness.session.close()
+        harness.engine.dispose()
+
+
+def test_bgm_timeout_late_write_fenced_then_mark_failed_classifies(
+    tmp_path: Any,
+) -> None:
+    """BGM 超时→迟到写入被 fence→mark_failed→维护分类（含键保留/不含键可删）。"""
+    from app.scripts.memoir_audio_maintenance import run_maintenance
+
+    slow = SlowUploader(1.2)
+    harness = _build_harness(
+        tmp_path,
+        uploader=slow,
+        config_overrides={
+            "node_timeout_seconds": 0.40,
+            "publish_reserve_seconds": 0.05,
+        },
+    )
+    try:
+        result = harness.service.generate(harness.run, {"scenes": []})
+        assert result == {"narrations": [], "background_music": None}
+        assert slow.started.wait(timeout=2.0)
+        assert slow.finished.wait(timeout=5.0)
+        if slow.thread is not None:
+            slow.thread.join(timeout=5.0)
+
+        with harness.factory() as probe:
+            bgm = probe.execute(
+                select(MemoirAudioJob).where(
+                    MemoirAudioJob.run_id == RUN_ID,
+                    MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
+                )
+            ).scalar_one()
+        assert bgm.state in (STATE_SUBMITTED, STATE_RESERVED)
+        assert bgm.object_key is not None
+        assert bgm.duration_ms is None
+        object_key = bgm.object_key
+        job_id, old_token = bgm.job_id, bgm.lease_token
+
+        with harness.factory() as recovery:
+            jobs_recovery = MemoirAudioJobsService(recovery, harness.policy)
+            rotated = jobs_recovery.rotate_lease(
+                job_id, old_token,
+                owner=f"audio:{RUN_ID}:attempt-1", ttl_seconds=90.0,
+            )
+            recovery.commit()
+        assert rotated.lease_token == old_token + 1
+        with pytest.raises(MemoirAudioJobsError) as excinfo:
+            harness.service._jobs.record_upload(job_id, old_token, duration_ms=60000)
+        assert excinfo.value.code == "MEMOIR_AUDIO_FENCING_REJECTED"
+        # 超时路径不 mark_failed（TimeoutError 被吸收）；过 grace 后由 reaper 收割。
+        with harness.factory() as probe:
+            still = probe.execute(
+                select(MemoirAudioJob).where(MemoirAudioJob.job_id == job_id)
+            ).scalar_one()
+        assert still.state != STATE_FAILED
+        assert still.object_key == object_key
+
+        class _Del:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            def delete_object(self, object_key: str) -> bool:
+                self.deleted.append(object_key)
+                return True
+
+        reap_now = datetime.now(UTC) + timedelta(hours=25)
+        with harness.factory() as maint:
+            report = run_maintenance(
+                maint,
+                oss_deleter=_Del(),
+                retention_hours=24,
+                limit=100,
+                execute=True,
+                now=reap_now,
+                publish_probe=lambda job: {"audio_object_keys": [object_key]},
+            )
+            maint.commit()
+        assert report.keep_published == 1
+        assert report.deleted == 0
+        with harness.factory() as probe:
+            reaped = probe.execute(
+                select(MemoirAudioJob).where(MemoirAudioJob.job_id == job_id)
+            ).scalar_one()
+        assert reaped.state == STATE_FAILED
+        assert reaped.error_code == "AUDIO_LEASE_ABANDONED"
+
+        deleter = _Del()
+        with harness.factory() as maint:
+            report = run_maintenance(
+                maint,
+                oss_deleter=deleter,
+                retention_hours=24,
+                limit=100,
+                execute=True,
+                now=reap_now,
+                publish_probe=lambda job: {"audio_object_keys": []},
+            )
+            maint.commit()
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert deleter.deleted == [object_key]
+        with harness.factory() as probe:
+            cleaned = probe.execute(
+                select(MemoirAudioJob).where(MemoirAudioJob.job_id == job_id)
+            ).scalar_one()
+        assert cleaned.state == "cleaned"
+        assert cleaned.error_code == "AUDIO_LEASE_ABANDONED"
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not _no_residual_upload_threads():
+            time.sleep(0.02)
+        assert _no_residual_upload_threads()
     finally:
         harness.session.close()
         harness.engine.dispose()

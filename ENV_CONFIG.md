@@ -37,7 +37,7 @@
 | `MEMOIR_MUSIC_PRICE_PER_SECOND` | 空；按所选音乐产品额度消耗或计费规格换算，十进制非负；套餐不等于免费 |
 | `MEMOIR_AUDIO_MAX_COST_PER_RUN` | 空；本 Run 音频独立上限，十进制正数；缺失禁止开启，不更改通用模型费用门禁 |
 | `MEMOIR_AUDIO_MAX_FILE_BYTES` | `20971520`，单个输入下载/合成最终文件20MiB；超限降级资源，不发布截断文件 |
-| `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS` | `24`，正整数且至少1小时；只清理经publish query明确未发布且最后更新超过窗口的对象；未知/在途/已发布均不得按时长删除 |
+| `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS` | `24`，正整数且至少1小时。持键 active（`object_key` 非空且仍在 reserved/submitting/submitted/processing）过保留窗由维护 execute 收割为 failed（`AUDIO_LEASE_ABANDONED`，不刷新 `updated_at`）；扫描后只删除「明确未发布或已发布但未引用该对象」且超窗的对象。未知/在途/`submission_unknown`/已引用均不得按时长删除 |
 | `MEMOIR_AUDIO_FFMPEG_PATH` / `MEMOIR_AUDIO_FFPROBE_PATH` | `/usr/bin/ffmpeg` / `/usr/bin/ffprobe`；启用时检查可执行及受限临时目录，非 root 运行 |
 | `MEMORY_AUDIO_OSS_ENDPOINT` | 空；Runtime 可用部署网络适合的 HTTPS OSS endpoint；Business 签名用小程序可达域名 |
 | `MEMORY_AUDIO_OSS_BUCKET` | 空；同环境 Business 相同私有音频桶 |
@@ -589,7 +589,7 @@ policy:
 - 媒体五项全空时能力关闭，全部填写时完成 S3 代理装配，半配置时拒绝启动；
 - 所有响应和输出不包含 HMAC、Fernet、JWT、S3 凭据、私有 URL 或业务内容。
 
-## M8 音频孤儿维护 CLI（R7，2026-09-10 R5 修订）
+## M8 音频孤儿维护 CLI（R7，2026-09-10 R5 修订；2026-09-10 C1 再修订）
 
 音频作业账本（`memoir_audio_jobs` / `memoir_audio_run_budgets`）的孤儿对象由独立维护命令扫描清理，不进公共 worker：
 
@@ -599,9 +599,9 @@ policy:
 ```
 
 - `--environment`：必选，仅 `test` / `production`；命令内置守卫拒绝连接库名不含 `agent_runtime` 的目标（防误指业务库）。
-- `--dry-run` / `--execute`：互斥，默认 dry-run 只分类计数；execute 才真正调用 OSS 删除。
+- `--dry-run` / `--execute`：互斥，默认 dry-run 只分类计数；execute 才真正调用 OSS 删除。dry-run 零写入（含不 reap）。
 - `--limit`：本批候选上限（默认 100），超出部分留给下一批。
-- 保留窗读 `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS`（默认 24，配置不可用时回退 24 不阻断扫描）。
-- **删除判据（R5：真实 Business 发布探测三态，先命中先保留）**：lease 在途保留；`submission_unknown` 账本未清保留；发布探测确认已发布保留；窗内保留；**探测明确未发布且超窗**是唯一删除路径；探测失败或身份不完整一律按未知保留人工复核。404/NoSuchKey 视为清理成功；其他删除失败计入 `delete_failed` 并继续本批。
+- 保留窗读 `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS`（默认 24，配置不可用时回退 24 不阻断扫描）。reaper grace = 该保留窗，不是 90s lease TTL。
+- **删除判据（R5 三态 + C1 成员关系，先命中先保留）**：execute 先 `fail_abandoned_keyed_jobs`（grace=保留窗，条件 UPDATE 显式保留 `updated_at`）再扫描。lease 在途保留；`submission_unknown` 账本未清保留；探测 dict 且 `audio_object_keys` 含该键 → `keep_published`（成员关系，不是整 Run 已发布）；窗内保留；**探测明确未发布（None）或已发布但未引用该对象，且超窗**是唯一删除路径；探测失败、未注入探测口或身份不完整一律按未知保留人工复核。404/NoSuchKey 视为清理成功；其他删除失败计入 `delete_failed` 并继续本批。
 - **发布探测真实装配（R5）**：未显式注入探测口时，CLI 从 `settings.business_connectors` 装配真实 `ToolGateway`（镜像 `app/worker.py` 生产装配，含对端复核 transport）；装配失败整命令拒绝执行（退出码 2），绝不降级为"无探测继续跑"。探测身份只信权威 `AgentRun.input_json`（archive_id/snapshot_id/generation_epoch），logical_key 与发布节点逐字一致——Business 按原发布幂等键精确命中才算"已发布"；Run 缺失、发布引用缺失、epoch 漂移、网关调用失败均归未知，绝不删除。需要 Business connector 配置齐全（enabled + base_url/runtime_id/key_id/secret）。
 - 输出与日志只有计数与安全枚举，不打印对象键、凭据或私有 URL。

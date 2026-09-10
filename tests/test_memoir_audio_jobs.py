@@ -28,7 +28,9 @@ from app.services.memoir.memoir_audio_jobs import (
     ROLE_NARRATION,
     ROLE_SEGMENT,
     STATE_CLEANED,
+    STATE_FAILED,
     STATE_PUBLISHED,
+    STATE_RESERVED,
     STATE_SUBMISSION_UNKNOWN,
     STATE_SUBMITTED,
     STATE_UPLOADED,
@@ -453,6 +455,147 @@ def test_rotate_lease_rejects_wrong_expected_token(
                 owner="worker-b", ttl_seconds=60.0,
             )
         assert err.value.code == "MEMOIR_AUDIO_FENCING_REJECTED"
+
+
+# ---------------------------------------------------------------------------
+# C1：fail_abandoned_keyed_jobs（持键过窗收割，不扩 _ORPHAN_STATES）
+# ---------------------------------------------------------------------------
+
+
+def test_fail_abandoned_keyed_jobs_reaps_expired_keyed_active(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """过窗持键 active → failed + AUDIO_LEASE_ABANDONED。"""
+    with session_factory() as session:
+        _make_run(session, "run-1")
+        service = MemoirAudioJobsService(session, _policy())
+        reserved = service.reserve_job(
+            _narration_reservation("run-1", "scene-1", "hmac-a")
+        ).job
+        service.record_object_key(
+            reserved.job_id, reserved.lease_token,
+            "memoir-test/abandoned.mp3", "audio/mpeg",
+        )
+        now = datetime.now(UTC)
+        reserved.expires_at = now - timedelta(hours=25)
+        session.flush()
+        age_before = reserved.updated_at
+
+        count = service.fail_abandoned_keyed_jobs(now=now, grace_seconds=24 * 3600)
+        assert count == 1
+        job = session.get(MemoirAudioJob, reserved.id)
+        assert job is not None
+        assert job.state == STATE_FAILED
+        assert job.error_code == "AUDIO_LEASE_ABANDONED"
+        assert job.updated_at == age_before
+
+
+def test_fail_abandoned_keyed_jobs_skips_fresh_or_in_grace(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """lease 未过期、或过期但仍在 grace 内 → 不动。"""
+    with session_factory() as session:
+        _make_run(session, "run-1")
+        service = MemoirAudioJobsService(session, _policy())
+        now = datetime.now(UTC)
+        alive = service.reserve_job(
+            _narration_reservation("run-1", "scene-1", "hmac-alive", job_id="job-alive")
+        ).job
+        service.record_object_key(
+            alive.job_id, alive.lease_token, "memoir-test/alive.mp3", "audio/mpeg",
+        )
+        graced = service.reserve_job(
+            _narration_reservation("run-1", "scene-2", "hmac-grace", job_id="job-grace")
+        ).job
+        service.record_object_key(
+            graced.job_id, graced.lease_token, "memoir-test/grace.mp3", "audio/mpeg",
+        )
+        # 过期 1 小时，grace=24h → 仍在保留窗内，不得收割。
+        graced.expires_at = now - timedelta(hours=1)
+        session.flush()
+
+        count = service.fail_abandoned_keyed_jobs(now=now, grace_seconds=24 * 3600)
+        assert count == 0
+        assert session.get(MemoirAudioJob, alive.id).state == STATE_RESERVED
+        assert session.get(MemoirAudioJob, graced.id).state == STATE_RESERVED
+
+
+def test_fail_abandoned_keyed_jobs_never_reaps_submission_unknown(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """submission_unknown 即使持键且过窗也永不 reap（费用未知语义）。"""
+    with session_factory() as session:
+        _make_run(session, "run-1")
+        service = MemoirAudioJobsService(session, _policy())
+        reserved = service.reserve_job(
+            _narration_reservation("run-1", "scene-1", "hmac-a")
+        ).job
+        token = reserved.lease_token
+        service.record_object_key(
+            reserved.job_id, token, "memoir-test/unknown.mp3", "audio/mpeg",
+        )
+        service.mark_submitting(reserved.job_id, token)
+        service.mark_submission_unknown(
+            reserved.job_id, token, error_code="TTS_UNKNOWN_ERROR",
+        )
+        now = datetime.now(UTC)
+        reserved.expires_at = now - timedelta(hours=25)
+        session.flush()
+
+        count = service.fail_abandoned_keyed_jobs(now=now, grace_seconds=24 * 3600)
+        assert count == 0
+        job = session.get(MemoirAudioJob, reserved.id)
+        assert job is not None
+        assert job.state == STATE_SUBMISSION_UNKNOWN
+        assert job.error_code == "TTS_UNKNOWN_ERROR"
+
+
+def test_fail_abandoned_keyed_jobs_skips_unkeyed_active(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """不持键 active 不 reap（无对象可清；BGM 未持键=未结算）。"""
+    with session_factory() as session:
+        _make_run(session, "run-1")
+        service = MemoirAudioJobsService(session, _policy())
+        reserved = service.reserve_job(
+            _narration_reservation("run-1", "scene-1", "hmac-a")
+        ).job
+        now = datetime.now(UTC)
+        reserved.expires_at = now - timedelta(hours=25)
+        session.flush()
+        assert reserved.object_key is None
+
+        count = service.fail_abandoned_keyed_jobs(now=now, grace_seconds=24 * 3600)
+        assert count == 0
+        assert session.get(MemoirAudioJob, reserved.id).state == STATE_RESERVED
+
+
+def test_fail_abandoned_keyed_jobs_misses_after_rotate_lease(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """先 rotate_lease 再 reap：expires_at 已刷新，条件 UPDATE 不命中。"""
+    with session_factory() as session:
+        _make_run(session, "run-1")
+        service = MemoirAudioJobsService(session, _policy())
+        reserved = service.reserve_job(
+            _narration_reservation("run-1", "scene-1", "hmac-a", lease_ttl_seconds=1.0)
+        ).job
+        old_token = reserved.lease_token
+        service.record_object_key(
+            reserved.job_id, old_token, "memoir-test/rotated.mp3", "audio/mpeg",
+        )
+        now = datetime.now(UTC) + timedelta(seconds=5)
+        service.rotate_lease(
+            reserved.job_id, old_token,
+            owner="worker-b", ttl_seconds=60.0, now=now,
+        )
+
+        count = service.fail_abandoned_keyed_jobs(now=now, grace_seconds=24 * 3600)
+        assert count == 0
+        job = session.get(MemoirAudioJob, reserved.id)
+        assert job is not None
+        assert job.state == STATE_RESERVED
+        assert job.lease_token == old_token + 1
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +1096,8 @@ class _FakePublishProbe:
         key = job.object_key or ""
         self.probed.append(key)
         if key in self.published:
-            return {"document_id": f"doc-{job.job_id}"}
+            # C1：keep_published 只看成员关系，必须显式带上该键。
+            return {"document_id": f"doc-{job.job_id}", "audio_object_keys": [key]}
         if key in self.unpublished:
             return None
         raise RuntimeError("probe unavailable")

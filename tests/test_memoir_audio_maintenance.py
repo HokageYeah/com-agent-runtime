@@ -40,6 +40,7 @@ from app.scripts.memoir_audio_maintenance import (
 )
 from app.services.memoir.memoir_audio_jobs import (
     ROLE_NARRATION,
+    STATE_RESERVED,
     STATE_SUBMISSION_UNKNOWN,
     STATE_UPLOADED,
 )
@@ -179,7 +180,8 @@ class _FakeProbe:
     def __call__(self, job: MemoirAudioJob) -> dict[str, Any] | None:
         key = job.object_key or ""
         if key in self.published:
-            return {"document_id": "doc-1"}
+            # C1：keep_published 只认成员关系，必须显式带上该键。
+            return {"document_id": "doc-1", "audio_object_keys": [key]}
         if key in self.unpublished:
             return None
         raise RuntimeError("probe unavailable")
@@ -223,11 +225,15 @@ def _real_gateway(client: httpx.Client) -> ToolGateway:
 
 
 def _published_handler(request: httpx.Request) -> httpx.Response:
-    """Business 原键权威命中：冻结摘要形状（revision + content_digest）。"""
+    """Business 原键权威命中：冻结摘要 + C1 audio_object_keys。"""
     return httpx.Response(
         200,
         json={
-            "output": {"revision": 2, "content_digest": "ab" * 32},
+            "output": {
+                "revision": 2,
+                "content_digest": "ab" * 32,
+                "audio_object_keys": ["memoir-test/rg-pub.mp3"],
+            },
             "schema_version": "1.0.0",
         },
     )
@@ -392,7 +398,11 @@ def test_probe_mirrors_publish_wire_shape(
         client, requests = _mock_client(_published_handler)
         probe = build_publish_probe(session, _real_gateway(client))
 
-        assert probe(job) == {"revision": 2, "content_digest": "ab" * 32}
+        assert probe(job) == {
+            "revision": 2,
+            "content_digest": "ab" * 32,
+            "audio_object_keys": ["memoir-test/rg-pub.mp3"],
+        }
         (request,) = requests
         # 请求形状按 gateway 实现事实断言（先读实现再断言，不猜）。
         assert request.method == "POST"
@@ -701,3 +711,348 @@ def test_build_production_probe_reads_settings_connectors(
         with pytest.raises(Exception) as exc_info:
             build_production_publish_probe(session)
         assert "MEMOIR_AUDIO_CONNECTOR_UNAVAILABLE" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# C1：对象成员关系判定 + reaper 接入维护
+# ---------------------------------------------------------------------------
+
+
+class _FixedProbe:
+    """返回固定 dict / None 的探测口；用于成员关系与缺字段用例。"""
+
+    def __init__(self, payload: dict[str, Any] | None) -> None:
+        self.payload = payload
+
+    def __call__(self, job: MemoirAudioJob) -> dict[str, Any] | None:
+        return self.payload
+
+
+class _ErrorProbe:
+    def __call__(self, job: MemoirAudioJob) -> dict[str, Any] | None:
+        raise RuntimeError("probe boom")
+
+
+def test_probe_dict_with_key_keeps_published(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """probe dict 且 keys 含该键 → keep_published 零删除。"""
+    with session_factory() as session:
+        job = _seed_orphan(session, scene_id="s-ref", key="memoir-test/ref.mp3")
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FixedProbe({"audio_object_keys": [job.object_key]}),
+        )
+        assert report.keep_published == 1
+        assert report.deleted == 0
+        assert deleter.deleted == []
+        assert job.state == STATE_UPLOADED
+
+
+def test_probe_dict_unreferenced_within_retention_kept(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """图文已发布但该对象未引用：窗内 keep，不删。"""
+    with session_factory() as session:
+        _seed_orphan(
+            session, scene_id="s-fresh-unref",
+            key="memoir-test/fresh-unref.mp3", age_hours=1,
+        )
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FixedProbe({"audio_object_keys": ["memoir-test/other.mp3"]}),
+        )
+        assert report.keep_within_retention == 1
+        assert report.deleted == 0
+        assert deleter.deleted == []
+
+
+def test_probe_dict_unreferenced_past_retention_deletes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """图文已发布但该对象未引用：超窗才是删除候选；execute 才删。"""
+    with session_factory() as session:
+        job = _seed_orphan(
+            session, scene_id="s-old-unref", key="memoir-test/old-unref.mp3",
+        )
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FixedProbe({"audio_object_keys": ["memoir-test/other.mp3"]}),
+        )
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert deleter.deleted == ["memoir-test/old-unref.mp3"]
+        assert job.state == "cleaned"
+
+
+def test_probe_none_past_retention_still_deletes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """probe 404/None：明确未发布，超窗删除（回归）。"""
+    with session_factory() as session:
+        job = _seed_orphan(session, scene_id="s-none", key="memoir-test/none.mp3")
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FixedProbe(None),
+        )
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert job.state == "cleaned"
+
+
+def test_probe_error_keeps_unknown_zero_delete(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """probe 异常 → keep_unknown 零删除。"""
+    with session_factory() as session:
+        _seed_orphan(session, scene_id="s-err", key="memoir-test/err.mp3")
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_ErrorProbe(),
+        )
+        assert report.keep_unknown == 1
+        assert report.deleted == 0
+        assert deleter.deleted == []
+
+
+def test_missing_audio_object_keys_field_is_empty_list(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """缺 audio_object_keys 字段按空列表 → 未引用分类，不崩。"""
+    with session_factory() as session:
+        job = _seed_orphan(session, scene_id="s-miss", key="memoir-test/miss.mp3")
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FixedProbe({"revision": 2, "content_digest": "ab" * 32}),
+        )
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert deleter.deleted == ["memoir-test/miss.mp3"]
+        assert job.state == "cleaned"
+
+
+def test_in_flight_keyed_reserved_not_reaped_or_deleted(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """lease 在途的持键 reserved：不 reap、不删。"""
+    with session_factory() as session:
+        job = _seed_orphan(
+            session, scene_id="s-fly-res", key="memoir-test/fly-res.mp3",
+            state=STATE_RESERVED, lease_active=True, age_hours=30,
+        )
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            now=datetime.now(UTC),
+            publish_probe=_FixedProbe(None),
+        )
+        assert report.scanned == 0
+        assert report.deleted == 0
+        assert deleter.deleted == []
+        session.refresh(job)
+        assert job.state == STATE_RESERVED
+
+
+def test_dry_run_does_not_reap_or_delete(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """dry-run 零写入：reaper 不执行，超窗未引用也不删。"""
+    with session_factory() as session:
+        abandoned = _seed_orphan(
+            session, scene_id="s-abn", key="memoir-test/abandoned.mp3",
+            state=STATE_RESERVED, age_hours=30,
+        )
+        abandoned.expires_at = datetime.now(UTC) - timedelta(hours=25)
+        uploaded = _seed_orphan(
+            session, scene_id="s-up", key="memoir-test/stale.mp3", age_hours=30,
+        )
+        session.commit()
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=False,
+            now=datetime.now(UTC),
+            publish_probe=_FixedProbe({"audio_object_keys": []}),
+        )
+        assert report.deleted == 0
+        assert deleter.deleted == []
+        session.refresh(abandoned)
+        session.refresh(uploaded)
+        assert abandoned.state == STATE_RESERVED
+        assert uploaded.state == STATE_UPLOADED
+        assert report.delete_candidates == 1  # 仅已在孤儿集合的 uploaded
+
+
+def test_execute_reaps_abandoned_then_classifies(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """execute 先 reap 再扫描：过窗持键 reserved 本轮即可删除。"""
+    with session_factory() as session:
+        job = _seed_orphan(
+            session, scene_id="s-reap", key="memoir-test/reap.mp3",
+            state=STATE_RESERVED, age_hours=30,
+        )
+        now = datetime.now(UTC)
+        # ORM commit 会触发 updated_at onupdate，把 30h 年龄刷回现在；
+        # 过期写入必须走 Core UPDATE 并保留原时间戳，才能用墙钟 now 验证同轮删除。
+        session.execute(
+            sa.update(MemoirAudioJob)
+            .where(MemoirAudioJob.id == job.id)
+            .values(
+                expires_at=now - timedelta(hours=25),
+                updated_at=MemoirAudioJob.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        session.expire(job)
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            now=now,
+            publish_probe=_FixedProbe(None),
+        )
+        assert report.scanned == 1
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert deleter.deleted == ["memoir-test/reap.mp3"]
+        # mark_cleaned 只改身份映射，未 flush；refresh 会读回库里的 failed。
+        assert job.state == "cleaned"
+
+
+def test_end_to_end_timeout_reaper_and_membership(tmp_path: Any) -> None:
+    """真实 generate + 真实账本 + reaper + 维护分类（含键/不含键）。
+
+    覆盖旁白超时→迟到成功→保留窗到期→正确收敛。收费/OSS 用替身。
+    """
+    import time
+
+    from test_memoir_audio_ledger_recovery import (
+        RUN_ID,
+        FakeMusicClient,
+        SlowUploader,
+        _build_harness,
+        _playback,
+    )
+
+    slow = SlowUploader(1.2)
+    harness = _build_harness(
+        tmp_path,
+        music=FakeMusicClient(fail_submit=True),
+        uploader=slow,
+        config_overrides={
+            "node_timeout_seconds": 0.40,
+            "publish_reserve_seconds": 0.05,
+        },
+    )
+    try:
+        result = harness.service.generate(harness.run, _playback())
+        assert result == {"narrations": [], "background_music": None}
+        assert slow.finished.wait(timeout=5.0)
+        if slow.thread is not None:
+            slow.thread.join(timeout=5.0)
+        with harness.factory() as probe:
+            narr = probe.execute(
+                sa.select(MemoirAudioJob).where(
+                    MemoirAudioJob.run_id == RUN_ID,
+                    MemoirAudioJob.role == ROLE_NARRATION,
+                )
+            ).scalar_one()
+        assert narr.state == STATE_RESERVED
+        assert narr.object_key is not None
+        object_key = narr.object_key
+        reap_now = datetime.now(UTC) + timedelta(hours=25)
+
+        # 含键：已引用零删除。
+        with harness.factory() as maint:
+            report = run_maintenance(
+                maint,
+                oss_deleter=_FakeDeleter(),
+                retention_hours=24,
+                limit=100,
+                execute=True,
+                now=reap_now,
+                publish_probe=_FixedProbe({"audio_object_keys": [object_key]}),
+            )
+            maint.commit()
+        assert report.keep_published == 1
+        assert report.deleted == 0
+        with harness.factory() as probe:
+            kept = probe.execute(
+                sa.select(MemoirAudioJob).where(MemoirAudioJob.job_id == narr.job_id)
+            ).scalar_one()
+        assert kept.state == "failed"  # reap 后因已引用保留
+        assert kept.error_code == "AUDIO_LEASE_ABANDONED"
+
+        # 不含键：超窗删除。
+        deleter = _FakeDeleter()
+        with harness.factory() as maint:
+            report = run_maintenance(
+                maint,
+                oss_deleter=deleter,
+                retention_hours=24,
+                limit=100,
+                execute=True,
+                now=reap_now,
+                publish_probe=_FixedProbe({"audio_object_keys": []}),
+            )
+            maint.commit()
+        assert report.delete_candidates == 1
+        assert report.deleted == 1
+        assert deleter.deleted == [object_key]
+        with harness.factory() as probe:
+            cleaned = probe.execute(
+                sa.select(MemoirAudioJob).where(MemoirAudioJob.job_id == narr.job_id)
+            ).scalar_one()
+        assert cleaned.state == "cleaned"
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not any(
+                "memoir-audio-upload" in t.name
+                for t in __import__("threading").enumerate()
+            ):
+                break
+            time.sleep(0.02)
+    finally:
+        harness.session.close()
+        harness.engine.dispose()
