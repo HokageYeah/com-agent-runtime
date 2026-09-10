@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["archive_id", "snapshot_id", "generation_epoch"],
+  "properties": {
+    "archive_id": {"type": "string"},
+    "snapshot_id": {"type": "string"},
+    "generation_epoch": {"type": "integer", "minimum": 1},
+    "locale": {"type": "string", "default": "zh-CN"}
+  },
+  "additionalProperties": false
+}

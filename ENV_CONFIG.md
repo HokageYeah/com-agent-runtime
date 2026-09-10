@@ -1,8 +1,8 @@
 # AgentRuntime 敏感与条件环境配置
 
-## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；未实施）
+## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；R6–R8 已实现，未部署）
 
-以下为后续开发必须增加的配置，当前 Settings/Compose/Dockerfile 尚未实现音频能力。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
+以下配置已在 `app/core/config.py`（Settings 字段 + `validate_memoir_audio_settings` 成组校验）、三个 env 模板（根 `.env.example` 与 `docker/backend/{test,production}.env.example` 占位）与 `docker/backend/Dockerfile`（`USER runtime` 前 apt 安装 ffmpeg/ffprobe）落地，Worker 装配入口为 `app/worker.py::configured_audio_service`（默认关闭返回 None）。真实凭据、服务开通与部署注册由运维阶段执行。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
 
 ### A. 凭据在哪里申请、填到哪里
 
@@ -32,7 +32,7 @@
 | `MEMOIR_AUDIO_NODE_TIMEOUT_SECONDS` | `300`；实际取 min(本值, Run 剩余减发布预留) |
 | `MEMOIR_AUDIO_PUBLISH_RESERVE_SECONDS` | `30`；到预留时停止新音频提交，收集成功资源后发布 |
 | `MEMOIR_AUDIO_WORKER_CONCURRENCY` | `4`；每进程总信号量，扩副本须合并核算账号配额 |
-| `MEMOIR_AUDIO_COST_CURRENCY` | 空；启用前明确与部署费用预算相同币种，不默认换汇 |
+| `MEMOIR_AUDIO_COST_CURRENCY` | 空；启用音频时校验冻结只允许 CNY，费用预算按人民币核算，不默认换汇 |
 | `MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS` | 空；按已开通计费规格换算为每千 `text_words` 的单价，十进制非负；未知不能填0 |
 | `MEMOIR_MUSIC_PRICE_PER_SECOND` | 空；按所选音乐产品额度消耗或计费规格换算，十进制非负；套餐不等于免费 |
 | `MEMOIR_AUDIO_MAX_COST_PER_RUN` | 空；本 Run 音频独立上限，十进制正数；缺失禁止开启，不更改通用模型费用门禁 |
@@ -45,6 +45,7 @@
 | `MEMORY_AUDIO_NARRATOR_PREFIX` | 按下表明确配置；与 Business 同环境同角色一致 |
 | `MEMORY_AUDIO_BACKGROUND_PREFIX` | 按下表明确配置；与 Business 同环境同角色一致 |
 | `MEMORY_AUDIO_SCOPE_HMAC_KEY` | 空；两仓同环境共享的专用高熵密钥，不复用 Snapshot/密码密钥；轮换先排空在途作业 |
+| `MEMOIR_AUDIO_INPUT_HMAC_KEY` | 空；Runtime 专属的账本输入指纹 HMAC 密钥（keyed HMAC-SHA256），启用音频时必填非空；与 `MEMORY_AUDIO_SCOPE_HMAC_KEY` 域隔离不得复用同一值；只进摘要计算，绝不写日志或账本 |
 
 API host、SSE path、音频 MP3/24000Hz/64000bit、音乐 API Version `2024-08-12`/模型 `v5.0` 与签名 service/region作为 Memoir adapter 固定协议常量，不能从不可信请求改写。新包 `agent.yaml` 的 Run deadline 设为1200秒，仅新包生效；不得为 M8 提高所有 Agent 全局超时。
 
@@ -54,6 +55,8 @@ API host、SSE path、音频 MP3/24000Hz/64000bit、音乐 API Version `2024-08-
 | production | `memoir/audios/background/` | `memoir/audios/narrator/` |
 
 前缀是 OSS 对象 key，不是本地目录或 URL；末尾保留 `/`，追加 `<HMAC-scope>/<opaque-asset>.mp3`。拒绝跨环境/角色、`..`、URL、重叠前缀。两种音频都必须上传 OSS 后再发布；私有 ACL 不可被匿名 bucket policy/CDN 绕过。Business endpoint 可与 Runtime 上传 endpoint 不同，但 bucket/prefix/scope 必须匹配。
+
+**账本指纹算法 v1→v2 与旧在途记录兼容口径（R6）**：`compute_input_hmac` 从无密钥 SHA256（v1）升级为 keyed HMAC-SHA256（v2，版本串 `memoir-audio-input-v2`），且分段指纹额外纳入 `segment_index` 与完整场景正文摘要。算法切换后旧 v1 摘要不可能与新摘要相等，切换前留下的在途（非终态）账本行不会被新执行按指纹复用或续跑——一律按未知提交处理，由 M8 音频孤儿维护 CLI（见文末 R7）按对账窗口收敛。音频能力默认关闭且未部署生产，无历史生产数据需要迁移；切换密钥（`MEMOIR_AUDIO_INPUT_HMAC_KEY` 轮换）同样导致全部在途指纹失配，轮换前先排空在途作业。账本与日志永不保存场景正文、音频字节、TaskID 或临时 AudioUrl，只保存摘要与安全计数。
 
 ### C. Docker 文件具体改哪里
 
@@ -585,3 +588,20 @@ policy:
 - Alembic 迁移成功且只有一个 head；
 - 媒体五项全空时能力关闭，全部填写时完成 S3 代理装配，半配置时拒绝启动；
 - 所有响应和输出不包含 HMAC、Fernet、JWT、S3 凭据、私有 URL 或业务内容。
+
+## M8 音频孤儿维护 CLI（R7，2026-09-10 R5 修订）
+
+音频作业账本（`memoir_audio_jobs` / `memoir_audio_run_budgets`）的孤儿对象由独立维护命令扫描清理，不进公共 worker：
+
+```bash
+.venv/bin/python -m app.scripts.memoir_audio_maintenance --environment test --dry-run
+.venv/bin/python -m app.scripts.memoir_audio_maintenance --environment production --execute --limit 100
+```
+
+- `--environment`：必选，仅 `test` / `production`；命令内置守卫拒绝连接库名不含 `agent_runtime` 的目标（防误指业务库）。
+- `--dry-run` / `--execute`：互斥，默认 dry-run 只分类计数；execute 才真正调用 OSS 删除。
+- `--limit`：本批候选上限（默认 100），超出部分留给下一批。
+- 保留窗读 `MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS`（默认 24，配置不可用时回退 24 不阻断扫描）。
+- **删除判据（R5：真实 Business 发布探测三态，先命中先保留）**：lease 在途保留；`submission_unknown` 账本未清保留；发布探测确认已发布保留；窗内保留；**探测明确未发布且超窗**是唯一删除路径；探测失败或身份不完整一律按未知保留人工复核。404/NoSuchKey 视为清理成功；其他删除失败计入 `delete_failed` 并继续本批。
+- **发布探测真实装配（R5）**：未显式注入探测口时，CLI 从 `settings.business_connectors` 装配真实 `ToolGateway`（镜像 `app/worker.py` 生产装配，含对端复核 transport）；装配失败整命令拒绝执行（退出码 2），绝不降级为"无探测继续跑"。探测身份只信权威 `AgentRun.input_json`（archive_id/snapshot_id/generation_epoch），logical_key 与发布节点逐字一致——Business 按原发布幂等键精确命中才算"已发布"；Run 缺失、发布引用缺失、epoch 漂移、网关调用失败均归未知，绝不删除。需要 Business connector 配置齐全（enabled + base_url/runtime_id/key_id/secret）。
+- 输出与日志只有计数与安全枚举，不打印对象键、凭据或私有 URL。

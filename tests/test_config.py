@@ -126,3 +126,34 @@ def test_logging_config_group_is_stable() -> None:
     logging_config = config.settings.logging
 
     assert logging_config.logging_level == config.settings.LOGGING_LEVEL
+
+
+def test_memoir_audio_settings_default_off_without_validation() -> None:
+    """M8 音频开关默认关闭：不触发成组校验，存量部署行为零变化。"""
+    assert config.settings.MEMOIR_AUDIO_ENABLED is False
+    # 关闭状态下即使全部音频字段为空也直接放行（validate 短路）。
+    config.validate_memoir_audio_settings(config.settings)
+
+
+def test_memoir_audio_defaults_follow_env_config_frozen_values() -> None:
+    """M8 音频 Settings 默认值与 ENV_CONFIG 冻结表逐项一致。"""
+    settings = config.settings
+    assert settings.MEMOIR_TTS_RESOURCE_ID == "seed-tts-2.0"
+    assert settings.MEMOIR_TTS_SPEAKER == "zh_female_wenroushunv_uranus_bigtts"
+    assert settings.MEMOIR_TTS_SPEECH_RATE == -10
+    assert settings.MEMOIR_TTS_REQUEST_TIMEOUT_SECONDS == 45.0
+    assert settings.MEMOIR_TTS_SCENE_CONCURRENCY == 2
+    assert settings.MEMOIR_MUSIC_DURATION_SECONDS == 60
+    assert settings.MEMOIR_MUSIC_POLL_INTERVAL_SECONDS == 5.0
+    assert settings.MEMOIR_AUDIO_NODE_TIMEOUT_SECONDS == 300.0
+    assert settings.MEMOIR_AUDIO_PUBLISH_RESERVE_SECONDS == 30.0
+    assert settings.MEMOIR_AUDIO_WORKER_CONCURRENCY == 4
+    assert settings.MEMOIR_AUDIO_MAX_FILE_BYTES == 20971520
+    assert settings.MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS == 24
+    assert settings.MEMOIR_AUDIO_FFMPEG_PATH == "/usr/bin/ffmpeg"
+    assert settings.MEMOIR_AUDIO_FFPROBE_PATH == "/usr/bin/ffprobe"
+    # 音频 OSS / 前缀 / scope 密钥默认为空：未启用时不指向任何真实资源。
+    assert settings.MEMORY_AUDIO_OSS_ENDPOINT == ""
+    assert settings.MEMORY_AUDIO_NARRATOR_PREFIX == ""
+    assert settings.MEMORY_AUDIO_BACKGROUND_PREFIX == ""
+    assert settings.MEMORY_AUDIO_SCOPE_HMAC_KEY == ""

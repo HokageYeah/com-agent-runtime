@@ -30,6 +30,10 @@ FROZEN_HISTORICAL_DIGESTS = {
     "1.0.2": "sha256:bd20469b0d205242b2639aaa039858495e42dd704036ec8be8b82bfb8ac2f379",
     "1.0.3": "sha256:c9b3936c9ca11e3e388a8cdba3f10e04a43bdaa998775c47da512c378c379f9c",
     "1.0.4": "sha256:c99d171acf1def1dc1eecbebe62e24643904e849d4d0544248ee3fcea48908bb",
+    # M8 R8 Step 1 冻结证据：1.0.5–1.0.7 在 1.0.8 落地当日复核的不可变 digest。
+    "1.0.5": "sha256:7cb0c8d7457e7ccc643108079a3fcc725ebee5e2557fa2b7f065454dc411dbe2",
+    "1.0.6": "sha256:94456a80237bafd81b802a9eccf981ad9f0a46dd96083b6c916dbbab29c318bf",
+    "1.0.7": "sha256:b5b06cbfae816372efcd567d2fe2182bccb7013cd0fc0d666c75c4b83b9502ba",
 }
 
 
@@ -371,3 +375,49 @@ def test_memoir_agent_1_0_6_orders_media_before_safety_and_publish() -> None:
         node for node in package.workflow_nodes if node.node_id == "enqueue_media_tasks"
     )
     assert media.optional is False
+
+
+def test_loads_memoir_agent_1_0_8_with_audio_node_before_publish() -> None:
+    """1.0.8 是独立不可变包：音频节点插在 safety_review 与 publish 之间。
+
+    M8 语音与配乐：十一节点 DAG（1.0.7 十节点 + enqueue_audio_tasks），
+    音频只读审核后的最终正文；max_run_seconds 300→1200 只对本包生效；
+    Tool/Snapshot 契约不变（contract_version 仍 1.0.0，wire 沿用 1.1.0）。
+    """
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    service = AgentPackageService(package_root)
+
+    package = service.load("memoir_agent", "1.0.8")
+    package_107 = service.load("memoir_agent", "1.0.7")
+
+    # 图结构：1.0.7 前九节点逐序一致，尾部为 safety_review →
+    # enqueue_audio_tasks → publish_document（十一节点）。
+    node_ids = [node.node_id for node in package.workflow_nodes]
+    assert node_ids[:9] == [n.node_id for n in package_107.workflow_nodes][:9]
+    assert node_ids[-3:] == [
+        "safety_review", "enqueue_audio_tasks", "publish_document",
+    ]
+    assert len(node_ids) == 11
+    audio_node = next(
+        node for node in package.workflow_nodes
+        if node.node_id == "enqueue_audio_tasks"
+    )
+    # 音频节点 deterministic + safe_to_rerun=True：崩溃恢复整节点重算，
+    # 资产/费用幂等由音频作业账本按输入 HMAC 对账。
+    assert audio_node.node_type == "deterministic"
+    assert audio_node.safe_to_rerun is True
+    # Run 预算只对本新包扩容（音频 300s + 发布预留 30s 受其约束）。
+    assert package.policy.max_run_seconds == 1200
+    assert package_107.policy.max_run_seconds == 300
+    # 模型侧额度与 1.0.7 一致：音频成本走独立账本，不占模型额度。
+    assert package.policy.max_model_calls == package_107.policy.max_model_calls
+    # digest 与全部历史版本不同；契约版本不随 Agent 版本升级。
+    for version in FROZEN_HISTORICAL_DIGESTS:
+        assert package.package_digest != service.load("memoir_agent", version).package_digest
+    assert package.contract_version == "1.0.0"
+    assert package.version == "1.0.8"
+    # 历史 memory.enqueue_tts 工具保持禁用（音频走 Memoir 专属服务编排）。
+    enqueue_tts = next(
+        tool for tool in package.tools if tool.name == "memory.enqueue_tts"
+    )
+    assert enqueue_tts.enabled is False

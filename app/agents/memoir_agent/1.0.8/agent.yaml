@@ -1,0 +1,43 @@
+agent_id: memoir_agent
+# Agent Package 版本 1.0.8（M8 语音与配乐）：模型循环语义与 1.0.7 完全一致
+# （批次候选游标 / 首末批在场硬校验 / required_scene_type 定向修复全部由
+# runner 按 agent_version >= 1.0.6 门控，1.0.8 天然继承），本版本只新增
+# 音频链路——图结构在 safety_review 与 publish_document 之间插入
+# enqueue_audio_tasks（Memoir 专属音频服务编排，不新增公共节点类型），
+# 发布文档 schema_version 升为 2.0.0（新增 audio.narrations /
+# audio.background_music，图片 media_manifest 六键合同不变）。
+# 音频能力由部署开关 MEMOIR_AUDIO_ENABLED 控制：关闭时该节点按
+# CAPABILITY_DISABLED 跳过，发布 2.0.0 空音频（空数组 + null）文档；
+# 旧包 1.0.0–1.0.7 行为与 digest 零变化。
+# 契约变更仅业务 Playback 文档侧；Tool/Snapshot 契约不变，contract_version
+# 仍为 1.0.0（不随 Agent 版本升级），工具 wire 沿用 1.1.0。
+version: 1.0.8
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - couple_memory
+policy:
+  waiting_human_timeout_action: failed
+  # M7 bounded_loop 预算继承（inherit_run_limits_v1）要求以下额度在 Run 创建时
+  # 全部冻结为有限正值，任一缺失会触发 LOOP_BUDGET_PROFILE_INVALID 并终结 Run
+  # （executor fail closed）。模型侧额度与 1.0.7 保持一致，不再扩容。
+  max_model_calls: 12
+  # 单 Run 模型 token 总量上限（输入按保守预留计量）：与 1.0.7 一致。
+  max_tokens: 150000
+  # 单 Run 模型成本上限（货币单位与网关计量一致）：与 1.0.7 一致；
+  # M8 音频成本走独立 MemoirAudioRunBudget 封顶，不占本额度、不混 token。
+  max_model_cost: 3.0
+  # 单 Run 执行时长上限（秒）：M8 从 300 扩到 1200——图文链路（循环 + 配图）
+  # 之外新增音频节点（旁白 TTS 分段合成 + BGM 提交/轮询/下载/转码），
+  # 音频节点自身受 min(MEMOIR_AUDIO_NODE_TIMEOUT_SECONDS=300,
+  # Run 剩余 - MEMOIR_AUDIO_PUBLISH_RESERVE_SECONDS=30) 约束，只对本新包
+  # 生效，不提高其他 Agent 或旧包的任何全局超时。
+  max_run_seconds: 1200
+  # 单 Run 最大步数（bounded_loop 迭代不占步数、由模型额度单独封顶）；
+  # 1.0.8 图比 1.0.7 多一个 enqueue_audio_tasks 节点，32 仍有充足余量。
+  max_steps: 32
+prompts:
+  - scene-batch-generate.v1.md
+  - coverage-repair.v1.md
+  - safety-review.v1.md
+  - structured-output-repair.v1.md

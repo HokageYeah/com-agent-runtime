@@ -105,6 +105,11 @@ _TOOL_WIRE_VERSION_BY_AGENT_VERSION = {
     # 1.0.7（预算扩容）只调 agent.yaml 额度，循环语义与 1.0.6 一致，
     # Tool 合同零变更，沿用 v1.1.0；同样必须登记，否则 load_snapshot 瞬时失败。
     "1.0.7": "1.1.0",
+    # 1.0.8（M8 语音与配乐）只新增 Memoir 专属音频服务编排与 2.0.0 业务
+    # 发布文档（audio 键为 publish_playback_document 负载演进，非 Tool wire
+    # 变更），Tool/Snapshot 合同零变更，沿用 v1.1.0；未登记同样会导致
+    # load_snapshot 无日志瞬时失败（历史事故口径，B18 已冻结该版本号）。
+    "1.0.8": "1.1.0",
 }
 _DEFAULT_TOOL_WIRE_VERSION = "1.1.0"
 

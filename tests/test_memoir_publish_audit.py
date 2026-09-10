@@ -50,6 +50,16 @@ def _publish_tool_context() -> dict[str, str]:
     }
 
 
+def _assert_publish_result_arity(scope_and_key: tuple[object, ...]) -> None:
+    """镜像真实 ToolGateway.get_publish_result 的 keyword-only 签名约束。
+
+    网关把 tool_context 定义为 keyword-only，位置传入会计入 *scope_and_key
+    触发参数数量 ValueError；假件用同款签名 + arity 断言，防止再用 *args
+    假件掩盖调用形状回归。
+    """
+    assert len(scope_and_key) in (2, 4), scope_and_key
+
+
 def test_publish_persists_running_audit_before_http_call(tmp_path: Path) -> None:
     """写请求开始时，独立事务已经能够查询到 running 审计。"""
     engine = create_engine(f"sqlite:///{tmp_path / 'publish-audit.db'}")
@@ -140,7 +150,10 @@ def test_publish_idempotency_conflict_reconciles_matching_digest_without_replay(
                 "conflict", request=request, response=httpx.Response(409, request=request)
             )
 
-        def get_publish_result(self, *args: object) -> dict[str, object]:
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> dict[str, object]:
+            _assert_publish_result_arity(scope_and_key)
             return {"revision": 7, "content_digest": digest}
 
     engine = create_engine("sqlite://")
@@ -169,7 +182,10 @@ def test_publish_idempotency_conflict_rejects_different_digest_without_body_leak
                 sensitive, request=request, response=httpx.Response(409, request=request)
             )
 
-        def get_publish_result(self, *args: object) -> dict[str, object]:
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> dict[str, object]:
+            _assert_publish_result_arity(scope_and_key)
             return {"revision": 7, "content_digest": "different-digest"}
 
     engine = create_engine("sqlite://")
@@ -253,7 +269,10 @@ def test_publish_failure_log_does_not_include_exception_body(
 
 def test_publish_retry_reconciles_unknown_result_before_replaying() -> None:
     class Gateway:
-        def get_publish_result(self, *args: object) -> dict[str, object]:
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> dict[str, object]:
+            _assert_publish_result_arity(scope_and_key)
             return {"revision": 2, "content_digest": "digest"}
 
         def publish_playback_document(self, *args: object) -> dict[str, object]:
@@ -299,8 +318,11 @@ def test_publish_takeover_only_reconciles_unknown_and_never_replays_write() -> N
     publish_calls: list[tuple[object, ...]] = []
 
     class Gateway:
-        def get_publish_result(self, *args: object) -> None:
-            reconciliation_calls.append(args)
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> None:
+            _assert_publish_result_arity(scope_and_key)
+            reconciliation_calls.append(((connector_id, archive_id, *scope_and_key), tool_context))
             return None
 
         def publish_playback_document(self, *args: object) -> dict[str, object]:
@@ -334,7 +356,7 @@ def test_publish_takeover_only_reconciles_unknown_and_never_replays_write() -> N
     assert all(record.logical_operation_key == key and record.idempotency_key == key for record in records)
     assert records[0].request_digest == digest
     assert reconciliation_calls == [
-            ("connector", "archive", "snapshot", "run-1", 0, key, _publish_tool_context())
+            (("connector", "archive", "snapshot", "run-1", 0, key), _publish_tool_context())
     ]
     assert publish_calls == []
 
@@ -344,8 +366,11 @@ def test_publish_takeover_reconciles_committed_success_without_replaying_write()
     publish_calls: list[tuple[object, ...]] = []
 
     class Gateway:
-        def get_publish_result(self, *args: object) -> None:
-            reconciliation_calls.append(args)
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> None:
+            _assert_publish_result_arity(scope_and_key)
+            reconciliation_calls.append(((connector_id, archive_id, *scope_and_key), tool_context))
             return None
 
         def publish_playback_document(self, *args: object) -> dict[str, object]:
@@ -387,7 +412,7 @@ def test_publish_takeover_reconciles_committed_success_without_replaying_write()
     assert len(records) == 1
     assert records[0].status == "succeeded"
     assert reconciliation_calls == [
-            ("connector", "archive", "snapshot", "run-1", 0, key, _publish_tool_context())
+            (("connector", "archive", "snapshot", "run-1", 0, key), _publish_tool_context())
     ]
     assert publish_calls == []
 
@@ -438,8 +463,11 @@ def test_publish_resume_reconciles_first_commit_when_recomputed_digest_drifts(
         def publish_playback_document(self, *args: object) -> dict[str, object]:
             raise AssertionError("首轮已提交，digest 漂移后不得第二次物理写入")
 
-        def get_publish_result(self, *args: object) -> dict[str, object]:
-            self.reconcile_calls.append(args)
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> dict[str, object]:
+            _assert_publish_result_arity(scope_and_key)
+            self.reconcile_calls.append(((connector_id, archive_id, *scope_and_key), tool_context))
             return {"revision": 5, "content_digest": "business-published-digest"}
 
     gateway = Gateway()
@@ -450,7 +478,7 @@ def test_publish_resume_reconciles_first_commit_when_recomputed_digest_drifts(
         ) == {"node_id": "publish_document", "published": True}
 
     assert gateway.reconcile_calls == [
-            ("connector", "archive", "snapshot", "run-1", 0, key, _publish_tool_context())
+            (("connector", "archive", "snapshot", "run-1", 0, key), _publish_tool_context())
     ]
     assert state.publish_result == {"revision": 5, "content_digest": "business-published-digest"}
     records = session.scalars(select(AgentToolCall)).all()
@@ -524,8 +552,11 @@ def test_publish_resume_after_model_recompute_reuses_first_commit_without_double
             self.publish_calls.append(args[6])  # idempotency_key=logical_key
             return {"revision": 1, "content_digest": "business-published-digest"}
 
-        def get_publish_result(self, *args: object) -> dict[str, object]:
-            self.reconcile_calls.append(args[5])  # idempotency_key
+        def get_publish_result(
+            self, connector_id: str, archive_id: str, *scope_and_key: object, tool_context: object = None
+        ) -> dict[str, object]:
+            _assert_publish_result_arity(scope_and_key)
+            self.reconcile_calls.append(scope_and_key[3])  # 4 字段 wire 的末位 = logical_key
             return {"revision": 1, "content_digest": "business-published-digest"}
 
     gateway = Gateway()

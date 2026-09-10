@@ -28,6 +28,19 @@ _MEMOIR_1_0_0_DIGEST = (
 _MEMOIR_1_0_1_DIGEST = (
     "sha256:e92ae977220e02f3956d821b0c5ff6adc2320359970d9989863324ab11349c06"
 )
+# M8 R8 Step 1 冻结基线：1.0.8 发包当日复核的 1.0.0–1.0.7 全量不可变 digest。
+# 任何同 version 文件改写（含 loader 规则变化）都会让该断言失败；旧包仍
+# 图片媒体 / memory.enqueue_tts 禁用，公共 wire 合同不变。
+_MEMOIR_FROZEN_DIGESTS = {
+    "1.0.0": _MEMOIR_1_0_0_DIGEST,
+    "1.0.1": _MEMOIR_1_0_1_DIGEST,
+    "1.0.2": "sha256:bd20469b0d205242b2639aaa039858495e42dd704036ec8be8b82bfb8ac2f379",
+    "1.0.3": "sha256:c9b3936c9ca11e3e388a8cdba3f10e04a43bdaa998775c47da512c378c379f9c",
+    "1.0.4": "sha256:c99d171acf1def1dc1eecbebe62e24643904e849d4d0544248ee3fcea48908bb",
+    "1.0.5": "sha256:7cb0c8d7457e7ccc643108079a3fcc725ebee5e2557fa2b7f065454dc411dbe2",
+    "1.0.6": "sha256:94456a80237bafd81b802a9eccf981ad9f0a46dd96083b6c916dbbab29c318bf",
+    "1.0.7": "sha256:b5b06cbfae816372efcd567d2fe2182bccb7013cd0fc0d666c75c4b83b9502ba",
+}
 
 
 class _RecordingPackageRunner:
@@ -313,3 +326,25 @@ def test_historical_1_0_0_run_resumes_real_checkpoint_with_configured_executor(
     assert (result.status, result.error_code) == ("succeeded", None)
     assert runner.node_ids == [node.node_id for node in package_100.workflow_nodes]
     assert package_100.package_digest != package_101.package_digest
+
+
+def test_all_historical_package_digests_stay_frozen_before_1_0_8() -> None:
+    """M8 R8 Step 1 冻结回归：1.0.0–1.0.7 digest 逐版本不变、图形互相独立。"""
+    package_root = Path(__file__).parents[1] / "app" / "agents"
+    loader = AgentPackageService(package_root)
+    seen: set[str] = set()
+    for version, digest in _MEMOIR_FROZEN_DIGESTS.items():
+        package = loader.load("memoir_agent", version)
+        assert package.package_digest == digest
+        # 两两不同：任何版本都不是另一版本的副本（不可变包独立性证据）。
+        assert package.package_digest not in seen
+        seen.add(package.package_digest)
+        # 公共契约不随 Agent 版本升级；旧包 memory.enqueue_tts 保持禁用。
+        assert package.contract_version == "1.0.0"
+        enqueue_tts = next(
+            tool for tool in package.tools if tool.name == "memory.enqueue_tts"
+        )
+        assert enqueue_tts.enabled is False
+    # 1.0.8 是新增独立包，不属于冻结集（其 digest 由 loader 测试单独覆盖）。
+    package_108 = loader.load("memoir_agent", "1.0.8")
+    assert package_108.package_digest not in seen

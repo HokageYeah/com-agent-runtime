@@ -11,6 +11,14 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir "poetry==${POETRY_VERSION}"
 
+# M8 音频转码依赖：ffmpeg（含 ffprobe）必须在切换非 root 前以系统包管理器
+# 安装并清理 apt 索引；不通过 ARG/ENV 传 Key，运行时不联网安装。
+# Debian 的 ffmpeg 包同时提供 /usr/bin/ffmpeg 与 /usr/bin/ffprobe，
+# 与 MEMOIR_AUDIO_FFMPEG_PATH / MEMOIR_AUDIO_FFPROBE_PATH 默认值一致。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root --no-ansi
 

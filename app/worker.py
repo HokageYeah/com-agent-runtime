@@ -358,6 +358,32 @@ def configured_media_service(
         return None
 
 
+def configured_audio_service(
+    runtime_settings: object, session: Session,
+) -> object | None:
+    """按部署配置装配 M8 音频服务；总开关关闭或依赖缺失时返回 None。
+
+    返回 None 等价于音频能力关闭：1.0.8 图的 enqueue_audio_tasks 节点按
+    CAPABILITY_DISABLED 跳过（发布 2.0.0 空音频文档），旧版本图不含该
+    节点，存量行为零变化。公共 Worker 消息/调度语义不变。
+    """
+    if not bool(getattr(runtime_settings, "MEMOIR_AUDIO_ENABLED", False)):
+        return None
+    try:
+        from app.services.memoir.memoir_audio_service import (
+            build_memoir_audio_service,
+        )
+
+        return build_memoir_audio_service(runtime_settings, session)
+    except Exception as exc:
+        # 装配失败按能力关闭处理；只记异常类名，不记可能含配置值的正文。
+        logging.warning(
+            "MemoirAgent 音频服务装配失败按能力关闭 code=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
 def configured_executor(
     session: Session,
     *,
@@ -475,6 +501,9 @@ def configured_executor(
                     # M6 媒体服务：总开关关闭/装配失败时为 None，媒体节点按
                     # 能力关闭跳过，与 1.0.3 之前的行为完全一致。
                     configured_media_service(runtime_settings, session),
+                    # M8 音频服务：总开关关闭/装配失败时为 None，1.0.8 图的
+                    # 音频节点按能力关闭跳过（发布 2.0.0 空音频文档）。
+                    configured_audio_service(runtime_settings, session),
                 ),
                 CheckpointStore(
                     session,

@@ -24,6 +24,12 @@ from app.models.memoir.memory_snapshot import MemorySnapshot as MemorySnapshot
 from app.models.memoir.memory_source_reference import (
     MemorySourceReference as MemorySourceReference,
 )
+from app.models.memoir_audio_job import (
+    MemoirAudioJob as MemoirAudioJob,
+)
+from app.models.memoir_audio_job import (
+    MemoirAudioRunBudget as MemoirAudioRunBudget,
+)
 from app.models.runtime import (
     AdmissionBucket as AdmissionBucket,
 )

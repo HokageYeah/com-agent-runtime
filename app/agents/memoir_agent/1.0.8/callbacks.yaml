@@ -1,0 +1,7 @@
+enabled_events:
+  - run_started
+  - step_changed
+  - run_succeeded
+  - run_failed
+  - partial_succeeded
+  - run_cancelled

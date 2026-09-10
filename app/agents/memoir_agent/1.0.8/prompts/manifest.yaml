@@ -1,0 +1,41 @@
+# Prompt 元数据是部署信任边界；正文不写入 usage、日志、Artifact 或 checkpoint。
+# guardrail_policy 沿用 1.0.2 的 redacted_only：模型请求只携带 prompt 模板与素材
+# 引用 ID 占位符（text_digest 正文与摘要不出业务边界），允许公有 Provider；
+# private_first 与公有 route 互斥会导致 capability_disabled 全量模板兜底。
+prompts:
+  - prompt_id: scene-batch-generate
+    version: v1
+    file: scene-batch-generate.v1.md
+    owner_agent: memoir_agent
+    input_schema: scene_batch_generate_input
+    output_schema: scene_batch_generate_output
+    model_policy: emotional_writing
+    guardrail_policy: redacted_only
+    status: active
+  - prompt_id: coverage-repair
+    version: v1
+    file: coverage-repair.v1.md
+    owner_agent: memoir_agent
+    input_schema: coverage_repair_input
+    output_schema: coverage_repair_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active
+  - prompt_id: safety-review
+    version: v1
+    file: safety-review.v1.md
+    owner_agent: memoir_agent
+    input_schema: safety_review_input
+    output_schema: safety_review_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active
+  - prompt_id: structured-output-repair
+    version: v1
+    file: structured-output-repair.v1.md
+    owner_agent: memoir_agent
+    input_schema: structured_output_repair_input
+    output_schema: structured_output_repair_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active

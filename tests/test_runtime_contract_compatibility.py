@@ -204,3 +204,70 @@ def test_memoir_package_input_schema_only_accepts_archive_snapshot_epoch_and_opt
             schema,
             {"archive_id": "a1", "snapshot_id": "s1", "generation_epoch": True},
         )
+
+
+def test_tool_wire_map_registers_every_memoir_package_version() -> None:
+    """Tool wire 登记表必须覆盖全部已发布 memoir 包版本。
+
+    历史事故口径：新版本包漏登记 _TOOL_WIRE_VERSION_BY_AGENT_VERSION 会导致
+    load_snapshot 发送前以 TOOL_WIRE_VERSION_INVALID 瞬时失败（无日志、无
+    HTTP）。1.0.8（M8 语音与配乐）只演进业务发布文档（2.0.0 audio 键），
+    Tool/Snapshot 合同零变更，沿用 1.1.0。
+    """
+    from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
+
+    expected = {
+        "1.0.0": "1.0.0",
+        **{version: "1.1.0" for version in (
+            "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.0.8",
+        )},
+    }
+    assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION == expected
+
+
+def test_wire_v1_1_matrix_accepts_business_m8_audio_error_codes() -> None:
+    """agent tools v1.1.0 错误矩阵同步 B17 发布的两条音频拒绝码。
+
+    四字段（http_status/error_type/retryable/safe_message）与业务端
+    memory_agent_tools_api 逐字一致；缺登记会让 _parse_tool_error 按
+    TOOL_ERROR_CODE_UNKNOWN 拒收真实业务响应，发布节点无法消费降级。
+    """
+    from app.contracts.tools import TOOL_ERROR_SPECS_BY_WIRE_VERSION
+
+    specs = TOOL_ERROR_SPECS_BY_WIRE_VERSION["1.1.0"]
+    assert specs["MEMORY_AUDIO_DOCUMENT_INVALID"] == {
+        "http_status": 422,
+        "error_type": "audio_document_invalid",
+        "retryable": False,
+        "safe_message": "播放文档音频内容不满足发布要求",
+    }
+    assert specs["MEMORY_AUDIO_PRODUCER_FORBIDDEN"] == {
+        "http_status": 403,
+        "error_type": "audio_producer_forbidden",
+        "retryable": False,
+        "safe_message": "当前生产者无权发布有声播放文档",
+    }
+    # v1.0.0 历史 wire 不接收新码（旧客户端安全降级，不破坏 userspace）。
+    assert "MEMORY_AUDIO_DOCUMENT_INVALID" not in TOOL_ERROR_SPECS_BY_WIRE_VERSION["1.0.0"]
+
+
+def test_wire_v1_1_matrix_accepts_business_m6_media_error_code() -> None:
+    """agent tools v1.1.0 错误矩阵补登记 M6 媒体拒绝码（跨仓 bridge 回归）。
+
+    业务端 v1.1.0 生产矩阵自 M6 起即可发出 MEMORY_DOCUMENT_MEDIA_INVALID
+    （media_manifest 条目 / image payload / URL 白名单违规），Runtime 消费端
+    漏登记导致 _parse_tool_error 按 TOOL_ERROR_CODE_UNKNOWN 拒收真实业务
+    响应（2026-09-09 跨仓 bridge 失败根因）。四字段与业务端
+    memory_agent_tools_api 逐字一致；v1.0.0 旧 wire 保持不注册（安全降级
+    在业务端生产者侧完成，消费端严格六码 fail-closed）。
+    """
+    from app.contracts.tools import TOOL_ERROR_SPECS_BY_WIRE_VERSION
+
+    specs = TOOL_ERROR_SPECS_BY_WIRE_VERSION["1.1.0"]
+    assert specs["MEMORY_DOCUMENT_MEDIA_INVALID"] == {
+        "http_status": 422,
+        "error_type": "document_media_invalid",
+        "retryable": False,
+        "safe_message": "播放文档媒体内容不满足发布要求",
+    }
+    assert "MEMORY_DOCUMENT_MEDIA_INVALID" not in TOOL_ERROR_SPECS_BY_WIRE_VERSION["1.0.0"]

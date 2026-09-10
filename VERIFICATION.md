@@ -653,3 +653,91 @@ npm run type-check
 ```
 
 预期：两条命令均以退出码 0 结束，且不输出 TypeScript 错误。上述定向测试与类型检查共同构成 Task 11 当前可重复的自动门禁；真实小程序交互仍按本节的手动步骤验收。
+
+## M8 R7 音频作业账本验证（2026-09-08）
+
+范围：`memoir_audio_jobs` / `memoir_audio_run_budgets` 模型与迁移、作业服务（唯一槽/原子预算/lease fencing/恢复对账）、维护 CLI。全部 SQLite 内存库隔离运行，PostgreSQL 行为用例按 harness 规范显式提供 `AGENT_RUNTIME_TEST_POSTGRES_DSN` 才运行（本次未提供，按设计跳过）。运行：
+
+```bash
+.venv/bin/pytest tests/test_memoir_audio_jobs.py tests/test_memoir_audio_migration.py -q
+# 33 passed, 1 skipped
+
+.venv/bin/pytest tests/test_memoir_audio_provider.py tests/test_memoir_audio_storage.py -q
+# 48 passed（R6 回归，未改动）
+
+.venv/bin/python -m app.scripts.memoir_audio_maintenance --help
+# 正常输出参数面：--environment {test,production} [--dry-run | --execute] [--limit LIMIT]
+
+.venv/bin/ruff check app tests
+# All checks passed
+
+.venv/bin/alembic heads
+# 20260907_1000 (head) —— 单 head，无分叉
+```
+
+覆盖要点：同槽并发只留一行账且失败方不占预算；预算条件 UPDATE 原子封顶、跨 Session 不透支；BGM/TTS 全状态机与结算（音乐 60s×0.05=3.0、TTS 10 字=0.015）；对象键上传前固定、同键幂等异键拒绝；Run 取消/隐私门禁拒绝写入；失败重试 attempt/lease_token 递增且旧 token 被 fencing 拒绝；`submission_unknown` 终态不重提不释放预算；维护 dry-run 分类计数、execute 只删明确未发布且超窗对象、404 计入成功、--limit 限批（**2026-09-10 R5 修订**：此处"明确未发布"判定已由自造幂等键改为真实 Business 发布探测三态，见下方"M8 第二轮必要修复验证"节，口径以该节为准）；迁移唯一槽/check 约束/upgrade→downgrade/重复 upgrade 幂等、ScriptDirectory 单 head。未验证项：真实 OSS 删除（CLI 以可注入 OssDeleter 口测试，真实路径由部署演练验收）；真实 PostgreSQL 并发（需显式 DSN）；Alembic upgrade 在真实 MySQL agent_runtime 库的执行（由部署流程验收）。
+
+## M8 R8 新包集成与全链路回归验证（2026-09-08）
+
+范围：`memoir_agent@1.0.8` 新包（十一节点 DAG，`enqueue_audio_tasks` 插入 safety_review 与 publish_document 之间）、Runner 音频节点与 2.0.0 文档分流、Worker 音频服务装配（`configured_audio_service`）、音频协调服务（`memoir_audio_service.py`：旁白分段合成/拼接/私有上传 + BGM 提交轮询下载转码 + 账本幂等/预算/门禁）、Tool wire 1.0.8 登记、v1.1.0 错误矩阵音频两码同步、Dockerfile ffmpeg 与三个 env 模板。全部 SQLite 内存库隔离运行。运行：
+
+```bash
+.venv/bin/pytest tests/test_memoir_audio_provider.py tests/test_memoir_audio_storage.py \
+  tests/test_memoir_audio_jobs.py tests/test_memoir_audio_migration.py \
+  tests/runtime_test_memoir_108_full_graph.py -q
+# 90 passed, 1 skipped（skip=PostgreSQL harness 未显式提供 DSN，红线豁免项）
+
+.venv/bin/pytest tests/test_memoir_media_channel.py tests/test_memoir_snapshot_runner.py \
+  tests/test_memoir_publish_audit.py tests/runtime_test_memoir_package_versions.py \
+  tests/runtime_test_memoir_106_full_graph.py tests/test_runtime_contract_compatibility.py \
+  tests/test_runtime_agent_package_loader.py tests/test_config.py \
+  tests/test_docker_deployment_contract.py -q
+# 183 passed
+
+.venv/bin/ruff check app tests
+# All checks passed
+
+.venv/bin/mypy app
+# Found 17 errors in 5 files —— 全部为 M5–M7 存量债（agent_runtime_cli×2/
+# bounded_loop×2/register_agent_package×5/executor×1/memoir_media_service×7），
+# M8 工作区文件（含 1.0.8 包、audio_service、runner/worker/gateway/contracts
+# 改动）零错误，与 R7 门禁基线一致，未新增未修复。
+
+.venv/bin/alembic heads
+# 20260907_1000 (head) —— 单 head，无分叉
+
+git diff --check
+# 无空白错误
+```
+
+覆盖要点（108 全图 = 真实 1.0.8 graph + 真实 Runner/Executor + 真实音频账本，仅供应商/上传边界打桩）：全量成功发布 2.0.0 有声文档（旁白五键/配乐四键、scope/前缀经 R6 唯一口径、media_id 跨图音唯一、预算预留=分段保守上界+音乐 60s）；能力关闭发布空音频 2.0.0；单场景 TTS 失败仅该场景降级且分段入 submission_unknown；全音频失败仍单次发布完整图文（无补音 revision）；图文耗尽 Run 剩余预算（active_elapsed_ms=1195s/1200s）音频整体跳过零账本行；音频执行中取消后在途槽停格、结算/上传/发布零新写入；崩溃恢复重算资产全复用（零供应商调用、预算不增长、发布经 query-after-commit 对账不重发）；Worker 装配门禁（默认/缺配置→None、配置齐全→真实服务栈）。旧包回归：1.0.0–1.0.7 digest 冻结断言（R8 Step 1 第一动作）+ 1.0.6 全图回归 + 媒体/快照/发布审计既有套件全绿；wire 登记表 8 版本全覆盖断言 + v1.1.0 音频两码四字段与业务端逐字一致断言。
+
+全量套件：`.venv/bin/pytest -q` = 1 failed, 1108 passed, 17 skipped。唯一失败 `tests/runtime_test_cross_project_testclient_bridge.py::test_1_0_3_cross_repo_publish_media_document` 为**预存量跨仓环境漂移**，与 R8 改动无关（已用干净 HEAD worktree 复跑复现同一失败）：业务仓 2026-09-02 提交 d47ed9c 将 `.env.test` 的 `MEMORY_MEDIA_OBJECT_KEY_PREFIX` 改为 `memoir-test/images/`，而桥接 fixture 仍发布 `memoir/images/...` object_key，业务端按 entry_field 422 拒绝（`MEMORY_DOCUMENT_MEDIA_INVALID`）；且该 M6 媒体码从未登记进 Runtime v1.1.0 wire 矩阵，Runtime 侧表现为 TOOL_ERROR_CODE_UNKNOWN。修复归属主 Agent（桥接 fixture 前缀或矩阵补登记二选一，本任务白名单不含该测试文件）。
+
+未验证项（如实登记，不用 mock 宣称通过）：Docker 镜像构建与非 root ffmpeg/ffprobe 实机验证（本机 Docker daemon 未运行；静态合同由 `test_dockerfile_installs_ffmpeg_before_non_root_user` 覆盖 apt 安装顺序与无密钥断言，真实构建留运维部署演练）；纯占位 `docker compose config` 渲染（同因 daemon 不可用；env_file 链与无密钥断言由 `test_runtime_compose_keeps_env_file_chain_without_audio_secrets` 静态覆盖）；Step 5 真实服务项（测试环境开通与单价/额度证据、官方音乐下载 host 核验、真实短样本语音/配乐、四前缀真实上传、匿名拒绝/签名成功）；Step 6 跨仓联调与 F16 微信真机（依赖 Business/前端就绪与真机）。共享 fixture `tests/fixtures/memory_playback_shared_v2.json` 本仓侧 SHA-256 复核为 `bfd85d9d78b4cb39ca229d4415a9b0b58a5335e951f14be0d94d939b6f79412b`，与主 Agent 冻结值一致，本任务未改动该文件。
+
+## M8 第二轮必要修复验证（2026-09-10）
+
+范围：Runtime 三项——R3 音频时限真实约束（`memoir_audio_service.py` 全部时限点改 `ctx.remaining()` 裁剪、专用 executor + `shutdown(wait=False, cancel_futures=True)`、迟到上传经 R2 持久 object_key + R4 token 栅栏拒绝）、R4 lease/attempt 接管栅栏（`memoir_audio_jobs.py` CAS 条件 UPDATE + `execution_attempt` fence，`audio:{run_id}:attempt-{N}` 旧 token 拒绝）、R5 维护 CLI 真实 Business 发布探测（`app/scripts/memoir_audio_maintenance.py` 重写：`build_publish_probe` 逐字镜像发布节点查询形状、`build_production_publish_probe` 镜像 `app/worker.py` 生产装配、`PublishStateUnknownError` 身份不完整归未知）；另修复发布对账存量缺陷（`app/agents/memoir_agent/runner.py` 三处 `get_publish_result` 的 `tool_context` 改 keyword 传参——网关签名 `*scope_and_key` 之后为 keyword-only，HEAD 存量位置传参在真实网关会 `ValueError`，此前被 `*args` 假件掩盖；`tests/test_memoir_publish_audit.py` 假件镜像真实签名 + arity 断言锁调用形状）。全部 SQLite 内存库隔离运行。运行：
+
+```bash
+.venv/bin/pytest tests/test_memoir_audio_provider.py tests/test_memoir_audio_storage.py \
+  tests/test_memoir_audio_jobs.py tests/test_memoir_audio_migration.py \
+  tests/test_memoir_audio_ledger_recovery.py -q
+# 101 passed, 1 skipped（skip=PostgreSQL harness 未显式提供 DSN，
+# R3/R4 改动经这五件套回归；memoir_audio_service.py 无独立测试文件）
+
+.venv/bin/pytest tests/test_memoir_audio_maintenance.py -q
+# 16 passed（R5：真实网关路径经 httpx.MockTransport 仅替换传输层，
+# 签名/网关/分类全真实；已发布零删除、未知零删除、明确未发布超窗才删、
+# CLI 生产装配拒绝降级、身份三守卫 Run 缺失/引用缺失/epoch 漂移归未知）
+
+.venv/bin/pytest tests/test_memoir_publish_audit.py -q
+# 11 passed（keyword-only 存量修复回归；假件镜像网关签名，
+# 位置误用触发 arity 断言失败）
+
+.venv/bin/ruff check app tests
+# All checks passed
+```
+
+覆盖要点（详见[第二轮必要修复完成记录](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/verification/2026-09-10-M8第二轮必要修复完成记录.md)，含 S1/F1/F4/F5 两外仓项）：R3 外层 `generate()` 墙钟断言（elapsed<0.7s vs 上传 1.2s）证明 executor 退出与迟到副作用被拒；R4 第三独立 Session 验权威态用例 + 并发 rotate 仅一 owner 成功（真线程并发仅 Postgres 门禁）；R5 隔离跨仓测试走真实网关消费者路径。未验证项：真实 MySQL RR 快照语义复现用例（本地 skipif 跳过，SQLite 逻辑等价证据）、真实 PostgreSQL 并发（需显式 DSN）、真实 OSS 删除与真实 Business 联调（由部署演练验收）。

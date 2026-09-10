@@ -143,3 +143,69 @@ def test_runtime_host_ports_do_not_change_private_container_contract() -> None:
 
     assert '127.0.0.1:${RUNTIME_API_HOST_PORT:-18002}:8002' in compose
     assert "MEMORY_RUNTIME_BASE_URL=http://runtime-api:8002" in test_template
+
+
+def test_dockerfile_installs_ffmpeg_before_non_root_user() -> None:
+    """M8 转码依赖合同：ffmpeg/ffprobe 在切换非 root 前以 apt 安装并清索引。
+
+    依赖必须在镜像构建期安装（Debian ffmpeg 包同时提供 ffmpeg 与 ffprobe，
+    与 MEMOIR_AUDIO_FFMPEG_PATH/FFPROBE_PATH 默认值一致），不得运行时联网
+    安装，也不得经 ARG/ENV 传入任何密钥。
+    """
+    dockerfile = (ROOT / "docker/backend/Dockerfile").read_text(encoding="utf-8")
+
+    apt_install = dockerfile.index("apt-get install -y --no-install-recommends ffmpeg")
+    apt_cleanup = dockerfile.index("rm -rf /var/lib/apt/lists/*")
+    user_runtime = dockerfile.index("USER runtime")
+    assert apt_install < apt_cleanup < user_runtime
+    # 密钥不进镜像层：构建指令中不出现音频 Key 变量。
+    for secret_name in ("MEMOIR_TTS_API_KEY", "MEMORY_AUDIO_SCOPE_HMAC_KEY",
+                        "MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET"):
+        assert secret_name not in dockerfile
+
+
+def test_env_templates_carry_m8_audio_placeholders_per_environment() -> None:
+    """M8 音频配置落点：两环境模板列全部音频占位，前缀按环境固定且默认关闭。"""
+    test_template = (
+        ROOT / "docker/backend/test.env.example"
+    ).read_text(encoding="utf-8")
+    production_template = (
+        ROOT / "docker/backend/production.env.example"
+    ).read_text(encoding="utf-8")
+
+    for template in (test_template, production_template):
+        assert "MEMOIR_AUDIO_ENABLED=false" in template
+        for key in (
+            "MEMOIR_TTS_API_KEY=",
+            "MEMOIR_MUSIC_ACTION=",
+            "MEMOIR_AUDIO_COST_CURRENCY=",
+            "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS=",
+            "MEMOIR_MUSIC_PRICE_PER_SECOND=",
+            "MEMOIR_AUDIO_MAX_COST_PER_RUN=",
+            "MEMORY_AUDIO_OSS_ENDPOINT=",
+            "MEMORY_AUDIO_OSS_BUCKET=",
+            "MEMORY_AUDIO_OSS_ACCESS_KEY_ID=",
+            "MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET=",
+            "MEMORY_AUDIO_SCOPE_HMAC_KEY=",
+            "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON=",
+        ):
+            assert key in template, key
+    # 两环境四前缀与 ENV_CONFIG 冻结表一致（末尾保留 /）。
+    assert "MEMORY_AUDIO_NARRATOR_PREFIX=memoir-test/audios/narrator/" in test_template
+    assert "MEMORY_AUDIO_BACKGROUND_PREFIX=memoir-test/audios/background/" in test_template
+    assert "MEMORY_AUDIO_NARRATOR_PREFIX=memoir/audios/narrator/" in production_template
+    assert "MEMORY_AUDIO_BACKGROUND_PREFIX=memoir/audios/background/" in production_template
+    # 生产模板不得使用测试前缀。
+    assert "memoir-test/" not in production_template
+
+
+def test_runtime_compose_keeps_env_file_chain_without_audio_secrets() -> None:
+    """音频 Key 只经既有 x-runtime-env-file 注入，不进 Compose build args。"""
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "x-runtime-env-file:" in compose
+    assert "env_file: *runtime-env-file" in compose
+    for secret_name in ("MEMOIR_TTS_API_KEY", "MEMORY_AUDIO_SCOPE_HMAC_KEY",
+                        "MEMORY_AUDIO_OSS_ACCESS_KEY_ID",
+                        "MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET"):
+        assert secret_name not in compose

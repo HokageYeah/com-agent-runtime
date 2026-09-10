@@ -1,0 +1,555 @@
+{
+  "fixtureMeta": {
+    "version": "m8-contract-20260908",
+    "description": "M8 Playback 2.0.0 双仓共享契约 fixture；Business 与 Runtime 逐字一致，由主 Agent 独占维护，执行 Agent 只提修改建议。",
+    "notes": [
+      "publishInput.document 为 2.0.0 内部持久形状：图片 media_manifest 保持六键合同不变，新增必填 audio 对象；音频不塞入图片 manifest。",
+      "object_key 中的 scope 目录为 scopeHmac 向量（本 fixture publishInput 四元组 → scopeHmac.main.digestHex）。",
+      "expectedPublicPlaybackV2.audio 只含 sceneId/mediaId/mime/durationMs（旁白）与 mediaId/mime/durationMs（配乐），不含 object_key/URL/TaskID。",
+      "expectedPublicPlaybackV1Projection 演示持久 2 投影回 1：内存移除 audio，schemaVersion=1.0.0，不改 DB/digest。",
+      "本 fixture 使用测试环境角色前缀 memoir-test/audios/*；正式前缀由部署配置决定，不在契约内。",
+      "scopeHmac.keyUtf8 是契约测试向量密钥，不是真实密钥；真实 MEMORY_AUDIO_SCOPE_HMAC_KEY 由运维注入。"
+    ]
+  },
+  "scopeHmac": {
+    "algorithm": "HMAC-SHA256",
+    "keyUtf8": "m8-fixture-scope-hmac-key",
+    "canonicalRule": "JSON 数组 [business_id, archive_id, run_id, generation_epoch]；前三项字符串、末项整数；compact 分隔符无空白；ensure_ascii=False（非 ASCII 不转义，JSON 字符串转义仅限 \\ 与 \"）；UTF-8 编码后取 HMAC-SHA256 hex 摘要。",
+    "main": {
+      "businessId": "space_fixture_m8_001",
+      "archiveId": "01J0000000000000000000000A",
+      "runId": "run_test_0008",
+      "generationEpoch": 3,
+      "canonicalInput": "[\"space_fixture_m8_001\",\"01J0000000000000000000000A\",\"run_test_0008\",3]",
+      "digestHex": "4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2"
+    },
+    "vectors": [
+      {
+        "businessId": "业务甲乙",
+        "archiveId": "01J0000000000000000000000A",
+        "runId": "run_test_0008",
+        "generationEpoch": 3,
+        "canonicalInput": "[\"业务甲乙\",\"01J0000000000000000000000A\",\"run_test_0008\",3]",
+        "digestHex": "d5820c27ece6dd104a5ca21f1a7beb2ced212bae7ba47427104f08160881a3e5"
+      },
+      {
+        "businessId": "a",
+        "archiveId": "b",
+        "runId": "c",
+        "generationEpoch": 1,
+        "canonicalInput": "[\"a\",\"b\",\"c\",1]",
+        "digestHex": "53fb3db0e673bc49e5c48604e82f77d36e49608af1ec7779c15c7e534c8c44fc"
+      },
+      {
+        "businessId": "a\"b\\c",
+        "archiveId": "x\"y",
+        "runId": "y\\z",
+        "generationEpoch": 12,
+        "canonicalInput": "[\"a\\\"b\\\\c\",\"x\\\"y\",\"y\\\\z\",12]",
+        "digestHex": "e4be74548e8c2e9de7f2568a26c62d1f965986c14f6e35b7a6eeea1bc2df7389"
+      },
+      {
+        "businessId": "space.1",
+        "archiveId": "01J0000000000000000000000A2",
+        "runId": "run_test_0008",
+        "generationEpoch": 3,
+        "canonicalInput": "[\"space.1\",\"01J0000000000000000000000A2\",\"run_test_0008\",3]",
+        "digestHex": "59963481eb48a2aa8b320f8384cd3f04271b23840684dcce47dd479027fc9848"
+      }
+    ]
+  },
+  "publishInput": {
+    "archive_id": "01J0000000000000000000000A",
+    "snapshot_id": "01J0000000000000000000000B",
+    "run_id": "run_test_0008",
+    "generation_epoch": 3,
+    "document": {
+      "schema_version": "2.0.0",
+      "scenes": [
+        {
+          "scene_id": "scene-cover",
+          "scene_type": "cover",
+          "source_refs": ["diary:1"],
+          "body": "翻开这本属于我们的回忆录（2024年夏，第 100 天）"
+        },
+        {
+          "scene_id": "scene-diary-a",
+          "scene_type": "diary_highlight",
+          "source_refs": [],
+          "body": "同样的心情，我们在同一天写下了同一句话。"
+        },
+        {
+          "scene_id": "scene-diary-b",
+          "scene_type": "milestone",
+          "source_refs": [],
+          "body": "同样的心情，我们在同一天写下了同一句话。"
+        },
+        {
+          "scene_id": "scene-image",
+          "scene_type": "image",
+          "source_refs": [],
+          "body": "照片里的笑容一直都在",
+          "payload": {
+            "image_url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+            "title_word": "夏日海边"
+          }
+        },
+        {
+          "scene_id": "scene-summary",
+          "scene_type": "summary",
+          "source_refs": [],
+          "body": "往后的路（慢慢走），那些数字 365 天也都算数。"
+        }
+      ],
+      "actions": [
+        {
+          "action_id": "action-show-card",
+          "scene_id": "scene-cover",
+          "action_type": "show_card",
+          "duration_ms": 3000
+        },
+        {
+          "action_id": "action-type-text",
+          "scene_id": "scene-diary-a",
+          "action_type": "type_text",
+          "duration_ms": 1500
+        },
+        {
+          "action_id": "action-hold",
+          "scene_id": "scene-diary-b",
+          "action_type": "hold",
+          "duration_ms": 1000
+        },
+        {
+          "action_id": "action-focus-image",
+          "scene_id": "scene-image",
+          "action_type": "focus_image",
+          "duration_ms": 2000
+        },
+        {
+          "action_id": "action-play-tts",
+          "scene_id": "scene-summary",
+          "action_type": "play_tts",
+          "duration_ms": 2500
+        }
+      ],
+      "media_manifest": [
+        {
+          "media_id": "media-image-1",
+          "kind": "image",
+          "object_key": "memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "mime": "image/png",
+          "scene_id": "scene-image"
+        }
+      ],
+      "audio": {
+        "narrations": [
+          {
+            "scene_id": "scene-cover",
+            "media_id": "audio-narration-cover",
+            "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-cover-7f3a91.mp3",
+            "mime": "audio/mpeg",
+            "duration_ms": 18230
+          },
+          {
+            "scene_id": "scene-diary-a",
+            "media_id": "audio-narration-diary-a",
+            "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-diary-0c41be.mp3",
+            "mime": "audio/mpeg",
+            "duration_ms": 15400
+          },
+          {
+            "scene_id": "scene-diary-b",
+            "media_id": "audio-narration-diary-b",
+            "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-mile-e6d902.mp3",
+            "mime": "audio/mpeg",
+            "duration_ms": 15400
+          },
+          {
+            "scene_id": "scene-summary",
+            "media_id": "audio-narration-summary",
+            "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-sum-33ab58.mp3",
+            "mime": "audio/mpeg",
+            "duration_ms": 9050
+          }
+        ],
+        "background_music": {
+          "media_id": "audio-bgm-work-1",
+          "object_key": "memoir-test/audios/background/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/bgm-9c2f01.mp3",
+          "mime": "audio/mpeg",
+          "duration_ms": 60000
+        }
+      }
+    }
+  },
+  "expectedPublicPlaybackV2": {
+    "archiveId": "01J0000000000000000000000A",
+    "publishedRevision": 2,
+    "schemaVersion": "2.0.0",
+    "document": {
+      "schemaVersion": "2.0.0",
+      "title": "那些一起走过的日子",
+      "scenes": [
+        {
+          "sceneId": "scene-cover",
+          "type": "cover",
+          "safetyLevel": "normal",
+          "body": "翻开这本属于我们的回忆录（2024年夏，第 100 天）",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-diary-a",
+          "type": "diary_highlight",
+          "safetyLevel": "normal",
+          "body": "同样的心情，我们在同一天写下了同一句话。",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-diary-b",
+          "type": "milestone",
+          "safetyLevel": "normal",
+          "body": "同样的心情，我们在同一天写下了同一句话。",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-image",
+          "type": "image",
+          "safetyLevel": "normal",
+          "body": "照片里的笑容一直都在",
+          "payload": {
+            "imageUrl": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+            "titleWord": "夏日海边"
+          }
+        },
+        {
+          "sceneId": "scene-summary",
+          "type": "summary",
+          "safetyLevel": "normal",
+          "body": "往后的路（慢慢走），那些数字 365 天也都算数。",
+          "payload": {}
+        }
+      ],
+      "actions": [
+        {
+          "actionId": "action-show-card",
+          "type": "show_card",
+          "sceneId": "scene-cover",
+          "durationMs": 3000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-type-text",
+          "type": "type_text",
+          "sceneId": "scene-diary-a",
+          "durationMs": 1500,
+          "payload": {}
+        },
+        {
+          "actionId": "action-hold",
+          "type": "hold",
+          "sceneId": "scene-diary-b",
+          "durationMs": 1000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-focus-image",
+          "type": "focus_image",
+          "sceneId": "scene-image",
+          "durationMs": 2000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-play-tts",
+          "type": "play_tts",
+          "sceneId": "scene-summary",
+          "durationMs": 2500,
+          "payload": {}
+        }
+      ],
+      "mediaManifest": [
+        {
+          "mediaId": "media-image-1",
+          "kind": "image",
+          "objectKey": "memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "mime": "image/png",
+          "sceneId": "scene-image"
+        }
+      ],
+      "audio": {
+        "narrations": [
+          {
+            "sceneId": "scene-cover",
+            "mediaId": "audio-narration-cover",
+            "mime": "audio/mpeg",
+            "durationMs": 18230
+          },
+          {
+            "sceneId": "scene-diary-a",
+            "mediaId": "audio-narration-diary-a",
+            "mime": "audio/mpeg",
+            "durationMs": 15400
+          },
+          {
+            "sceneId": "scene-diary-b",
+            "mediaId": "audio-narration-diary-b",
+            "mime": "audio/mpeg",
+            "durationMs": 15400
+          },
+          {
+            "sceneId": "scene-summary",
+            "mediaId": "audio-narration-summary",
+            "mime": "audio/mpeg",
+            "durationMs": 9050
+          }
+        ],
+        "backgroundMusic": {
+          "mediaId": "audio-bgm-work-1",
+          "mime": "audio/mpeg",
+          "durationMs": 60000
+        }
+      }
+    }
+  },
+  "expectedPublicPlaybackV1Projection": {
+    "archiveId": "01J0000000000000000000000A",
+    "publishedRevision": 2,
+    "schemaVersion": "1.0.0",
+    "document": {
+      "schemaVersion": "1.0.0",
+      "title": "那些一起走过的日子",
+      "scenes": [
+        {
+          "sceneId": "scene-cover",
+          "type": "cover",
+          "safetyLevel": "normal",
+          "body": "翻开这本属于我们的回忆录（2024年夏，第 100 天）",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-diary-a",
+          "type": "diary_highlight",
+          "safetyLevel": "normal",
+          "body": "同样的心情，我们在同一天写下了同一句话。",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-diary-b",
+          "type": "milestone",
+          "safetyLevel": "normal",
+          "body": "同样的心情，我们在同一天写下了同一句话。",
+          "payload": {}
+        },
+        {
+          "sceneId": "scene-image",
+          "type": "image",
+          "safetyLevel": "normal",
+          "body": "照片里的笑容一直都在",
+          "payload": {
+            "imageUrl": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+            "titleWord": "夏日海边"
+          }
+        },
+        {
+          "sceneId": "scene-summary",
+          "type": "summary",
+          "safetyLevel": "normal",
+          "body": "往后的路（慢慢走），那些数字 365 天也都算数。",
+          "payload": {}
+        }
+      ],
+      "actions": [
+        {
+          "actionId": "action-show-card",
+          "type": "show_card",
+          "sceneId": "scene-cover",
+          "durationMs": 3000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-type-text",
+          "type": "type_text",
+          "sceneId": "scene-diary-a",
+          "durationMs": 1500,
+          "payload": {}
+        },
+        {
+          "actionId": "action-hold",
+          "type": "hold",
+          "sceneId": "scene-diary-b",
+          "durationMs": 1000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-focus-image",
+          "type": "focus_image",
+          "sceneId": "scene-image",
+          "durationMs": 2000,
+          "payload": {}
+        },
+        {
+          "actionId": "action-play-tts",
+          "type": "play_tts",
+          "sceneId": "scene-summary",
+          "durationMs": 2500,
+          "payload": {}
+        }
+      ],
+      "mediaManifest": [
+        {
+          "mediaId": "media-image-1",
+          "kind": "image",
+          "objectKey": "memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "url": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir/images/3f1c9b2a-7e64-4d8a-9c01-5b6e8f0a2d4c.png",
+          "mime": "image/png",
+          "sceneId": "scene-image"
+        }
+      ]
+    }
+  },
+  "invalidAudioSamples": [
+    {
+      "case": "schema_2_without_audio",
+      "reason": "2.0.0 文档缺必填 audio 对象（即使全失败也须空 narrations + null background_music）",
+      "documentMutation": {"remove": "audio"}
+    },
+    {
+      "case": "narration_dangling_scene",
+      "reason": "旁白 scene_id 不指向任何真实场景",
+      "narration": {
+        "scene_id": "scene-not-exist",
+        "media_id": "audio-narration-dangling",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-dangling-0001.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "narration_duplicate_scene",
+      "reason": "同一场景两条旁白",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-cover-dup",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-dup-0002.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "media_id_collides_image",
+      "reason": "音频 media_id 与图片 media_id 重复（全媒体唯一）",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "media-image-1",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-collide-0003.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "wrong_role_prefix",
+      "reason": "旁白 object_key 使用背景音乐前缀（角色前缀不匹配）",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-wrong-prefix",
+        "object_key": "memoir-test/audios/background/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-wrong-role-0004.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "wrong_environment_prefix",
+      "reason": "object_key 使用另一环境前缀（正式前缀混入测试环境）",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-wrong-env",
+        "object_key": "memoir/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-wrong-env-0005.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "scope_mismatch",
+      "reason": "scope 目录非当前 RunRef 四元组的标准 HMAC 摘要（末位字符被改）",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-scope-mismatch",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f0/narr-scope-0006.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "path_traversal",
+      "reason": "object_key 含路径穿越",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-traversal",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/../../narr-trav-0007.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "url_in_object_key",
+      "reason": "object_key 是 URL 或携带签名参数",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-url",
+        "object_key": "https://memoir-media-test.oss-cn-hangzhou.aliyuncs.com/memoir-test/audios/narrator/x.mp3?Signature=abc",
+        "mime": "audio/mpeg",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "wrong_mime",
+      "reason": "音频 mime 不是 audio/mpeg",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-wrong-mime",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-mime-0008.mp4",
+        "mime": "audio/mp4",
+        "duration_ms": 5000
+      }
+    },
+    {
+      "case": "non_positive_duration",
+      "reason": "duration_ms 非正整数",
+      "narration": {
+        "scene_id": "scene-cover",
+        "media_id": "audio-narration-zero-dur",
+        "object_key": "memoir-test/audios/narrator/4d8a11b4ed4b94d6deaa6917117ae576c31ec67197029821686dba44b25514f2/narr-zero-0009.mp3",
+        "mime": "audio/mpeg",
+        "duration_ms": 0
+      }
+    },
+    {
+      "case": "background_music_list",
+      "reason": "background_music 只能是资源对象或 null，不是数组",
+      "documentMutation": {"set": {"audio.background_music": []}}
+    }
+  ],
+  "mediaAccess": {
+    "requestSchema": {
+      "publishedRevision": "正整数，必须等于当前可见 published revision",
+      "mediaId": "非空字符串，公开播放文档内的音频 mediaId"
+    },
+    "successResponseData": {
+      "publishedRevision": 2,
+      "mediaId": "audio-bgm-work-1",
+      "url": "https://<configured-oss-endpoint>/<object-key>?<signature>",
+      "expiresAt": "2026-09-08T12:00:00Z",
+      "notes": "url/expiresAt 为运行期值；契约只冻结字段名与类型（url 为 HTTPS 字符串、expiresAt 为 UTC RFC3339），url 不得进入任何持久化或日志。"
+    },
+    "errors": [
+      {"status": 409, "code": "MEMORY_MEDIA_REVISION_CHANGED", "when": "publishedRevision 不等于当前可见 revision"},
+      {"status": 404, "code": "MEMORY_MEDIA_NOT_FOUND", "when": "mediaId 不属于当前作品/非音频/当前 revision 不含该资源"},
+      {"status": 503, "code": "MEMORY_MEDIA_ACCESS_UNAVAILABLE", "when": "签名基础设施失败（缺配置/SDK 异常）"}
+    ],
+    "forbiddenRequests": [
+      {"case": "client_supplied_object_key", "body": {"publishedRevision": 2, "mediaId": "audio-bgm-work-1", "objectKey": "memoir-test/audios/background/x.mp3"}},
+      {"case": "client_supplied_url", "body": {"publishedRevision": 2, "mediaId": "audio-bgm-work-1", "url": "https://evil.example.com/a.mp3"}}
+    ]
+  }
+}

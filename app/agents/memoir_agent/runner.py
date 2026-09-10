@@ -209,6 +209,9 @@ _MEDIA_SCENE_TYPES: tuple[str, ...] = _SCENE_TYPES + ("image",)
 _MEDIA_MIN_VERSION = "1.0.3"
 # 每场景配图（全场景 payload + title_word 放开）的最低版本。
 _PER_SCENE_MEDIA_MIN_VERSION = "1.0.4"
+# M8 音频链路（enqueue_audio_tasks 节点 + 2.0.0 发布文档）的最低版本；
+# 该节点只存在于 1.0.8 图中，旧版本 graph 不会路由进来（双保险门控）。
+_AUDIO_MIN_VERSION = "1.0.8"
 _ACTION_TYPES: tuple[str, ...] = ("show_card", "type_text", "hold", "transition")
 
 # 规则动作映射：动作是调度结构而非内容，按 scene_type 确定性推导动作类型
@@ -274,6 +277,15 @@ def _per_scene_media_enabled(agent_version: object) -> bool:
     return _version_at_least(agent_version, _PER_SCENE_MEDIA_MIN_VERSION)
 
 
+def _audio_version_enabled(agent_version: object) -> bool:
+    """版本门控：仅 1.0.8 及以上的 Run 发布 2.0.0 有声文档。
+
+    旧版本（或测试桩缺字段）返回 False：safety_review 维持 1.0.0 文档、
+    音频节点不存在于旧图，1.0.0–1.0.7 行为零变化。
+    """
+    return _version_at_least(agent_version, _AUDIO_MIN_VERSION)
+
+
 class MemoirNodeRunner:
     """回忆录 MVP 节点执行器，只输出不含日记正文的结构化播放文档。"""
 
@@ -284,6 +296,7 @@ class MemoirNodeRunner:
         model_gateway: MemoirModelGateway | None = None,
         evaluation_service: EvaluationService | None = None,
         media_service: object | None = None,
+        audio_service: object | None = None,
     ) -> None:
         self._gateway, self._audit = gateway, audit
         self._model_gateway = model_gateway
@@ -292,6 +305,10 @@ class MemoirNodeRunner:
         # M6 媒体服务（MemoirMediaService）：None 时媒体节点按能力关闭跳过，
         # 旧版本 graph 与未开启媒体部署的行为完全不变。
         self._media_service = media_service
+        # M8 音频服务（MemoirAudioService）：None 时 1.0.8 图的音频节点按
+        # CAPABILITY_DISABLED 跳过，发布 2.0.0 空音频文档；旧版本图不含
+        # 该节点，注入与否均零行为变化。
+        self._audio_service = audio_service
         self._playback_evaluator = MemoirPlaybackEvaluator()
         # Prompt 只从内置 package 精确读取；调用方无法指定 latest 或模板路径。
         self._prompts = PromptRegistry(Path(__file__).parents[1])
@@ -365,9 +382,21 @@ class MemoirNodeRunner:
                     evaluation=evaluation,
                 )
             state.safety_report = {"decision": decision} if decision == "passed" else {"decision": decision, "reason": "INVALID_PLAYBACK_STRUCTURE"}
-            # media_manifest 由媒体节点产出的六键条目直接构成（None 归一为空），
-            # schema_version 维持 1.0.0 不升版（D1 冻结：媒体是增量，不是破坏性变更）。
-            state.playback_document = {"schema_version": "1.0.0", "scenes": state.scenes, "actions": state.actions, "media_manifest": state.media_tasks if isinstance(state.media_tasks, list) else []}
+            # media_manifest 由媒体节点产出的六键条目直接构成（None 归一为空）。
+            # 版本分流：1.0.8+（M8 音频）发布 2.0.0 文档，audio 占位为空数组 +
+            # null，由紧随其后的 enqueue_audio_tasks 节点填充成功资产；旧版本
+            # schema_version 维持 1.0.0 不升版（D1 冻结：媒体是增量，不是破坏性
+            # 变更；音频同理只随新包发布，旧包字节零变化）。
+            if _audio_version_enabled(agent_version):
+                state.playback_document = {
+                    "schema_version": "2.0.0",
+                    "scenes": state.scenes,
+                    "actions": state.actions,
+                    "media_manifest": state.media_tasks if isinstance(state.media_tasks, list) else [],
+                    "audio": {"narrations": [], "background_music": None},
+                }
+            else:
+                state.playback_document = {"schema_version": "1.0.0", "scenes": state.scenes, "actions": state.actions, "media_manifest": state.media_tasks if isinstance(state.media_tasks, list) else []}
             log_success("MemoirAgent 安全审核完成 run_id=%s decision=%s scene_count=%s", run.run_id, decision, len(state.scenes))
             return {"node_id": "safety_review", "safe": decision == "passed"}
         if node.get("node_id") == "plan_chapters":
@@ -737,6 +766,102 @@ class MemoirNodeRunner:
                 "skipped": False,
                 "delivered": len(state.media_tasks),
             }
+        if node.get("node_id") == "enqueue_audio_tasks":
+            # M8 音频节点（仅 1.0.8 图路由进入，双保险门控见 _AUDIO_MIN_VERSION）：
+            # 对 safety_review 冻结的最终正文逐场景合成旁白并为作品提交一首
+            # BGM，成功资产写入 playback_document.audio 后交发布。三条铁律：
+            # 1) 节点绝不抛异常、绝不回改 scenes/actions（正文生成后不可再改）；
+            # 2) 任何音频失败都有界降级——缺旁白/无 BGM 仍发布完整图文，
+            #    失败不另起补音 revision（发布幂等由 logical_key 保证单次）；
+            # 3) 音频预算取 min(节点 300s, Run 剩余 - 发布预留 30s)，耗尽即停。
+            agent_version = getattr(run, "agent_version", "")
+            document = (
+                state.playback_document
+                if isinstance(state.playback_document, dict)
+                else None
+            )
+            if not _audio_version_enabled(agent_version) or document is None:
+                # 旧版本 graph 不含该节点，正常不会进入；文档缺失属上游契约
+                # 违约，保持空音频占位，由发布节点按 PLAYBACK_DOCUMENT_MISSING
+                # 终止 Run（不在音频节点重复判定）。
+                logging.warning(
+                    "MemoirAgent 音频节点跳过 run_id=%s code=%s",
+                    run.run_id, "AUDIO_VERSION_DISABLED",
+                )
+                return {
+                    "node_id": "enqueue_audio_tasks",
+                    "skipped": True,
+                    "reason_code": "AUDIO_VERSION_DISABLED",
+                }
+            if self._audio_service is None:
+                # 能力关闭（MEMOIR_AUDIO_ENABLED=false 或装配失败）：发布
+                # 2.0.0 空音频文档（空数组 + null），与设计"空音频仍 2.0.0"一致。
+                state.fallback_flags.append("audio_disabled")
+                logging.info(
+                    "MemoirAgent 音频能力关闭 run_id=%s code=%s",
+                    run.run_id, "CAPABILITY_DISABLED",
+                )
+                return {
+                    "node_id": "enqueue_audio_tasks",
+                    "skipped": True,
+                    "reason_code": "CAPABILITY_DISABLED",
+                }
+            scenes = document.get("scenes")
+            candidate_count = (
+                sum(
+                    1
+                    for scene in scenes
+                    if isinstance(scene, dict)
+                    and isinstance(scene.get("body"), str)
+                    and scene["body"].strip()
+                )
+                if isinstance(scenes, list)
+                else 0
+            )
+            try:
+                audio = self._audio_service.generate(
+                    run, document, lease_context=self._lease_context,
+                )
+            except Exception:
+                # 服务层承诺不抛；此处兜底防止意外异常影响发布主链。
+                logging.warning(
+                    "MemoirAgent 音频节点异常降级 run_id=%s code=%s",
+                    run.run_id, "AUDIO_NODE_FAILED",
+                )
+                audio = {"narrations": [], "background_music": None}
+                state.fallback_flags.append("audio_node_failed")
+            narrations = (
+                audio.get("narrations")
+                if isinstance(audio.get("narrations"), list)
+                else []
+            )
+            background_music = (
+                audio.get("background_music")
+                if isinstance(audio.get("background_music"), dict)
+                else None
+            )
+            # 新对象写回（不原地改旧文档）；audio 六键契约由服务层保证。
+            state.playback_document = {
+                **document,
+                "audio": {
+                    "narrations": narrations,
+                    "background_music": background_music,
+                },
+            }
+            # 与媒体降级同款观测标记：交付旁白少于候选场景或配乐缺失即降级。
+            if len(narrations) < candidate_count or background_music is None:
+                state.fallback_flags.append("audio_degraded")
+            log_success(
+                "MemoirAgent 音频节点完成 run_id=%s candidates=%s narrations=%s bgm=%s",
+                run.run_id, candidate_count, len(narrations),
+                background_music is not None,
+            )
+            return {
+                "node_id": "enqueue_audio_tasks",
+                "skipped": False,
+                "narrations": len(narrations),
+                "background_music": background_music is not None,
+            }
         if node.get("node_id") == "publish_document":
             # publish_document 节点 3 个工具调用共用同一 step_id 的 envelope context，
             # 统一构造一次，避免 7 字段形状在多个调用点重复拼装。
@@ -760,9 +885,11 @@ class MemoirNodeRunner:
                 else None
             )
             if committed is not None:
+                # tool_context 是网关 keyword-only 参数：位置传入会计入 *scope_and_key，
+                # 真实网关因参数数量校验直接 ValueError（存量缺陷，随 R5 对账域一并修复）。
                 reconciled = self._gateway.get_publish_result(
                     run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
-                    committed.idempotency_key, tool_context,
+                    committed.idempotency_key, tool_context=tool_context,
                 )
                 if reconciled is not None:
                     state.publish_result = reconciled
@@ -800,7 +927,7 @@ class MemoirNodeRunner:
                     try:
                         reconciled = self._gateway.get_publish_result(
                             run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
-                            logical_key, tool_context,
+                            logical_key, tool_context=tool_context,
                         )
                     except ToolErrorRejected as reconciliation_error:
                         if audit is not None:
@@ -841,7 +968,7 @@ class MemoirNodeRunner:
                     # revision/content_digest，并要求 digest 与本次规范化文档一致。
                     reconciled = self._gateway.get_publish_result(
                         run.business_connector_id, archive_id, snapshot_id, run.run_id, epoch,
-                        logical_key, tool_context,
+                        logical_key, tool_context=tool_context,
                     )
                     if (
                         isinstance(reconciled, dict)

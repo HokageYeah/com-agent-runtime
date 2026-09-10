@@ -329,8 +329,12 @@ def test_historical_1_0_0_cross_repo_single_persistent_chain(monkeypatch: Any) -
 
 
 # 跨仓测试使用业务端测试环境已配置的 Runtime OSS 域名；不绕过发布层
-# URL 白名单。object_key 采用 Runtime 生成端真实形状（memoir/images/ + UUID）。
-_MEDIA_URL = "https://com-agent-runtime.oss-cn-beijing.aliyuncs.com/memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+# URL 白名单。object_key 前缀同样对齐业务端测试环境（MEMORY_MEDIA_OBJECT_KEY_
+# PREFIX=memoir-test/images/，与 Runtime 测试端 MEMOIR_MEDIA_IMAGE_PREFIX 同值）；
+# 业务 publish 会按该前缀校验 manifest object_key 与 URL path，生产前缀
+# memoir/images/ 在测试环境会以 MEMORY_DOCUMENT_MEDIA_INVALID 整体拒绝。
+_MEDIA_OBJECT_KEY = "memoir-test/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png"
+_MEDIA_URL = "https://com-agent-runtime.oss-cn-beijing.aliyuncs.com/" + _MEDIA_OBJECT_KEY
 
 
 def _media_document() -> dict[str, Any]:
@@ -362,7 +366,7 @@ def _media_document() -> dict[str, Any]:
         ],
         "media_manifest": [
             {"media_id": "media-image-1", "kind": "image",
-             "object_key": "memoir/images/0f14d0ab-9605-4a62-a9e4-5ed26688389b.png",
+             "object_key": _MEDIA_OBJECT_KEY,
              "url": _MEDIA_URL, "mime": "image/png", "scene_id": "scene-image"},
         ],
     }

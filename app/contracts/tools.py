@@ -79,6 +79,20 @@ TOOL_ERROR_SPECS_V1_1: dict[str, dict[str, object]] = {
     "MEMORY_DOCUMENT_INVALID": {"http_status": 422, "error_type": "document_invalid", "retryable": False, "safe_message": "播放文档不满足发布要求"},
     "PUBLISH_NOT_YET_OBSERVED": {"http_status": 404, "error_type": "publish_not_observed", "retryable": False, "safe_message": "尚未观察到发布结果"},
     "RUNTIME_SERVICE_UNAVAILABLE": {"http_status": 503, "error_type": "service_unavailable", "retryable": True, "safe_message": "业务工具服务暂时不可用"},
+    # M6 媒体专用拒绝码（业务端 memory_agent_tools_api 的 v1.1.0 矩阵早已登记，
+    # Runtime 消费端漏同步）：media_manifest 条目 / image Scene payload / URL
+    # 域白名单违规统一走此码。缺登记时 _parse_tool_error 会把业务真实响应按
+    # TOOL_ERROR_CODE_UNKNOWN 拒收（2026-09-09 跨仓 bridge 失败根因），v1.1.0
+    # wire 的受控媒体拒绝因此无法进入 ToolErrorRejected 消费路径。
+    # v1.0.0 旧 wire 按既有设计不注册：安全降级在业务端生产者侧完成（未知码
+    # 映射为 MEMORY_SNAPSHOT_UNAVAILABLE 403），消费端保持严格六码 fail-closed。
+    "MEMORY_DOCUMENT_MEDIA_INVALID": {"http_status": 422, "error_type": "document_media_invalid", "retryable": False, "safe_message": "播放文档媒体内容不满足发布要求"},
+    # M8 音频专用拒绝码（B17 已发布，agent tools v1.1.0 矩阵同步）：2.0.0
+    # audio 条目结构 / object_key 写入前校验违规，与生产者（Runtime 包版本）
+    # 未获发布有声文档授权。四字段与业务端 memory_agent_tools_api 逐字一致，
+    # 否则 _parse_tool_error 按 TOOL_ERROR_CONTRADICTION 拒收真实业务响应。
+    "MEMORY_AUDIO_DOCUMENT_INVALID": {"http_status": 422, "error_type": "audio_document_invalid", "retryable": False, "safe_message": "播放文档音频内容不满足发布要求"},
+    "MEMORY_AUDIO_PRODUCER_FORBIDDEN": {"http_status": 403, "error_type": "audio_producer_forbidden", "retryable": False, "safe_message": "当前生产者无权发布有声播放文档"},
 }
 
 # 当前 Runtime 的新 Run 默认使用 v1.1.0；保留别名避免既有内部导入发生漂移。

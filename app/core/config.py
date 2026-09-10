@@ -337,6 +337,46 @@ class Settings(BaseSettings):
     VOLCANO_CV_REGION: str = 'cn-north-1'
     VOLCANO_CV_HOST: str = 'visual.volcengineapi.com'
 
+    # M8 回忆录音频通道（TTS 旁白 + BGM 配乐）。主开关默认关闭：关闭时
+    # 不校验任何音频配置、不触网，存量 Agent 行为完全不变。
+    MEMOIR_AUDIO_ENABLED: bool = False # 音频生成总开关（默认关闭）
+    MEMOIR_TTS_API_KEY: str = '' # 火山 TTS API Key（openspeech 侧，仅部署 env 注入）
+    MEMOIR_TTS_RESOURCE_ID: str = 'seed-tts-2.0' # TTS 资源 ID（冻结协议值）
+    MEMOIR_TTS_SPEAKER: str = 'zh_female_wenroushunv_uranus_bigtts' # 固定温柔女声音色
+    MEMOIR_TTS_SPEECH_RATE: int = -10 # 语速偏移，范围 [-50, 100]
+    MEMOIR_TTS_REQUEST_TIMEOUT_SECONDS: float = 45.0 # 单段 TTS 请求超时
+    MEMOIR_TTS_SCENE_CONCURRENCY: int = 2 # 场景级 TTS 并发上限（R8 消费）
+    MEMOIR_MUSIC_ACTION: str = '' # 音乐 Action：GenBGM 或 GenBGMForTime（显式配置）
+    MEMOIR_MUSIC_DURATION_SECONDS: int = 60 # BGM 时长（秒，协议固定 60）
+    MEMOIR_MUSIC_POLL_INTERVAL_SECONDS: float = 5.0 # QuerySong 轮询间隔（R8 消费）
+    MEMOIR_MUSIC_REQUEST_TIMEOUT_SECONDS: float = 15.0 # 单次音乐 API 请求超时
+    # BGM 临时 AudioUrl 下载 host 精确白名单（JSON 字符串数组，无通配符）。
+    MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON: str = ''
+    MEMOIR_AUDIO_NODE_TIMEOUT_SECONDS: float = 300.0 # 音频节点整体预算（R8 消费）
+    MEMOIR_AUDIO_PUBLISH_RESERVE_SECONDS: float = 30.0 # 发布前预留时长（R8 消费）
+    MEMOIR_AUDIO_WORKER_CONCURRENCY: int = 4 # 音频 worker 并发（R7/R8 消费）
+    MEMOIR_AUDIO_COST_CURRENCY: str = '' # 计费币种，冻结只允许 CNY
+    MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS: str = '' # TTS 单价（元/千字，十进制字符串）
+    MEMOIR_MUSIC_PRICE_PER_SECOND: str = '' # 音乐单价（元/秒，十进制字符串）
+    MEMOIR_AUDIO_MAX_COST_PER_RUN: str = '' # 单次运行音频成本预算上限（元，必须为正）
+    MEMOIR_AUDIO_MAX_FILE_BYTES: int = 20971520 # 单资产字节上限（20MiB）
+    MEMOIR_AUDIO_ORPHAN_RETENTION_HOURS: int = 24 # 孤儿资产清理保留时长（R7 消费）
+    MEMOIR_AUDIO_FFMPEG_PATH: str = '/usr/bin/ffmpeg' # ffmpeg 二进制路径
+    MEMOIR_AUDIO_FFPROBE_PATH: str = '/usr/bin/ffprobe' # ffprobe 二进制路径
+    MEMOIR_AUDIO_SUBPROCESS_TIMEOUT_SECONDS: float = 60.0 # 单次转码子进程超时
+    # 音频私有 OSS（与图片媒体桶独立；上传即 private ACL，无公共读路径）。
+    MEMORY_AUDIO_OSS_ENDPOINT: str = '' # 音频 OSS endpoint
+    MEMORY_AUDIO_OSS_BUCKET: str = '' # 音频 OSS 桶名
+    MEMORY_AUDIO_OSS_ACCESS_KEY_ID: str = '' # 音频 OSS AK（仅部署 env 注入）
+    MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET: str = '' # 音频 OSS SK（仅部署 env 注入）
+    MEMORY_AUDIO_NARRATOR_PREFIX: str = '' # 旁白对象键前缀（必须以 / 结尾）
+    MEMORY_AUDIO_BACKGROUND_PREFIX: str = '' # 配乐对象键前缀（必须以 / 结尾）
+    MEMORY_AUDIO_SCOPE_HMAC_KEY: str = '' # scope HMAC 密钥（与业务仓共享）
+    # 账本输入指纹 HMAC 密钥（Runtime 专属，启用音频时必填非空）：仅用于
+    # 音频作业账本内部幂等指纹（keyed HMAC-SHA256），与上面的对象 scope
+    # 密钥域隔离、不得复用同一值；只经部署 env 注入，绝不写日志或账本。
+    MEMOIR_AUDIO_INPUT_HMAC_KEY: str = ''
+
     model_config = SettingsConfigDict(
         env_file=ACTIVE_ENV_FILES,
         env_file_encoding="utf-8",
@@ -551,3 +591,149 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# M8 音频配置必须成组出现：启用时缺任何一项都拒绝启动，未知用量绝不
+# 允许以 0 或空串顶替。错误消息只列字段名，绝不回显配置值（防凭据泄露）。
+_MEMOIR_AUDIO_REQUIRED_STRINGS = (
+    "MEMOIR_TTS_API_KEY",
+    "VOLCANO_CV_ACCESS_KEY",
+    "VOLCANO_CV_SECRET_KEY",
+    "MEMOIR_MUSIC_ACTION",
+    "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS",
+    "MEMOIR_MUSIC_PRICE_PER_SECOND",
+    "MEMOIR_AUDIO_MAX_COST_PER_RUN",
+    "MEMOIR_AUDIO_COST_CURRENCY",
+    "MEMORY_AUDIO_OSS_ENDPOINT",
+    "MEMORY_AUDIO_OSS_BUCKET",
+    "MEMORY_AUDIO_OSS_ACCESS_KEY_ID",
+    "MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET",
+    "MEMORY_AUDIO_NARRATOR_PREFIX",
+    "MEMORY_AUDIO_BACKGROUND_PREFIX",
+    "MEMORY_AUDIO_SCOPE_HMAC_KEY",
+    "MEMOIR_AUDIO_INPUT_HMAC_KEY",
+    "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON",
+)
+_MEMOIR_AUDIO_ALLOWED_ACTIONS = {"GenBGM", "GenBGMForTime"}
+# 白名单 host 禁止出现的字符：通配符、路径、userinfo、scheme 分隔。
+_MEMOIR_AUDIO_HOST_FORBIDDEN_CHARS = ("*", "/", "@", ":")
+
+
+def _validate_audio_prefix(prefix: str, field_name: str, problems: list[str]) -> None:
+    """校验对象键前缀：目录形态、无穿越、无 URL；问题只记字段名。"""
+    if prefix.startswith("/") or not prefix.endswith("/"):
+        problems.append(f"{field_name} 必须形如 dir/sub/（以目录段开头、以 / 结尾）")
+        return
+    segments = prefix[:-1].split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        problems.append(f"{field_name} 不得含空段或 .. 路径穿越")
+    if "://" in prefix:
+        problems.append(f"{field_name} 不得是 URL 形态")
+
+
+def _validate_audio_decimal(
+    raw: str, field_name: str, *, allow_zero: bool, problems: list[str]
+) -> None:
+    """校验十进制字符串配置：可解析、非 NaN/Inf、符号约束正确。"""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        value = Decimal(raw)
+    except InvalidOperation:
+        problems.append(f"{field_name} 必须是十进制数字字符串")
+        return
+    if value.is_nan() or value.is_infinite():
+        problems.append(f"{field_name} 必须是有限十进制数")
+        return
+    if value < 0:
+        problems.append(f"{field_name} 不得为负数")
+        return
+    if not allow_zero and value <= 0:
+        problems.append(f"{field_name} 必须为正数（预算不得为 0）")
+
+
+def validate_memoir_audio_settings(current: Settings) -> None:
+    """校验 M8 音频配置组：禁用直接放行；启用时全部必填且取值合法。
+
+    由部署入口在启动阶段显式调用（默认关闭不影响存量部署）；聚合所有
+    问题一次性抛出，消息只含字段名与约束描述。
+    """
+    if not current.MEMOIR_AUDIO_ENABLED:
+        return
+    problems: list[str] = []
+    values: dict[str, str] = {}
+    for field in _MEMOIR_AUDIO_REQUIRED_STRINGS:
+        raw = getattr(current, field)
+        values[field] = raw
+        if not isinstance(raw, str) or not raw:
+            problems.append(f"缺少 {field}")
+    # 空值字段只报缺失，不做深检查（防 Decimal("") 等二次崩溃）。
+    if problems:
+        raise ValueError("MEMOIR_AUDIO_ENABLED 已开启但音频配置不完整: " + "; ".join(problems))
+
+    _validate_audio_decimal(
+        values["MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS"],
+        "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS",
+        allow_zero=True,
+        problems=problems,
+    )
+    _validate_audio_decimal(
+        values["MEMOIR_MUSIC_PRICE_PER_SECOND"],
+        "MEMOIR_MUSIC_PRICE_PER_SECOND",
+        allow_zero=True,
+        problems=problems,
+    )
+    _validate_audio_decimal(
+        values["MEMOIR_AUDIO_MAX_COST_PER_RUN"],
+        "MEMOIR_AUDIO_MAX_COST_PER_RUN",
+        allow_zero=False,
+        problems=problems,
+    )
+    if values["MEMOIR_AUDIO_COST_CURRENCY"] != "CNY":
+        problems.append("MEMOIR_AUDIO_COST_CURRENCY 只允许 CNY")
+    if values["MEMOIR_MUSIC_ACTION"] not in _MEMOIR_AUDIO_ALLOWED_ACTIONS:
+        problems.append("MEMOIR_MUSIC_ACTION 只允许 GenBGM 或 GenBGMForTime")
+    if not -50 <= current.MEMOIR_TTS_SPEECH_RATE <= 100:
+        problems.append("MEMOIR_TTS_SPEECH_RATE 必须在 [-50, 100] 范围内")
+
+    _validate_audio_prefix(
+        values["MEMORY_AUDIO_NARRATOR_PREFIX"], "MEMORY_AUDIO_NARRATOR_PREFIX", problems
+    )
+    _validate_audio_prefix(
+        values["MEMORY_AUDIO_BACKGROUND_PREFIX"], "MEMORY_AUDIO_BACKGROUND_PREFIX", problems
+    )
+    narrator = values["MEMORY_AUDIO_NARRATOR_PREFIX"]
+    background = values["MEMORY_AUDIO_BACKGROUND_PREFIX"]
+    if narrator != background and (
+        narrator.startswith(background) or background.startswith(narrator)
+    ):
+        problems.append("MEMORY_AUDIO_NARRATOR_PREFIX 与 MEMORY_AUDIO_BACKGROUND_PREFIX 不得互相包含")
+    if current.ENVIRONMENT == "production" and (
+        "memoir-test/" in narrator or "memoir-test/" in background
+    ):
+        problems.append("production 环境不得使用 memoir-test/ 测试前缀")
+
+    try:
+        hosts = json.loads(values["MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON"])
+    except json.JSONDecodeError:
+        hosts = None
+        problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
+    if isinstance(hosts, list):
+        if not hosts:
+            problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 不得为空数组")
+        for host in hosts:
+            if (
+                not isinstance(host, str)
+                or not host
+                or host != host.strip()
+                or any(char in host for char in _MEMOIR_AUDIO_HOST_FORBIDDEN_CHARS)
+            ):
+                problems.append(
+                    "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 只允许精确 host（无通配符/路径/userinfo）"
+                )
+                break
+    elif hosts is not None:
+        problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
+
+    if problems:
+        raise ValueError("MEMOIR_AUDIO_ENABLED 配置非法: " + "; ".join(problems))
