@@ -763,3 +763,36 @@ git diff --check
 ```
 
 覆盖要点（详见[第三轮必要补缺完成记录](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/verification/2026-09-10-M8第三轮必要补缺完成记录.md)）：旁白真实 `generate` 超时→持键 reserved→reap failed→含键 `keep_published` / 空列表超窗 `cleaned`；BGM 同语义在 ledger_recovery；已引用零删除、未知零删除、在途不 reap、dry-run 不 reap；墙钟金丝雀 `test_execute_reaps_abandoned_then_classifies` 证明 reaper 不刷新 `updated_at`。未验证项：真实 PostgreSQL、真实 OSS 删除、真实 Business 联调维护、收费样本、部署。第二轮历史数字（101 passed 1 skipped / 16 passed / 11 passed）不改。
+
+## M8 发布对账兼容补缺验证（2026-09-10）
+
+范围：纠正「缺 `audio_object_keys` 按空列表」与网关精确两字段摘要豁免。维护仅显式完整 `list[str]` 参与成员判断，缺字段/类型错误/非法元素 → `_PROBE_UNKNOWN`（先窗、超窗 `keep_unknown`，零删除）；显式 `[]` 仍走未引用。网关对 `memory.publish_playback_document` / `memory.get_publish_result` 合法 revision+64 位 hex digest **仅跳过顶层 digest**，`audio_object_keys` 与额外字段仍扫描。隔离回归走真实 `ToolGateway` + `httpx.MockTransport`（仅传输替身）。第三轮 78/1 作为当时证据保留。
+
+```bash
+.venv/bin/pytest -q \
+  tests/test_memoir_audio_maintenance.py::test_illegal_audio_object_keys_keep_unknown \
+  tests/test_memoir_audio_maintenance.py::test_real_gateway_legacy_two_field_keeps_unknown \
+  tests/test_memoir_audio_maintenance.py::test_real_gateway_sensitive_keys_keep_unknown \
+  tests/test_memoir_audio_maintenance.py::test_real_gateway_published_keeps_object \
+  tests/test_runtime_snapshot_tool_gateway.py::test_get_publish_result_accepts_sha256_content_digest \
+  tests/test_runtime_snapshot_tool_gateway.py::test_get_publish_result_accepts_digest_with_audio_object_keys \
+  tests/test_runtime_snapshot_tool_gateway.py::test_get_publish_result_rejects_sensitive_audio_object_keys \
+  tests/test_runtime_snapshot_tool_gateway.py::test_generic_call_accepts_sha256_content_digest \
+  --tb=line
+# 24 passed in 1.04s
+
+.venv/bin/pytest -q tests/test_memoir_audio_maintenance.py \
+  tests/test_runtime_snapshot_tool_gateway.py \
+  tests/test_memoir_audio_jobs.py \
+  tests/test_memoir_audio_ledger_recovery.py --tb=line
+# 182 passed, 1 skipped in 11.68s
+# SKIPPED tests/test_memoir_audio_jobs.py:1268 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+
+.venv/bin/ruff check app/scripts/memoir_audio_maintenance.py \
+  app/runtime/tool_gateway.py \
+  tests/test_memoir_audio_maintenance.py \
+  tests/test_runtime_snapshot_tool_gateway.py
+# All checks passed!
+```
+
+覆盖要点：旧两字段响应 keep_unknown 零删除；非法清单（None/非 list/int/None 元素）零删除；显式 `[]` 仍未引用删除（既有 dry-run/execute 路径）；三字段合法摘要通过；敏感 keys 仍 `TOOL_OUTPUT_SENSITIVE` 后 keep_unknown。未验证项同第三轮。第三轮历史 78 passed / 1 skipped 不改写。

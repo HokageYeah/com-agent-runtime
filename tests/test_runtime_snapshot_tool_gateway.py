@@ -671,6 +671,41 @@ def test_get_publish_result_accepts_sha256_content_digest() -> None:
 
 
 @pytest.mark.parametrize(
+    "audio_object_keys",
+    [[], ["memoir-test/ok.mp3"]],
+)
+def test_get_publish_result_accepts_digest_with_audio_object_keys(
+    audio_object_keys: list[str],
+) -> None:
+    """发布查询 additive 第三字段不得让合法 SHA-256 摘要误报敏感标识符。"""
+    digest = "123456789012345678" + "a" * 46
+    output = {
+        "revision": 1,
+        "content_digest": digest,
+        "audio_object_keys": audio_object_keys,
+    }
+    ToolGateway._validate_output(output, tool_name="memory.get_publish_result")
+    gateway = _make_default_gateway(
+        lambda _: httpx.Response(200, json={"output": output})
+    )
+    assert gateway.get_publish_result("c", "a", "s", "r", 2, "publish-digest") == output
+
+
+def test_get_publish_result_rejects_sensitive_audio_object_keys() -> None:
+    """新增对象键及其他字段仍须扫描；敏感内容不能靠摘要字段绕过。"""
+    digest = "123456789012345678" + "a" * 46
+    with pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
+        ToolGateway._validate_output(
+            {
+                "revision": 1,
+                "content_digest": digest,
+                "audio_object_keys": ["13800138000"],
+            },
+            tool_name="memory.get_publish_result",
+        )
+
+
+@pytest.mark.parametrize(
     "output",
     [
         {"content_digest": "123456789012345678" + "a" * 46},
@@ -687,7 +722,7 @@ def test_get_publish_result_accepts_sha256_content_digest() -> None:
     ],
 )
 def test_publish_result_digest_exception_requires_exact_trusted_shape(output: dict[str, object]) -> None:
-    """摘要豁免只能用于固定工具的顶层两字段结果，不能跳过其它值的递归扫描。"""
+    """摘要豁免只跳过合法 content_digest 字符串，不能跳过其它值的递归扫描。"""
     with pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
         ToolGateway._validate_output(output, tool_name="memory.get_publish_result")
 

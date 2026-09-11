@@ -452,6 +452,85 @@ def test_probe_mirrors_publish_wire_shape(
         ).hexdigest()
 
 
+def _legacy_two_field_handler(request: httpx.Request) -> httpx.Response:
+    """旧 Business 包：只返回 revision/content_digest，缺 audio_object_keys。"""
+    return httpx.Response(
+        200,
+        json={
+            "output": {
+                "revision": 2,
+                "content_digest": "ab" * 32,
+            },
+            "schema_version": "1.0.0",
+        },
+    )
+
+
+def _sensitive_keys_handler(request: httpx.Request) -> httpx.Response:
+    """新三字段但对象键命中敏感标识符：网关必须拒绝，探测归未知。"""
+    return httpx.Response(
+        200,
+        json={
+            "output": {
+                "revision": 2,
+                "content_digest": "ab" * 32,
+                "audio_object_keys": ["13800138000"],
+            },
+            "schema_version": "1.0.0",
+        },
+    )
+
+
+def test_real_gateway_legacy_two_field_keeps_unknown(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """旧 Business 两字段响应：真实网关接受摘要，维护按未知保留，零删除。"""
+    with session_factory() as session:
+        _seed_agent_run(session)
+        job = _seed_orphan(
+            session, scene_id="s-rg-legacy", key="memoir-test/rg-legacy.mp3",
+        )
+        deleter = _FakeDeleter()
+        client, _ = _mock_client(_legacy_two_field_handler)
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=build_publish_probe(session, _real_gateway(client)),
+        )
+        assert report.keep_unknown == 1
+        assert report.deleted == 0
+        assert deleter.deleted == []
+        assert job.state == STATE_UPLOADED
+
+
+def test_real_gateway_sensitive_keys_keep_unknown(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """新增字段含敏感标识符：真实网关拒绝 → 探测异常 → keep_unknown。"""
+    with session_factory() as session:
+        _seed_agent_run(session)
+        job = _seed_orphan(
+            session, scene_id="s-rg-sens", key="memoir-test/rg-sens.mp3",
+        )
+        deleter = _FakeDeleter()
+        client, _ = _mock_client(_sensitive_keys_handler)
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=build_publish_probe(session, _real_gateway(client)),
+        )
+        assert report.keep_unknown == 1
+        assert report.deleted == 0
+        assert deleter.deleted == []
+        assert job.state == STATE_UPLOADED
+
+
 def test_real_gateway_published_keeps_object(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -840,10 +919,25 @@ def test_probe_error_keeps_unknown_zero_delete(
         assert deleter.deleted == []
 
 
-def test_missing_audio_object_keys_field_is_empty_list(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"revision": 2, "content_digest": "ab" * 32},
+        {"revision": 2, "content_digest": "ab" * 32, "audio_object_keys": None},
+        {"revision": 2, "content_digest": "ab" * 32, "audio_object_keys": "memoir-test/miss.mp3"},
+        {"revision": 2, "content_digest": "ab" * 32, "audio_object_keys": [1, "memoir-test/miss.mp3"]},
+        {"revision": 2, "content_digest": "ab" * 32, "audio_object_keys": ["memoir-test/miss.mp3", None]},
+    ],
+)
+def test_illegal_audio_object_keys_keep_unknown(
     session_factory: sessionmaker[Session],
+    payload: dict[str, Any],
 ) -> None:
-    """缺 audio_object_keys 字段按空列表 → 未引用分类，不崩。"""
+    """缺字段 / null / 非 list / 非法元素 → 未知保留，零删除。
+
+    旧 Business 两字段响应不能反向证明对象未被引用；显式合法空列表
+    才表示已发布但无音频，由 test_dry_run / 端到端未引用路径覆盖。
+    """
     with session_factory() as session:
         job = _seed_orphan(session, scene_id="s-miss", key="memoir-test/miss.mp3")
         deleter = _FakeDeleter()
@@ -853,12 +947,13 @@ def test_missing_audio_object_keys_field_is_empty_list(
             retention_hours=24,
             limit=100,
             execute=True,
-            publish_probe=_FixedProbe({"revision": 2, "content_digest": "ab" * 32}),
+            publish_probe=_FixedProbe(payload),
         )
-        assert report.delete_candidates == 1
-        assert report.deleted == 1
-        assert deleter.deleted == ["memoir-test/miss.mp3"]
-        assert job.state == "cleaned"
+        assert report.keep_unknown == 1
+        assert report.deleted == 0
+        assert report.delete_candidates == 0
+        assert deleter.deleted == []
+        assert job.state == STATE_UPLOADED
 
 
 def test_in_flight_keyed_reserved_not_reaped_or_deleted(

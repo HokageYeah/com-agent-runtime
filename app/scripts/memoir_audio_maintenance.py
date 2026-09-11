@@ -56,8 +56,9 @@ class OssDeleter(Protocol):
 
 
 # 发布探测口协议（R5 三态语义，替代 Runtime 本地 publish 表对账）：
-# - 返回 dict → 整 Run 已发布；再按 audio_object_keys 成员关系判定该对象
-#   是否已被引用（缺字段按空列表，兼容旧 Business 包）；
+# - 返回 dict 且含显式合法 audio_object_keys: list[str] → 整 Run 已发布；
+#   再按成员关系判定该对象是否已被引用。缺字段 / 类型错误 / 非法元素
+#   不能证明未引用，归未知保留；显式 [] 才表示已发布但无音频。
 # - 返回 None → 业务明确未发布（超过保留窗才可进删除候选）；
 # - 抛异常 → 发布状态未知（keep_unknown，fail-safe 保留人工复核）。
 class PublishProbe(Protocol):
@@ -234,6 +235,16 @@ class MaintenanceReport:
     delete_failed: int = 0  # 删除抛异常的数量（候选保留原状态，下轮重试）
 
 
+def _published_audio_object_keys(probe: dict[str, Any]) -> list[str] | None:
+    """仅显式完整 list[str] 可证明引用关系；缺字段或非法内容返回 None（未知）。"""
+    if "audio_object_keys" not in probe:
+        return None
+    keys = probe["audio_object_keys"]
+    if not isinstance(keys, list) or any(not isinstance(item, str) for item in keys):
+        return None
+    return keys
+
+
 def run_maintenance(
     session: Session,
     *,
@@ -252,11 +263,13 @@ def run_maintenance(
     分类顺序（先命中先保留，兜底才是删除）：
     1. lease 未过期 → 在途，保留；
     2. submission_unknown → 账本未清（预留未对账），保留；
-    3. 探测返回 dict 且 audio_object_keys 含该键 → 已引用，保留；
-       dict 但未引用 / 探测返回 None（明确未发布）→ 落入④窗检查；
+    3. 探测返回 dict 且 audio_object_keys 为显式合法 list[str] 并含该键
+       → 已引用，保留；显式合法清单未含该键 / 探测返回 None（明确未发布）
+       → 落入④窗检查。缺字段、类型错误、非法元素改走未知，不删；
     4. 仍在保留窗内 → 保留；
     5. 明确未发布或已发布但未引用该对象 → 超窗可删（唯一删除路径）；
-    6. 探测失败或未注入探测口 → 状态未知，保留人工复核，绝不自动删。
+    6. 探测失败、未注入探测口、或已发布响应无法给出合法对象清单
+       → 状态未知，保留人工复核，绝不自动删。
 
     execute=True 时先 fail_abandoned_keyed_jobs（grace=保留窗），再扫描，
     本轮收割的 failed 行立刻进入视野。dry-run 零写入（含不 reap）。
@@ -292,14 +305,14 @@ def run_maintenance(
             except Exception:  # noqa: BLE001 探测任何失败都按未知兜底
                 probe = _PROBE_UNKNOWN
         if isinstance(probe, dict):
-            # 缺 audio_object_keys 按空列表：兼容旧 Business 包。
-            keys = probe.get("audio_object_keys", [])
-            if not isinstance(keys, list):
-                keys = []
-            if job.object_key in keys:
+            keys = _published_audio_object_keys(probe)
+            if keys is None:
+                # 缺字段 / 类型错误 / 非法元素不能证明未引用，按未知保留。
+                probe = _PROBE_UNKNOWN
+            elif job.object_key in keys:
                 report = _bump(report, "keep_published")
                 continue
-            # 图文已发布但该对象未被引用：落入④窗检查。
+            # 显式合法清单且未含该键：已发布但未引用，落入④窗检查。
         # probe is None → 明确未发布，落入④窗检查。
         # probe is _PROBE_UNKNOWN → 先④窗，超窗再⑥，不删。
         # 4. 保留窗内：无论后续判定为何，都未到清理时点。

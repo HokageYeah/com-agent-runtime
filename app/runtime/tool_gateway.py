@@ -826,13 +826,13 @@ class ToolGateway:
     def _is_trusted_publish_result_output(
         output: dict[str, Any], tool_name: str | None,
     ) -> bool:
-        """仅固定发布路由的精确完整性摘要响应可跳过敏感标识符扫描。"""
+        """固定发布路由存在合法 revision 与 64 位 hex digest 时，仅 digest 可跳过扫描。"""
         if tool_name not in {
             "memory.publish_playback_document",
             "memory.get_publish_result",
-        } or set(output) != {"revision", "content_digest"}:
+        }:
             return False
-        revision, content_digest = output["revision"], output["content_digest"]
+        revision, content_digest = output.get("revision"), output.get("content_digest")
         return (
             isinstance(revision, int)
             and not isinstance(revision, bool)
@@ -845,11 +845,14 @@ class ToolGateway:
         output: dict[str, Any], *, tool_name: str | None = None,
     ) -> None:
         """执行最小 JSON 输出与敏感标识符校验，防止污染 AgentState。"""
-        # content_digest 是 SHA-256 完整性摘要，可能偶然命中身份证规则。只允许
-        # Gateway 固定发布路由返回 revision/content_digest 的精确两字段形状整体豁免；
-        # 任意嵌套、额外字段、错误类型或伪造 Package manifest 均继续递归扫描。
-        if ToolGateway._is_trusted_publish_result_output(output, tool_name):
-            return
+        # content_digest 是 SHA-256 完整性摘要，可能偶然命中身份证规则。只跳过
+        # 固定发布路由顶层合法 digest 字符串；audio_object_keys、额外字段、
+        # 嵌套 digest、错误类型或伪造 Package manifest 均继续递归扫描。
+        scanned = (
+            {key: value for key, value in output.items() if key != "content_digest"}
+            if ToolGateway._is_trusted_publish_result_output(output, tool_name)
+            else output
+        )
 
         def walk(value: Any) -> None:
             if isinstance(value, str):
@@ -868,7 +871,7 @@ class ToolGateway:
                 return
             raise ValueError("TOOL_OUTPUT_INVALID")
 
-        walk(output)
+        walk(scanned)
 
     @staticmethod
     def _native_output_summary(tool_name: str, result: object) -> dict[str, object]:
