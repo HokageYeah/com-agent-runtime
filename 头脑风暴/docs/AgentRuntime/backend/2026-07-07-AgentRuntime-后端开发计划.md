@@ -1,5 +1,7 @@
 # AgentRuntime 后端 Implementation Plan
 
+> **2026-09-11 增量计划：** 默认配乐与服务器开关由[M8 R9–R11](2026-09-07-Memoir语音与配乐开发计划.md)承接，尚未实施；不新增公共底座任务，详见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md)。
+
 > **2026-09-08 M8新增入口：** [Memoir语音与配乐R6–R8计划](2026-09-07-Memoir语音与配乐开发计划.md)为本次待开发任务，输入/文件/步骤/配置/验证均在子计划。实际最新包1.0.7，M7已部署测试由用户确认；旧未部署记录保留为历史，不重新实施。M8仅新包/专属业务音频，不更改公共消息调度，尚无代码或测试完成证据。
 
 > **2026-09-01 实施轮完成（已提交至 memoir-optimize 分支）：** 本计划的通用 `bounded_loop` 节点与 `memoir_agent@1.0.5` 包已在本仓实现并全量测试通过（958 passed/16 skipped，含网关五节点注册——`generate_scene_batch` 与最终评审修复轮补齐的 `repair_coverage_gaps`——及 1.0.5 全图集成测试与 fixture pin 4 处 `1.0.4`→`1.0.5`）。改动已提交至 memoir-optimize 分支（未合并主干），未部署，目标环境注册仍为 `1.0.4`。下方 2026-08-31 横幅为冻结时点的历史记录。

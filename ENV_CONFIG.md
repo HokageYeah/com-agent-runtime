@@ -1,5 +1,7 @@
 # AgentRuntime 敏感与条件环境配置
 
+> **2026-09-11 增量待开发：** 默认配乐分支尚不存在，不能只填 env 就视为启用。下方原 M8 的音乐必填条件在增量实现后仅用于生成模式；新增变量与文件落点见本文末尾，技术主定义见[默认配乐设计](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md)。
+
 ## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；R6–R8 已实现，未部署）
 
 以下配置已在 `app/core/config.py`（Settings 字段 + `validate_memoir_audio_settings` 成组校验）、三个 env 模板（根 `.env.example` 与 `docker/backend/{test,production}.env.example` 占位）与 `docker/backend/Dockerfile`（`USER runtime` 前 apt 安装 ffmpeg/ffprobe）落地，Worker 装配入口为 `app/worker.py::configured_audio_service`（默认关闭返回 None）。真实凭据、服务开通与部署注册由运维阶段执行。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
@@ -605,3 +607,22 @@ policy:
 - **删除判据（R5 三态 + C1 成员关系，先命中先保留）**：execute 先 `fail_abandoned_keyed_jobs`（grace=保留窗，条件 UPDATE 显式保留 `updated_at`）再扫描。lease 在途保留；`submission_unknown` 账本未清保留。**仅显式完整合法 `list[str]`** 的 `audio_object_keys` 可参与成员判断：含该键 → `keep_published`（不是整 Run 已发布）；显式 `[]` 或合法清单未含该键 → 已发布未引用，落入窗检查。缺字段、`None`、非 list、任一元素非 `str` 改写为未知（先窗、超窗 `keep_unknown`，零删除），**不得**把缺字段当成空列表。窗内保留；**探测明确未发布（None）或显式未引用，且超窗**是唯一删除路径；探测失败、未注入探测口、身份不完整、缺字段/非法清单一律按未知保留人工复核。404/NoSuchKey 视为清理成功；其他删除失败计入 `delete_failed` 并继续本批。部署先 Business 查询增量，再 Runtime；旧包/回滚缺字段由代码保留，不靠部署顺序替代安全。
 - **发布探测真实装配（R5）**：未显式注入探测口时，CLI 从 `settings.business_connectors` 装配真实 `ToolGateway`（镜像 `app/worker.py` 生产装配，含对端复核 transport）；装配失败整命令拒绝执行（退出码 2），绝不降级为"无探测继续跑"。探测身份只信权威 `AgentRun.input_json`（archive_id/snapshot_id/generation_epoch），logical_key 与发布节点逐字一致——Business 按原发布幂等键精确命中才算"已发布"；Run 缺失、发布引用缺失、epoch 漂移、网关调用失败均归未知，绝不删除。需要 Business connector 配置齐全（enabled + base_url/runtime_id/key_id/secret）。
 - 输出与日志只有计数与安全枚举，不打印对象键、凭据或私有 URL。
+
+## M8 默认配乐与服务器开关（2026-09-11，待实施）
+
+本增量只有 Runtime 两个新设置，无 Business/前端新 env：
+```dotenv
+MEMOIR_MUSIC_GENERATION_ENABLED=false
+MEMOIR_DEFAULT_BGM_OBJECT_KEY=memoir-test/audios/default/memoirs.mp3
+```
+production 第二项为 `memoir/audios/default/memoirs.mp3`（无开头 /）。Settings 中 key 默认空，默认模式启用时必填；根示例及两环境模板写出正确值。源 key 须在本环境音频根的 default/ 下，拒绝跨环境、路径穿越、URL 或与生成目录重叠。
+
+`MEMOIR_AUDIO_ENABLED` 仍是音频总开关，Business Archive 资格仍控制是否有声。音频开启且生成开关 false 时：TTS 正常、默认源读取并交付作品副本；不用音乐 Action/单价/下载域名，不装配音乐 client，也不调用 GenBGM/GenBGMForTime/QuerySong。TTS Key/单价/预算、OSS、HMAC、转码依赖仍需配置。true 时保留原音乐配置/费用规则，图片 AK/SK 原用途不变。不能让音乐配置缺失关闭默认模式下的旁白。
+
+实际新增位置：`app/core/config.py`、`.env.example`、`docker/backend/test.env.example`、`docker/backend/production.env.example`。本机填根 `.env.test.local`；Docker 填 `RUNTIME_ENV_FILE` 指定私有文件，常见测试 `/usr/HokageYeah/服务端系统/env/runtime-test.env`、正式 `/usr/HokageYeah/服务端系统/env/runtime-production.env`，无 CD_ 前缀。沿现有 Compose env_file 注入，不增加 build args，也不使用 environment 空值遮蔽。相关进程需统一更新后生效，现有 Dockerfile ffmpeg/ffprobe 可复用。
+
+源由运维上传 private MP3；Runtime 只读精确 key，并在既有 background/<scope>/ 下上传 private 作品副本。追加源读取权限时核对实际有效 RAM 授权，应用凭据不得覆盖/删除源，测试凭据不跨正式前缀。Business 无需源权限，原背景/旁白四前缀不变。
+
+默认源失败只降级配乐，不转收费。副本账本按“无供应商生成调用”明确零预留/零结算，不伪造 TaskID/请求秒数，不以假单价0隐藏未知费用；OSS 请求/存储/流量仍计费。源不进入发布清单或可清理 ledger.object_key。
+
+切换模式或更换源前暂停新增工作并排空音频 Run/上传，再统一更新进程；已发布作品不换曲。同 Run 恢复若出现不同 BGM 输入，不重新提交收费，保守降级，原未知发布保留规则不变。完整恢复边界见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md) §4；实施任务为 R9–R11，真实源/权限/试听与收费模式验证仍需人工。
