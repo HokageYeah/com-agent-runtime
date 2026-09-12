@@ -13,6 +13,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -137,18 +138,113 @@ class _FakePutResult:
     status_code = 200
 
 
-class _RecordingOSSClient:
-    """记录 PutObjectRequest 的假 OSS client；不触网。"""
+class _StreamBodyStub:
+    """真实 SDK StreamBodyReader 同签名替身（离线复现 D1 失败形状）。
 
-    def __init__(self, *, exc: Exception | None = None) -> None:
+    - read() 不接受 size 参数：本机安装的 alibabacloud_oss_v2 的
+      StreamBodyReader.read(self) 无参，传 size 即 TypeError（独立复核
+      记录 2026-09-12 D1）。旧实现的 read(max_bytes + 1) 对本替身必然
+      TypeError → 被误映射为 AUDIO_SOURCE_READ_FAILED。
+    - iter_bytes(block_size=...) 分块产出：有界分块读取的唯一合法入口。
+    - close() 幂等并记录：验证成功 / 异常 / 超限 / 超时路径都释放响应体。
+    """
+
+    def __init__(
+        self, chunks: list[bytes], *, chunk_delay_seconds: float = 0.0
+    ) -> None:
+        self._chunks = list(chunks)
+        self._chunk_delay_seconds = chunk_delay_seconds
+        self.closed = False
+        self.close_count = 0
+        self.consumed_chunks = 0
+        self.iter_kwargs: dict[str, Any] | None = None
+
+    def read(self) -> bytes:
+        # 真实签名：read(self) 无 size 参数；带参调用直接 TypeError。
+        data = b"".join(self._chunks)
+        self._chunks = []
+        return data
+
+    def iter_bytes(self, **kwargs: Any):
+        # 与 SDK 一致接受关键字参数；记录 block_size 供断言有界分块。
+        self.iter_kwargs = dict(kwargs)
+        for chunk in self._chunks:
+            if self._chunk_delay_seconds > 0:
+                time.sleep(self._chunk_delay_seconds)
+            if self.closed:
+                # 模拟底层响应被关闭后在途读取中断（真实 SDK 会抛出）。
+                raise OSError("response body closed while streaming")
+            self.consumed_chunks += 1
+            yield chunk
+
+    def close(self) -> None:
+        # 幂等关闭：调用方超时路径与工作线程 finally 都可能关闭。
+        self.close_count += 1
+        self.closed = True
+
+
+class _FakeGetResult:
+    """假 GetObject 返回：body 为真实 SDK StreamBodyReader 同签名替身。"""
+
+    def __init__(self, body: _StreamBodyStub) -> None:
+        self.body = body
+        self.status_code = 200
+
+
+class _RecordingOSSClient:
+    """记录 Put/Get 请求的假 OSS client；不触网。
+
+    forbidden 记录越权方法调用（delete/改 ACL）：默认源读取合同要求
+    download 路径绝不出现删除/写入/改 ACL 副作用。get_body 自动切成
+    4 字节小块以覆盖分块重组；get_chunks 显式指定块序列（超限中途
+    中断等精确场景）；chunk_delay_seconds 模拟慢流 / 阻塞读。
+    """
+
+    def __init__(
+        self,
+        *,
+        exc: Exception | None = None,
+        get_body: bytes = b"",
+        get_chunks: list[bytes] | None = None,
+        get_exc: Exception | None = None,
+        get_delay_seconds: float = 0.0,
+        chunk_delay_seconds: float = 0.0,
+    ) -> None:
         self.requests: list[Any] = []
+        self.get_requests: list[Any] = []
+        self.forbidden: list[str] = []
+        self.last_body: _StreamBodyStub | None = None
         self._exc = exc
+        self._get_exc = get_exc
+        self._get_delay_seconds = get_delay_seconds
+        if get_chunks is None:
+            get_chunks = [
+                get_body[index : index + 4] for index in range(0, len(get_body), 4)
+            ]
+        self._body = _StreamBodyStub(
+            get_chunks, chunk_delay_seconds=chunk_delay_seconds
+        )
 
     def put_object(self, request: Any) -> _FakePutResult:
         self.requests.append(request)
         if self._exc is not None:
             raise self._exc
         return _FakePutResult()
+
+    def get_object(self, request: Any) -> _FakeGetResult:
+        self.get_requests.append(request)
+        if self._get_delay_seconds > 0:
+            time.sleep(self._get_delay_seconds)
+        if self._get_exc is not None:
+            raise self._get_exc
+        self.last_body = self._body
+        return _FakeGetResult(self._body)
+
+    def delete_object(self, *args: Any, **kwargs: Any) -> None:
+        self.forbidden.append("delete_object")
+
+    def put_object_acl(self, *args: Any, **kwargs: Any) -> None:
+        self.forbidden.append("put_object_acl")
 
 
 def _uploader(client: _RecordingOSSClient) -> AliyunAudioOSSUploader:
@@ -203,6 +299,159 @@ def test_private_upload_requires_config() -> None:
     with pytest.raises(MemoirAudioStorageError) as excinfo:
         AliyunAudioOSSUploader(access_key_id="", access_key_secret="", bucket="", endpoint="")
     assert excinfo.value.code == "AUDIO_UPLOAD_CONFIG_INVALID"
+
+
+# ---------------------------------------------------------------------------
+# 默认源私有读取（freeze 2026-09-11 §3）：精确 key、有界字节、有界超时、只读
+# ---------------------------------------------------------------------------
+
+DEFAULT_SOURCE_KEY = "memoir-test/audios/default/memoirs.mp3"
+
+
+def test_download_private_bytes_reads_exact_key_bounded() -> None:
+    """默认源读取：精确 key GetObject 返回原始字节；空字节原样放行。"""
+    client = _RecordingOSSClient(get_body=b"\xff\xfb-mock-default-bgm")
+    data = _uploader(client).download_private_bytes(
+        DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=5.0
+    )
+    assert data == b"\xff\xfb-mock-default-bgm"
+    assert len(client.get_requests) == 1
+    request = client.get_requests[0]
+    assert request.bucket == "memoir-audio-bucket-test"
+    assert request.key == DEFAULT_SOURCE_KEY
+    # 只读合同：download 路径绝不 put / delete / 改 ACL。
+    assert client.requests == []
+    assert client.forbidden == []
+    # 空字节允许返回（拒绝是转码入口 AUDIO_TRANSCODE_INPUT_INVALID 的职责）。
+    empty_client = _RecordingOSSClient(get_body=b"")
+    assert _uploader(empty_client).download_private_bytes(
+        DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=5.0
+    ) == b""
+
+
+def test_download_private_bytes_maps_not_found_without_key_leak() -> None:
+    """源缺失/NoSuchKey/404 → AUDIO_SOURCE_NOT_FOUND，消息不回显 key。"""
+    client = _RecordingOSSClient(get_exc=RuntimeError("NoSuchKey 404"))
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=5.0
+        )
+    assert excinfo.value.code == "AUDIO_SOURCE_NOT_FOUND"
+    assert DEFAULT_SOURCE_KEY not in str(excinfo.value)
+
+
+def test_download_private_bytes_access_denied_uses_dedicated_code() -> None:
+    """403 类拒绝 → AUDIO_SOURCE_ACCESS_DENIED（不得复用上传侧枚举）。"""
+    client = _RecordingOSSClient(get_exc=RuntimeError("AccessDenied 403"))
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=5.0
+        )
+    assert excinfo.value.code == "AUDIO_SOURCE_ACCESS_DENIED"
+    assert excinfo.value.code != "AUDIO_UPLOAD_ACCESS_DENIED"
+
+
+def test_download_private_bytes_timeout_is_bounded() -> None:
+    """调用方传入的超时生效：读取挂起时立即映射 AUDIO_SOURCE_READ_TIMEOUT。"""
+    client = _RecordingOSSClient(get_delay_seconds=0.5)
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=0.05
+        )
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+
+
+def test_download_private_bytes_enforces_byte_cap() -> None:
+    """超出调用方字节上限立即中断，复用 AUDIO_FILE_TOO_LARGE。"""
+    client = _RecordingOSSClient(get_body=b"x" * 11)
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=5.0
+        )
+    assert excinfo.value.code == "AUDIO_FILE_TOO_LARGE"
+
+
+def test_download_private_bytes_generic_failure_maps_safe_code() -> None:
+    """其他 SDK 失败沿用兜底风格：安全枚举且不泄露凭据。"""
+    client = _RecordingOSSClient(get_exc=RuntimeError("boom sk-audio-test"))
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=5.0
+        )
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_FAILED"
+    assert "sk-audio-test" not in str(excinfo.value)
+
+
+def test_download_private_bytes_streams_sdk_body_bounded_and_closes() -> None:
+    """D1 回归：真实 SDK StreamBodyReader 形状（read() 无参）下成功读取。
+
+    修复前 read(max_bytes + 1) 对该形状必然 TypeError，被误标
+    AUDIO_SOURCE_READ_FAILED；修复后必须走 iter_bytes(block_size=...)
+    有界分块重组原始字节，成功路径同样 finally 关闭响应体。
+    """
+    client = _RecordingOSSClient(get_body=b"\xff\xfb-mock-default-bgm")
+    data = _uploader(client).download_private_bytes(
+        DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=5.0
+    )
+    assert data == b"\xff\xfb-mock-default-bgm"
+    body = client.last_body
+    assert body is not None
+    # 有界分块入口被使用，且块大小有界（不允许无界 read 后查长度）。
+    assert body.iter_kwargs is not None
+    block_size = body.iter_kwargs.get("block_size")
+    assert isinstance(block_size, int) and 0 < block_size <= 1024 * 1024
+    # 成功路径也释放响应体。
+    assert body.closed is True
+    assert client.forbidden == []
+
+
+def test_download_private_bytes_over_limit_stops_mid_stream_and_closes() -> None:
+    """D1 回归：超限在流式中途立即中断（不做无界整读后查长度）。
+
+    3 块 × 6 字节、上限 10：第 2 块累计 12 > 10 即 AUDIO_FILE_TOO_LARGE，
+    第 3 块绝不被消费，响应体被关闭。
+    """
+    client = _RecordingOSSClient(get_chunks=[b"a" * 6, b"b" * 6, b"c" * 6])
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=10, timeout_seconds=5.0
+        )
+    assert excinfo.value.code == "AUDIO_FILE_TOO_LARGE"
+    body = client.last_body
+    assert body is not None
+    assert body.consumed_chunks == 2
+    assert body.closed is True
+
+
+def test_download_private_bytes_slow_stream_returns_on_time_and_releases() -> None:
+    """D1 回归：阻塞慢流下调用方按期返回并尽力释放响应体。
+
+    每块延迟 0.15s × 10 块（全流 ≥ 1.5s），期限 0.3s：调用方必须按期
+    拿到 AUDIO_SOURCE_READ_TIMEOUT（超时只是停止等待，不证明底层读取
+    已停止）。释放断言用有界等待：holder 已回填时调用方同步 close；
+    极端调度延迟下（工作线程尚未拿到响应体）由工作线程 finally 兜底
+    关闭——两条路径都必然释放，这里只验证"必然被释放"这一确定事实。
+    """
+    client = _RecordingOSSClient(
+        get_chunks=[b"x" * 4 for _ in range(10)], chunk_delay_seconds=0.15
+    )
+    started = time.monotonic()
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=0.3
+        )
+    elapsed = time.monotonic() - started
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+    # 调用方按期返回：远小于不限时读完全流所需时间（≥ 1.5s）。
+    assert elapsed < 1.0
+    body = client.last_body
+    assert body is not None
+    # 超时路径释放响应体：调用方同步 close 或工作线程 finally 兜底。
+    release_deadline = time.monotonic() + 3.0
+    while not body.closed and time.monotonic() < release_deadline:
+        time.sleep(0.02)
+    assert body.closed is True
+    assert client.forbidden == []
 
 
 # ---------------------------------------------------------------------------
@@ -601,15 +850,20 @@ def test_audio_settings_disabled_by_default_passes() -> None:
 
 
 def test_audio_settings_enabled_requires_full_configuration() -> None:
-    """启用时缺任一必需项报安全错误并列出字段名，不回显值。"""
+    """启用时缺任一基础必需项报安全错误并列出字段名，不回显值。
+
+    拆分后合同（freeze 2026-09-11 §2）：默认模式（生成开关关闭）缺
+    MEMOIR_DEFAULT_BGM_OBJECT_KEY 同样拒绝；Action/音乐单价/host 白名单
+    仅生成模式必填，不再出现在默认模式缺失列表。
+    """
     with pytest.raises(ValueError) as excinfo:
         validate_memoir_audio_settings(_audio_settings(MEMOIR_AUDIO_ENABLED=True))
     message = str(excinfo.value)
     for field in (
         "MEMOIR_TTS_API_KEY",
-        "MEMOIR_MUSIC_ACTION",
+        "VOLCANO_CV_ACCESS_KEY",
+        "VOLCANO_CV_SECRET_KEY",
         "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS",
-        "MEMOIR_MUSIC_PRICE_PER_SECOND",
         "MEMOIR_AUDIO_MAX_COST_PER_RUN",
         "MEMOIR_AUDIO_COST_CURRENCY",
         "MEMORY_AUDIO_OSS_BUCKET",
@@ -617,7 +871,7 @@ def test_audio_settings_enabled_requires_full_configuration() -> None:
         "MEMOIR_AUDIO_INPUT_HMAC_KEY",
         "MEMORY_AUDIO_NARRATOR_PREFIX",
         "MEMORY_AUDIO_BACKGROUND_PREFIX",
-        "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON",
+        "MEMOIR_DEFAULT_BGM_OBJECT_KEY",
     ):
         assert field in message
 
@@ -626,6 +880,8 @@ def test_audio_settings_enabled_full_config_passes_and_bad_values_rejected() -> 
     """完整配置通过；未知价格填 0 之外的非法值、非法前缀、坏 Action 拒绝。"""
     valid = dict(
         MEMOIR_AUDIO_ENABLED=True,
+        MEMOIR_MUSIC_GENERATION_ENABLED=True,
+        MEMOIR_DEFAULT_BGM_OBJECT_KEY="memoir-test/audios/default/memoirs.mp3",
         MEMOIR_TTS_API_KEY="key-test",
         MEMOIR_MUSIC_ACTION="GenBGM",
         VOLCANO_CV_ACCESS_KEY="ak",
@@ -664,6 +920,8 @@ def test_audio_settings_production_rejects_test_prefixes() -> None:
     """生产环境拒绝 memoir-test/ 前缀；测试环境拒绝正式前缀混用。"""
     base = dict(
         MEMOIR_AUDIO_ENABLED=True,
+        MEMOIR_MUSIC_GENERATION_ENABLED=True,
+        MEMOIR_DEFAULT_BGM_OBJECT_KEY="memoir-test/audios/default/memoirs.mp3",
         MEMOIR_TTS_API_KEY="key-test",
         MEMOIR_MUSIC_ACTION="GenBGM",
         VOLCANO_CV_ACCESS_KEY="ak",

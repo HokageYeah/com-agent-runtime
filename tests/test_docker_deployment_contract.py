@@ -195,6 +195,17 @@ def test_env_templates_carry_m8_audio_placeholders_per_environment() -> None:
     assert "MEMORY_AUDIO_BACKGROUND_PREFIX=memoir-test/audios/background/" in test_template
     assert "MEMORY_AUDIO_NARRATOR_PREFIX=memoir/audios/narrator/" in production_template
     assert "MEMORY_AUDIO_BACKGROUND_PREFIX=memoir/audios/background/" in production_template
+    # M8 默认配乐：生成子开关两环境默认关闭；默认源 key 按环境固定且互不混用。
+    assert "MEMOIR_MUSIC_GENERATION_ENABLED=false" in test_template
+    assert "MEMOIR_MUSIC_GENERATION_ENABLED=false" in production_template
+    assert (
+        "MEMOIR_DEFAULT_BGM_OBJECT_KEY=memoir-test/audios/default/memoirs.mp3"
+        in test_template
+    )
+    assert (
+        "MEMOIR_DEFAULT_BGM_OBJECT_KEY=memoir/audios/default/memoirs.mp3"
+        in production_template
+    )
     # 生产模板不得使用测试前缀。
     assert "memoir-test/" not in production_template
 

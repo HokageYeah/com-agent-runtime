@@ -32,7 +32,9 @@ import shutil
 import signal
 import socket
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
+from concurrent import futures
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -155,8 +157,18 @@ def _region_from_endpoint(endpoint: str) -> str:
     return first[4:] if first.startswith("oss-") else first
 
 
+# D1：分块读取的块大小上限（1 MiB）。真实 SDK StreamBodyReader 的
+# iter_bytes(block_size=...) 逐块产出；块本身有界，累计上限由调用方
+# max_bytes 在每块并入前判定，内存占用绝不超过 max_bytes + 单块。
+_DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 class AliyunAudioOSSUploader:
-    """音频私有上传器：上传即 private，无公共读路径、无预签名职责。"""
+    """音频私有上传器：上传即 private，无公共读路径、无预签名职责。
+
+    M8 默认配乐新增只读通道 `download_private_bytes`：对精确默认源 key
+    做有界 GetObject——只读，绝不 delete / put / 改 ACL。
+    """
 
     def __init__(
         self,
@@ -238,12 +250,167 @@ class AliyunAudioOSSUploader:
             "Memoir 音频私有上传完成，size=%d，code=AUDIO_UPLOAD_DONE", len(data)
         )
 
+    def download_private_bytes(
+        self, object_key: str, *, max_bytes: int, timeout_seconds: float
+    ) -> bytes:
+        """默认源私有读取（freeze 2026-09-11 §3 + D1 修复）：对精确 key 有界 GetObject。
+
+        只读合同：不 delete / put / 改 ACL。字节上限与超时均由调用方传入
+        （上限对齐 MEMOIR_AUDIO_MAX_FILE_BYTES，超时为节点剩余时间），
+        超限/超时立即中断失败。空字节允许返回（拒绝是转码入口的职责）。
+
+        超时语义（D1 如实表述）：future.result(timeout) 超时只是"停止等待"，
+        不证明底层读取已停止，也不强杀线程；调用方通过共享 body holder
+        尽力 close 响应体打断在途读，后台读取由连接超时与资源释放约束
+        最终收敛，调用方绝不因后台读取而阻塞。
+        """
+        if not isinstance(object_key, str) or not object_key:
+            raise MemoirAudioStorageError("AUDIO_OBJECT_KEY_INVALID", "对象键为空")
+        if max_bytes <= 0 or timeout_seconds <= 0:
+            raise MemoirAudioStorageError("AUDIO_SOURCE_READ_FAILED", "读取上限或超时非法")
+        client, oss = self._ensure_client()
+        # 共享 holder：工作线程拿到响应体后回填；超时路径据此同步尽力释放。
+        body_holder: list[Any] = []
+        executor = futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            worker = executor.submit(
+                self._get_object_bytes,
+                client,
+                oss,
+                object_key,
+                max_bytes,
+                timeout_seconds,
+                body_holder,
+            )
+            try:
+                return worker.result(timeout=timeout_seconds)
+            except futures.TimeoutError:
+                # 尽力打断在途读：close 已到手的响应体（幂等；get_object
+                # 尚未返回时 holder 为空，无需释放）。线程不杀、不等待。
+                if body_holder:
+                    self._close_response_body_best_effort(body_holder[0])
+                logger.warning(
+                    "Memoir 音频默认源读取超时，code=AUDIO_SOURCE_READ_TIMEOUT"
+                )
+                raise MemoirAudioStorageError(
+                    "AUDIO_SOURCE_READ_TIMEOUT", "默认音频源读取超时"
+                ) from None
+        finally:
+            # 不等待超时后仍在读的线程：调用方绝不因后台读取而阻塞。
+            executor.shutdown(wait=False)
+
+    @staticmethod
+    def _close_response_body_best_effort(body: Any) -> None:
+        """尽力释放响应体（幂等；失败仅记日志，绝不影响安全错误码）。"""
+        try:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+        except Exception:
+            # 关闭失败只记调试日志：不能吞掉真正的超时/读取错误码。
+            logger.debug(
+                "Memoir 音频默认源响应体关闭失败（尽力释放路径）", exc_info=True
+            )
+
+    def _get_object_bytes(
+        self,
+        client: Any,
+        oss: Any,
+        object_key: str,
+        max_bytes: int,
+        timeout_seconds: float,
+        body_holder: list[Any],
+    ) -> bytes:
+        """分块有界读取 GetObject 字节；失败只映射安全枚举。
+
+        D1 边界：真实 SDK 响应体是 StreamBodyReader，read() 无 size 参数，
+        传参即 TypeError（被误标 READ_FAILED 的根因）；唯一合法入口是
+        iter_bytes(block_size=...)。累计缓冲字节数绝不超过 max_bytes（每块
+        并入前判上限，超限在流中途立即中断，不做无界整读后查长度）；每块
+        之间按 monotonic 剩余期限检查；成功/异常/超限/超时四条路径都
+        finally 关闭响应体。
+        """
+        deadline = time.monotonic() + timeout_seconds
+        body: Any = None
+        try:
+            result = client.get_object(
+                oss.GetObjectRequest(bucket=self._bucket, key=object_key)
+            )
+            body = getattr(result, "body", None)
+            # 回填共享 holder：让超时路径能在等待放弃后同步释放响应体。
+            if body_holder:
+                body_holder[0] = body
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in body.iter_bytes(block_size=_DOWNLOAD_CHUNK_BYTES):
+                total += len(chunk)
+                if total > max_bytes:
+                    logger.warning(
+                        "Memoir 音频默认源超过字节上限，cap=%d，code=AUDIO_FILE_TOO_LARGE",
+                        max_bytes,
+                    )
+                    raise MemoirAudioStorageError(
+                        "AUDIO_FILE_TOO_LARGE", "默认音频源超过字节上限"
+                    )
+                chunks.append(chunk)
+                if time.monotonic() >= deadline:
+                    # 块级期限：单块之间兜底，避免慢流无限占用工作线程。
+                    logger.warning(
+                        "Memoir 音频默认源读取超时，code=AUDIO_SOURCE_READ_TIMEOUT"
+                    )
+                    raise MemoirAudioStorageError(
+                        "AUDIO_SOURCE_READ_TIMEOUT", "默认音频源读取超时"
+                    )
+            data = b"".join(chunks)
+            logger.info(
+                "Memoir 音频默认源读取完成，size=%d，code=AUDIO_SOURCE_READ_DONE", len(data)
+            )
+            return data
+        except MemoirAudioStorageError:
+            # 主动抛出的安全码（超限/块级超时）不得落入通用兜底被重映射。
+            raise
+        except Exception as exc:
+            self._raise_safe_source_error(exc)
+        finally:
+            # 四条路径统一释放：成功读完、SDK 异常、超限中断、块级超时。
+            if body is not None:
+                self._close_response_body_best_effort(body)
+
+    @staticmethod
+    def _raise_safe_source_error(exc: Exception) -> None:
+        """把 OSS 读取异常映射为安全枚举（消息不含 key/凭据/配置值）。"""
+        raw_message = str(exc)
+        if "NoSuchKey" in raw_message or "404" in raw_message:
+            logger.warning("Memoir 音频默认源不存在，code=AUDIO_SOURCE_NOT_FOUND")
+            raise MemoirAudioStorageError(
+                "AUDIO_SOURCE_NOT_FOUND", "默认音频源不存在"
+            ) from exc
+        if (
+            "AccessDenied" in raw_message
+            or "403" in raw_message
+            or "0016-00000901" in raw_message
+        ):
+            logger.warning("Memoir 音频默认源读取被拒绝，code=AUDIO_SOURCE_ACCESS_DENIED")
+            raise MemoirAudioStorageError(
+                "AUDIO_SOURCE_ACCESS_DENIED", "OSS 拒绝读取默认音频源"
+            ) from exc
+        logger.warning("Memoir 音频默认源读取失败，code=AUDIO_SOURCE_READ_FAILED")
+        raise MemoirAudioStorageError(
+            "AUDIO_SOURCE_READ_FAILED", "OSS 读取默认音频源失败"
+        ) from exc
+
 
 class _SdkStub:
-    """注入假 client 时的占位命名空间：PutObjectRequest 与 SDK 同形。"""
+    """注入假 client 时的占位命名空间：请求对象与 SDK 同形。"""
 
     class PutObjectRequest:
         """以关键字参数构造、属性暴露的请求对象（与 SDK 字段一致）。"""
+
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    class GetObjectRequest:
+        """同款 **kwargs 存属性的读取请求对象（与 PutObjectRequest 一致）。"""
 
         def __init__(self, **kwargs: Any) -> None:
             self.__dict__.update(kwargs)

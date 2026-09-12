@@ -30,7 +30,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.tool_security import tool_signature
 from app.models import AgentRun
-from app.models.memoir_audio_job import NO_SEGMENT_INDEX, MemoirAudioJob
+from app.models.memoir_audio_job import (
+    NO_SEGMENT_INDEX,
+    WORK_SCENE_ID,
+    MemoirAudioJob,
+)
 from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.scripts.memoir_audio_maintenance import (
     PublishStateUnknownError,
@@ -39,7 +43,9 @@ from app.scripts.memoir_audio_maintenance import (
     run_maintenance,
 )
 from app.services.memoir.memoir_audio_jobs import (
+    ROLE_BACKGROUND_MUSIC,
     ROLE_NARRATION,
+    STATE_FAILED,
     STATE_RESERVED,
     STATE_SUBMISSION_UNKNOWN,
     STATE_UPLOADED,
@@ -1055,6 +1061,103 @@ def test_execute_reaps_abandoned_then_classifies(
         assert job.state == "cleaned"
 
 
+def _seed_keyless_default_bgm(
+    session: Session,
+    *,
+    expires_at: datetime,
+    state: str = STATE_RESERVED,
+    attempt: int = 1,
+) -> MemoirAudioJob:
+    """直接造默认 BGM 零费无键槽（freeze §11.3 D4 收敛测试专用）。
+
+    形状与生产卡死行一致：reserved、无 object_key、无 provider_task_id、
+    reserved_cost=0、lease 过保留窗——fail_abandoned_keyed_jobs 因无键
+    不收割、service 恢复因非终态不复活，正是 D4 要收敛的缺口形状
+    （确定性转码失败 / 进程中断在 record_object_key 之前崩溃的窗口）。
+    """
+    job = MemoirAudioJob(
+        job_id="job-bgm-keyless",
+        business_id="archive-1",
+        run_id="run-1",
+        generation_epoch=3,
+        package_version="1.0.8",
+        role=ROLE_BACKGROUND_MUSIC,
+        scene_id=WORK_SCENE_ID,
+        segment_index=NO_SEGMENT_INDEX,
+        input_hmac="hmac-bgm-default",
+        attempt=attempt,
+        state=state,
+        object_key=None,
+        reserved_cost=Decimal("0"),
+        currency="CNY",
+        lease_owner="worker-a",
+        lease_token=1,
+        expires_at=expires_at,
+        updated_at=datetime.now(UTC) - timedelta(hours=30),
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return job
+
+
+def test_execute_converges_keyless_expired_default_bgm_slot(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """D4（freeze §11.3）：无键过期零费默认槽必须有界收敛。
+
+    过保留窗的无键 reserved 默认槽：execute 维护轮收割为 failed 且
+    settled_cost=0（终结 + 零费结算）——后续生成请求经 reserve_job
+    复活重试（attempt+1、lease fence 旋转，见 service 侧
+    test_default_mode_recovers_settled_zero_fee_failed_slot），attempt
+    达上限后自然终态。不得永久停留 reserved/待对账。
+    """
+    with session_factory() as session:
+        job = _seed_keyless_default_bgm(
+            session, expires_at=datetime.now(UTC) - timedelta(hours=25)
+        )
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            now=datetime.now(UTC),
+            publish_probe=_FixedProbe(None),
+        )
+        # 无键行不进孤儿扫描、无对象可删：唯一断点是状态收敛本身。
+        assert report.scanned == 0
+        assert deleter.deleted == []
+        session.refresh(job)
+        assert job.state == STATE_FAILED
+        assert job.error_code == "AUDIO_LEASE_ABANDONED"
+        assert job.settled_cost == Decimal("0")
+
+
+def test_keyless_default_bgm_live_lease_not_converged(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """lease 未过期的无键默认槽：worker 可能仍在写，维护轮不得收割。"""
+    with session_factory() as session:
+        job = _seed_keyless_default_bgm(
+            session, expires_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        deleter = _FakeDeleter()
+        run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            now=datetime.now(UTC),
+            publish_probe=_FixedProbe(None),
+        )
+        session.refresh(job)
+        assert job.state == STATE_RESERVED
+        assert job.settled_cost is None
+
+
 def test_end_to_end_timeout_reaper_and_membership(tmp_path: Any) -> None:
     """真实 generate + 真实账本 + reaper + 维护分类（含键/不含键）。
 
@@ -1151,3 +1254,59 @@ def test_end_to_end_timeout_reaper_and_membership(tmp_path: Any) -> None:
     finally:
         harness.session.close()
         harness.engine.dispose()
+
+
+def test_default_bgm_orphan_cleanup_uses_copy_key_only(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """M8 默认配乐最小断言（freeze 2026-09-11 §6）：清理台账只按副本 key 工作。
+
+    默认 BGM 账本行的 object_key 只能是独立副本键（源 key 永不入账本），
+    维护对账与删除因此天然只作用于副本；源 key 绝不出现在删除口。
+    """
+    source_key = "memoir-test/audios/default/memoirs.mp3"
+    copy_key = "memoir-test/audios/background/some-scope/bgm-abc123.mp3"
+    with session_factory() as session:
+        _seed_agent_run(session, run_id="run-default-bgm")
+        job = MemoirAudioJob(
+            # 零费默认槽形状：reserved_cost=0 / settled_cost=0 / 无 TaskID / 无秒数。
+            job_id="job-default-bgm-1",
+            business_id="archive-1",
+            run_id="run-default-bgm",
+            generation_epoch=3,
+            package_version="1.0.8",
+            role=ROLE_BACKGROUND_MUSIC,
+            scene_id=WORK_SCENE_ID,
+            segment_index=NO_SEGMENT_INDEX,
+            input_hmac="hmac-default-bgm",
+            attempt=1,
+            state=STATE_UPLOADED,
+            object_key=copy_key,
+            mime="audio/mpeg",
+            duration_ms=47_777,
+            reserved_cost=Decimal("0"),
+            settled_cost=Decimal("0"),
+            requested_music_seconds=None,
+            provider_task_id=None,
+            currency="CNY",
+            lease_owner="worker-a",
+            lease_token=1,
+            updated_at=datetime.now(UTC) - timedelta(hours=30),
+        )
+        session.add(job)
+        session.commit()
+
+        deleter = _FakeDeleter()
+        report = run_maintenance(
+            session,
+            oss_deleter=deleter,
+            retention_hours=24,
+            limit=100,
+            execute=True,
+            publish_probe=_FakeProbe(unpublished=frozenset({copy_key})),
+        )
+
+        assert report.deleted == 1
+        # 删除口只收到副本 key；默认源 key 绝不被维护路径触碰。
+        assert deleter.deleted == [copy_key]
+        assert source_key not in deleter.deleted

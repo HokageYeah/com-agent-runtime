@@ -272,7 +272,9 @@ def run_maintenance(
        → 状态未知，保留人工复核，绝不自动删。
 
     execute=True 时先 fail_abandoned_keyed_jobs（grace=保留窗），再扫描，
-    本轮收割的 failed 行立刻进入视野。dry-run 零写入（含不 reap）。
+    本轮收割的 failed 行立刻进入视野；随后 fail_abandoned_keyless_default_jobs
+    把过窗无键零费默认槽终结为 failed + settled=0（§11.3 有界收敛，
+    无对象可删、不进孤儿扫描）。dry-run 零写入（含不 reap）。
     """
     moment = now or datetime.now(UTC)
     service = MemoirAudioJobsService(session)
@@ -280,6 +282,13 @@ def run_maintenance(
     # dry-run 连 reap 也不跑，保证零写入。
     if execute:
         service.fail_abandoned_keyed_jobs(
+            now=moment,
+            grace_seconds=float(retention_hours) * 3600.0,
+        )
+        # D4（freeze §11.3）：过窗无键零费默认槽一并终结为 failed +
+        # settled=0——没有对象可清，但不得永久停留 reserved；收敛后
+        # 后续生成请求可复活重试（attempt 上限内）或自然终态。
+        service.fail_abandoned_keyless_default_jobs(
             now=moment,
             grace_seconds=float(retention_hours) * 3600.0,
         )

@@ -149,7 +149,10 @@ class PublishingToolGateway:
         self.published_documents.append(args[5])  # type: ignore[index]
         return {"revision": 1, "content_digest": "published-digest"}
 
-    def get_publish_result(self, *args: object) -> dict[str, object]:
+    def get_publish_result(self, *args: object, **kwargs: object) -> dict[str, object]:
+        # **kwargs：生产 publish 节点以 tool_context= 关键字传参（query-after-commit
+        # 对账路径）；替身签名缺 **kwargs 曾使恢复用例在 publish_document 节点
+        # 抛 TypeError → WORKFLOW_NODE_FAILED（历史红，本批修复）。
         return {"revision": 1, "content_digest": "published-digest"}
 
 
@@ -212,23 +215,42 @@ class FakeMusicClient:
 
 
 class FakeUploader:
-    """私有上传桩：记录 (object_key, mime)；私有 ACL 语义由 R6 测试覆盖。"""
+    """私有上传/默认源读取桩：记录上传与读源（默认配乐模式）；私有 ACL
+    语义由 R6 测试覆盖。"""
+
+    # 默认配乐源（freeze 2026-09-11）：同环境音频根 default/ 目录 .mp3。
+    DEFAULT_BGM_SOURCE_KEY = "memoir-test/audios/default/memoirs.mp3"
+    DEFAULT_BGM_SOURCE_BYTES = b"default-bgm-source-mp3-bytes"
 
     def __init__(self) -> None:
         self.uploads: list[tuple[str, str]] = []
+        self.downloads: list[str] = []
 
     def upload_private_bytes(self, data: bytes, object_key: str, mime: str) -> None:
         self.uploads.append((object_key, mime))
 
+    def download_private_bytes(
+        self, object_key: str, *, max_bytes: int, timeout_seconds: float
+    ) -> bytes:
+        self.downloads.append(object_key)
+        return self.DEFAULT_BGM_SOURCE_BYTES
+
 
 class FakeTranscoder:
-    """转码桩：拼接/转码恒成功，时长确定性输出（真实 ffmpeg 由 R6 测试覆盖）。"""
+    """转码桩：拼接/转码恒成功，时长确定性输出（真实 ffmpeg 由 R6 测试覆盖）。
+
+    bgm_duration_ms 可注入奇特整数毫秒：证明默认配乐时长来自实测转码
+    而非协议默认 60s。
+    """
+
+    def __init__(self, *, bgm_duration_ms: int = 60000) -> None:
+        self._bgm_duration_ms = bgm_duration_ms
 
     async def concat_mp3_segments(self, segments: list[bytes]) -> SimpleNamespace:
         return SimpleNamespace(audio=b"joined-mp3", duration_ms=4200)
 
     async def transcode_to_mp3(self, data: bytes) -> SimpleNamespace:
-        return SimpleNamespace(audio=b"bgm-mp3", duration_ms=60000)
+        return SimpleNamespace(audio=b"bgm-mp3", duration_ms=self._bgm_duration_ms)
 
 
 class FakeDownloader:
@@ -252,8 +274,10 @@ def _cost_policy() -> MemoirAudioCostPolicy:
     )
 
 
-def _audio_config() -> MemoirAudioConfig:
-    return MemoirAudioConfig(
+def _audio_config(**overrides: object) -> MemoirAudioConfig:
+    # 默认构造为付费生成模式（与既有付费路径用例一致）；默认配乐模式
+    # 用例显式覆盖 music_generation_enabled=False + default_bgm_object_key。
+    values: dict[str, object] = dict(
         narrator_prefix=NARRATOR_PREFIX,
         background_prefix=BACKGROUND_PREFIX,
         scope_hmac_key=SCOPE_KEY,
@@ -261,22 +285,33 @@ def _audio_config() -> MemoirAudioConfig:
         publish_reserve_seconds=30.0,
         scene_concurrency=2,
         worker_concurrency=4,
+        music_generation_enabled=True,
         music_poll_interval_seconds=0.01,
         music_duration_seconds=60,
         tts_request_timeout_seconds=45.0,
     )
+    values.update(overrides)
+    return MemoirAudioConfig(**values)  # type: ignore[arg-type]
 
 
-def _audio_service(session: Session, tts: FakeTTSClient, music: FakeMusicClient,
-                   uploader: FakeUploader, downloader: FakeDownloader) -> MemoirAudioService:
+def _audio_service(
+    session: Session,
+    tts: FakeTTSClient,
+    music: FakeMusicClient,
+    uploader: FakeUploader,
+    downloader: FakeDownloader,
+    *,
+    config: MemoirAudioConfig | None = None,
+    transcoder: FakeTranscoder | None = None,
+) -> MemoirAudioService:
     return MemoirAudioService(
         tts_client=tts,
         music_client=music,
         uploader=uploader,
-        transcoder=FakeTranscoder(),
+        transcoder=transcoder or FakeTranscoder(),
         downloader=downloader,
         jobs_service=MemoirAudioJobsService(session, _cost_policy()),
-        config=_audio_config(),
+        config=config or _audio_config(),
         session=session,
     )
 
@@ -430,6 +465,79 @@ def test_full_graph_publishes_2_0_0_document_with_complete_audio() -> None:
     assert budget.reserved_total_cost == expected_reserved
 
 
+def test_full_graph_default_bgm_mode_publishes_background_copy_entry() -> None:
+    """默认配乐模式（freeze 2026-09-11 §6）：2.0.0 文档含 background 副本条目。
+
+    副本键落现行 background 工作目录（随机不透明名，绝不共享源 key）；
+    时长来自实测转码（奇特整数毫秒，非默认 60s）；账本零费结算
+    settled_cost=0、requested_music_seconds=None；零火山提交/查询/下载；
+    源 key 永不进入上传。
+    """
+    tts, music, uploader, downloader = (
+        FakeTTSClient(), FakeMusicClient(), FakeUploader(), FakeDownloader(),
+    )
+    executor, session, model_gateway, tool_gateway, lease, run = _build_scenario(
+        _default_scene_outputs(),
+    )
+    service = _audio_service(
+        session, tts, music, uploader, downloader,
+        config=_audio_config(
+            music_generation_enabled=False,
+            default_bgm_object_key=FakeUploader.DEFAULT_BGM_SOURCE_KEY,
+        ),
+        transcoder=FakeTranscoder(bgm_duration_ms=47_777),
+    )
+    executor = _inject_audio_executor(session, tool_gateway, model_gateway, service)
+
+    result = executor.run(RUN_ID, lease)
+
+    assert result.status == "succeeded", result.error_code
+    document = tool_gateway.published_documents[0]
+    audio = document["audio"]  # type: ignore[index]
+    # 旁白照常交付（3 场景）。
+    assert [entry["scene_id"] for entry in audio["narrations"]] == ["s1-1", "s1-2", "s1-3"]
+    bgm = audio["background_music"]
+    assert bgm is not None
+    assert set(bgm) == BGM_KEYS
+    assert bgm["mime"] == "audio/mpeg"
+    assert bgm["duration_ms"] == 47_777
+    assert bgm["object_key"].startswith(f"{BACKGROUND_PREFIX}{EXPECTED_SCOPE}/bgm-")
+    assert bgm["object_key"].endswith(".mp3")
+    assert bgm["object_key"] != FakeUploader.DEFAULT_BGM_SOURCE_KEY
+    # 读源恰一次（精确源 key）；源 key 永不进入上传。
+    assert uploader.downloads == [FakeUploader.DEFAULT_BGM_SOURCE_KEY]
+    assert FakeUploader.DEFAULT_BGM_SOURCE_KEY not in {
+        key for key, _mime in uploader.uploads
+    }
+    # 零火山调用：不提交、不查询、不下载临时 URL。
+    assert music.submit_count == 0 and music.query_count == 0
+    assert downloader.calls == []
+    # 账本：BGM 零费槽 uploaded + settled_cost=0 + 无秒数/TaskID。
+    bgm_rows = list(session.scalars(select(MemoirAudioJob).where(
+        MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
+    )))
+    assert len(bgm_rows) == 1
+    assert bgm_rows[0].state == STATE_UPLOADED
+    assert bgm_rows[0].object_key == bgm["object_key"]
+    assert bgm_rows[0].settled_cost == Decimal("0")
+    assert bgm_rows[0].requested_music_seconds is None
+    assert bgm_rows[0].provider_task_id is None
+    # 预算只含 TTS 分段预留：默认 BGM 零费槽不占预算。
+    budget = session.scalar(select(MemoirAudioRunBudget).where(
+        MemoirAudioRunBudget.run_id == RUN_ID,
+    ))
+    policy = _cost_policy()
+    expected_tts_only = (
+        estimate_tts_cost(COVER_BODY, policy)
+        + estimate_tts_cost(DIARY_BODY, policy)
+        + estimate_tts_cost(BET_BODY, policy)
+    )
+    assert budget is not None
+    assert budget.reserved_total_cost == expected_tts_only
+
+
+
+    """能力关闭（服务未注入）：发布 2.0.0 空音频文档（空数组 + null）。"""
 def test_full_graph_audio_capability_off_publishes_empty_audio_document() -> None:
     """能力关闭（服务未注入）：发布 2.0.0 空音频文档（空数组 + null）。"""
     executor, session, model_gateway, tool_gateway, lease, run = _build_scenario(
@@ -620,7 +728,11 @@ def test_resume_reuses_uploaded_assets_without_double_charge() -> None:
 
 
 def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) -> None:
-    """Worker 装配门禁：默认/开关开但配置缺→能力关闭；配置齐全→真实服务。"""
+    """Worker 装配门禁：默认/开关开但配置缺→能力关闭；按模式配置齐全→服务。
+
+    M8 默认配乐（freeze 2026-09-11 §6）：基础 15 项（含默认源 key）齐全
+    即可装配默认配乐模式；生成三项仅在生成开关 true 时必填。
+    """
     import app.worker as worker
     from app.core.config import Settings
 
@@ -630,15 +742,13 @@ def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) 
     monkeypatch.setattr(worker.settings, "MEMOIR_AUDIO_ENABLED", True, raising=False)
     assert worker.configured_audio_service(worker.settings, None) is None
     monkeypatch.setattr(worker.settings, "MEMOIR_AUDIO_ENABLED", False, raising=False)
-    # 配置齐全（占位值，不触网）：装配返回真实服务栈。
-    configured = Settings(
+    # 基础公共字段（两种模式共用，占位值不触网）。
+    base = dict(
         MEMOIR_AUDIO_ENABLED=True,
         MEMOIR_TTS_API_KEY="test-only-key",
         VOLCANO_CV_ACCESS_KEY="test-ak",
         VOLCANO_CV_SECRET_KEY="test-sk",
-        MEMOIR_MUSIC_ACTION="GenBGM",
         MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS="1",
-        MEMOIR_MUSIC_PRICE_PER_SECOND="0.1",
         MEMOIR_AUDIO_MAX_COST_PER_RUN="10",
         MEMOIR_AUDIO_COST_CURRENCY="CNY",
         MEMORY_AUDIO_OSS_ENDPOINT="oss-cn-hangzhou.aliyuncs.com",
@@ -650,8 +760,27 @@ def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) 
         MEMORY_AUDIO_SCOPE_HMAC_KEY="scope-key",
         # R6 后音频启用必填：账本输入指纹密钥（Runtime 专属，与 scope 密钥域隔离）
         MEMOIR_AUDIO_INPUT_HMAC_KEY="test-input-key",
-        MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON='["toc-host.example.com"]',
+        # M8 默认配乐：默认源 key 属基础必填（两种模式都要求）。
+        MEMOIR_DEFAULT_BGM_OBJECT_KEY="memoir-test/audios/default/memoirs.mp3",
     )
-    service = worker.configured_audio_service(configured, None)
+    # 默认配乐模式：不含音乐生成三项也能正常装配（消除配置拆分过渡态）。
+    default_mode = Settings(**base)
+    service = worker.configured_audio_service(default_mode, None)
     assert isinstance(service, MemoirAudioService)
     assert service.config.worker_concurrency == 4  # 进程级信号量默认值落点
+    assert service.config.music_generation_enabled is False
+    assert (
+        service.config.default_bgm_object_key
+        == "memoir-test/audios/default/memoirs.mp3"
+    )
+    # 生成模式：补齐三项后装配，模式开关为 True。
+    generation_mode = Settings(
+        **base,
+        MEMOIR_MUSIC_GENERATION_ENABLED=True,
+        MEMOIR_MUSIC_ACTION="GenBGM",
+        MEMOIR_MUSIC_PRICE_PER_SECOND="0.1",
+        MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON='["toc-host.example.com"]',
+    )
+    service = worker.configured_audio_service(generation_mode, None)
+    assert isinstance(service, MemoirAudioService)
+    assert service.config.music_generation_enabled is True

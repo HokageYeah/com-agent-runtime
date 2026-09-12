@@ -9,7 +9,8 @@ def test_healthz_returns_stable_service_status(client) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert response.json()["service"] == "Couple Diary Backend"
-    assert response.json()["environment"] == "development"
+    # D6：测试进程环境由 tests/conftest.py 固定为 test，不再依赖开发者本机 env。
+    assert response.json()["environment"] == "test"
     assert response.json()["version"] == "0.1.0"
     assert response.headers["X-Request-ID"]
 

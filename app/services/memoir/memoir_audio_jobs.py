@@ -473,6 +473,37 @@ class MemoirAudioJobsService:
             sa.select(MemoirAudioRunBudget).where(MemoirAudioRunBudget.run_id == run_id)
         )
 
+    def list_work_background_music_jobs(
+        self, run_id: str, generation_epoch: int, package_version: str
+    ) -> list[MemoirAudioJob]:
+        """同 Run 作品级 BGM 互斥查询（freeze 2026-09-11 §4.3，hmac-less）。
+
+        唯一约束 uq_memoir_audio_job_slot 含 input_hmac，挡不住"同 Run 换
+        输入建第二条 BGM 行"；本查询刻意不带 input_hmac，把该 Run 全部
+        作品级 BGM 行交给调用方（R11）做保守降级判断。若该 Run 已有
+        预算行，先对其 with_for_update 再查——挂在现有 run-budget 序列化
+        上；绝不为锁去创建预算行。
+        """
+        self._session.scalar(
+            sa.select(MemoirAudioRunBudget)
+            .where(MemoirAudioRunBudget.run_id == run_id)
+            .with_for_update()
+        )
+        return list(
+            self._session.scalars(
+                sa.select(MemoirAudioJob)
+                .where(
+                    MemoirAudioJob.run_id == run_id,
+                    MemoirAudioJob.generation_epoch == generation_epoch,
+                    MemoirAudioJob.package_version == package_version,
+                    MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
+                    MemoirAudioJob.scene_id == WORK_SCENE_ID,
+                    MemoirAudioJob.segment_index == NO_SEGMENT_INDEX,
+                )
+                .order_by(MemoirAudioJob.id)
+            )
+        )
+
     # ------------------------------------------------------------------
     # 状态机写入（全部走 lease fencing + Run 门禁）
     # ------------------------------------------------------------------
@@ -715,6 +746,40 @@ class MemoirAudioJobsService:
         )
         return job
 
+    def settle_default_music_usage(
+        self, job_id: str, lease_token: int, *, now: datetime | None = None
+    ) -> MemoirAudioJob:
+        """默认 BGM 零费结算（freeze 2026-09-11 §4.2）：只写 settled_cost = 0。
+
+        与 settle_music_usage 并列且互不替代：
+        - 允许来源态 reserved / uploaded——默认路径状态流
+          reserved → record_object_key → uploaded → published，永不
+          mark_submitting/submitted/processing；
+        - 不改 requested_music_seconds / provider_task_id，不校验音乐秒数、
+          不查火山、绝不调用 settle_music_usage；
+        - 幂等：settled_cost 已为 0 直接返回该行；已是非 0 金额（付费
+          结算）→ 拒绝，禁止零费覆盖付费账；
+        - 金额恒为 0，无需计费策略（不走 _require_policy）。
+        """
+        job = self._load_for_write(
+            job_id, lease_token, {STATE_RESERVED, STATE_UPLOADED}, now=now
+        )
+        settled = job.settled_cost
+        if settled is not None and settled != 0:
+            raise MemoirAudioJobsError(
+                "MEMOIR_AUDIO_SETTLE_CONFLICT", "已存在付费结算，禁止零费覆盖"
+            )
+        if settled == 0:
+            return job  # 幂等：零费结算已落账，直接返回该行。
+        job = self._cas_update(
+            job, lease_token, {STATE_RESERVED, STATE_UPLOADED},
+            {"settled_cost": Decimal("0")},
+        )
+        logger.info(
+            "Memoir 音频默认音乐已零费结算，code=MEMOIR_AUDIO_DEFAULT_MUSIC_SETTLED"
+        )
+        return job
+
     # ------------------------------------------------------------------
     # lease 心跳
     # ------------------------------------------------------------------
@@ -858,6 +923,57 @@ class MemoirAudioJobsService:
         )
         return count
 
+    def fail_abandoned_keyless_default_jobs(
+        self, *, now: datetime | None = None, grace_seconds: float
+    ) -> int:
+        """把过保留窗的无键零费默认槽收敛为 failed + settled=0（§11.3 D4）。
+
+        与 fail_abandoned_keyed_jobs 互补：持键在途由其收割；无键
+        reserved 默认槽（确定性转码失败 / 进程中断在 record_object_key
+        之前崩溃的窗口）没有对象可清、没有费可对，却是唯一会永久停留
+        reserved 的形状——不收敛则该作品 BGM 永久降级。终结为 failed 且
+        settled_cost=0：后续生成请求经 reserve_job 复活（attempt+1、
+        lease fence 旋转保留），attempt 达上限后自然终态，有界收敛。
+
+        仅默认零费槽：role=background_music 且 reserved_cost=0 且无
+        provider_task_id——火山槽必有非零预留或任务号，天然不命中；
+        不扩 _ORPHAN_STATES、不碰 submission_unknown、无对象删除。
+        settled_cost 直接随条件 UPDATE 置 0，不经过
+        settle_default_music_usage 的 lease CAS（维护无 lease）；WHERE
+        已限定零费默认槽，不存在"零费覆盖付费账"的可能。
+        updated_at 保留原值（与持键收割同口径，防保留窗被重置）。
+        """
+        moment = now or datetime.now(UTC)
+        cutoff = moment - timedelta(seconds=grace_seconds)
+        result = self._session.execute(
+            sa.update(MemoirAudioJob)
+            .where(
+                MemoirAudioJob.state == STATE_RESERVED,
+                MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
+                MemoirAudioJob.object_key.is_(None),
+                MemoirAudioJob.provider_task_id.is_(None),
+                MemoirAudioJob.reserved_cost == Decimal("0"),
+                MemoirAudioJob.expires_at.is_not(None),
+                MemoirAudioJob.expires_at < cutoff,
+            )
+            .values(
+                state=STATE_FAILED,
+                error_code="AUDIO_LEASE_ABANDONED",
+                settled_cost=Decimal("0"),
+                updated_at=MemoirAudioJob.updated_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        # 与持键收割同因：条件 UPDATE 不进身份映射，同 Session 后续读
+        # 必须看到 failed，避免缓存旧态误判。
+        self._session.expire_all()
+        count = int(result.rowcount or 0)
+        logger.info(
+            "Memoir 音频无键默认槽已终结，code=MEMOIR_AUDIO_LEASE_ABANDONED，count=%d",
+            count,
+        )
+        return count
+
     def mark_cleaned(self, job_id: str) -> MemoirAudioJob:
         """维护专用：孤儿态对象已删除/确认移交后标记 cleaned。"""
         job = self._session.scalar(
@@ -916,11 +1032,20 @@ class MemoirAudioJobsService:
             raise MemoirAudioJobsError(
                 "MEMOIR_AUDIO_INPUT_INVALID", "非分段作业分段序号必须为哨兵 -1"
             )
-        # 音乐必须声明请求秒数；其他角色不得携带（口径互斥，防误填）。
+        # 音乐秒数三分支裁决（freeze 2026-09-11 §4.1）：
+        # - 零费 BGM 槽（estimated_cost == 0，默认配乐）：requested_music_seconds
+        #   必须为 None——默认模式无付费秒数概念，传 int 同样拒绝；
+        # - 付费 BGM 槽（estimated_cost > 0）：必须声明非 bool 的 int 秒数
+        #   （现有"音乐必须声明请求秒数"语义保留）；
+        # - 其他角色不得携带音乐秒数（现有分支不动）。
         if reservation.role == ROLE_BACKGROUND_MUSIC:
-            if isinstance(reservation.requested_music_seconds, bool) or not isinstance(
-                reservation.requested_music_seconds, int
-            ):
+            seconds = reservation.requested_music_seconds
+            if reservation.estimated_cost == 0:
+                if seconds is not None:
+                    raise MemoirAudioJobsError(
+                        "MEMOIR_AUDIO_INPUT_INVALID", "零费音乐槽不得携带请求秒数"
+                    )
+            elif isinstance(seconds, bool) or not isinstance(seconds, int):
                 raise MemoirAudioJobsError(
                     "MEMOIR_AUDIO_INPUT_INVALID", "音乐必须声明请求秒数"
                 )

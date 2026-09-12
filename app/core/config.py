@@ -340,6 +340,8 @@ class Settings(BaseSettings):
     # M8 回忆录音频通道（TTS 旁白 + BGM 配乐）。主开关默认关闭：关闭时
     # 不校验任何音频配置、不触网，存量 Agent 行为完全不变。
     MEMOIR_AUDIO_ENABLED: bool = False # 音频生成总开关（默认关闭）
+    MEMOIR_MUSIC_GENERATION_ENABLED: bool = False # 音乐生成子开关：false=默认配乐零费复制；true=火山原创配乐付费链路
+    MEMOIR_DEFAULT_BGM_OBJECT_KEY: str = '' # 默认配乐私有源对象键（同环境音频根 default/ 目录下 .mp3）
     MEMOIR_TTS_API_KEY: str = '' # 火山 TTS API Key（openspeech 侧，仅部署 env 注入）
     MEMOIR_TTS_RESOURCE_ID: str = 'seed-tts-2.0' # TTS 资源 ID（冻结协议值）
     MEMOIR_TTS_SPEAKER: str = 'zh_female_wenroushunv_uranus_bigtts' # 固定温柔女声音色
@@ -595,13 +597,15 @@ settings = Settings()
 
 # M8 音频配置必须成组出现：启用时缺任何一项都拒绝启动，未知用量绝不
 # 允许以 0 或空串顶替。错误消息只列字段名，绝不回显配置值（防凭据泄露）。
-_MEMOIR_AUDIO_REQUIRED_STRINGS = (
+# 必填串按 MEMOIR_MUSIC_GENERATION_ENABLED 拆组：基础组两种模式都要求；
+# 默认配乐源 key MEMOIR_DEFAULT_BGM_OBJECT_KEY 仅默认模式必填（D5），
+# 由 validate_memoir_audio_settings 按模式追加、填了即深校验；生成组
+# 只在火山原创配乐付费链路下追加。
+_MEMOIR_AUDIO_BASE_REQUIRED_STRINGS = (
     "MEMOIR_TTS_API_KEY",
     "VOLCANO_CV_ACCESS_KEY",
     "VOLCANO_CV_SECRET_KEY",
-    "MEMOIR_MUSIC_ACTION",
     "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS",
-    "MEMOIR_MUSIC_PRICE_PER_SECOND",
     "MEMOIR_AUDIO_MAX_COST_PER_RUN",
     "MEMOIR_AUDIO_COST_CURRENCY",
     "MEMORY_AUDIO_OSS_ENDPOINT",
@@ -612,6 +616,10 @@ _MEMOIR_AUDIO_REQUIRED_STRINGS = (
     "MEMORY_AUDIO_BACKGROUND_PREFIX",
     "MEMORY_AUDIO_SCOPE_HMAC_KEY",
     "MEMOIR_AUDIO_INPUT_HMAC_KEY",
+)
+_MEMOIR_AUDIO_GENERATION_REQUIRED_STRINGS = (
+    "MEMOIR_MUSIC_ACTION",
+    "MEMOIR_MUSIC_PRICE_PER_SECOND",
     "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON",
 )
 _MEMOIR_AUDIO_ALLOWED_ACTIONS = {"GenBGM", "GenBGMForTime"}
@@ -652,17 +660,105 @@ def _validate_audio_decimal(
         problems.append(f"{field_name} 必须为正数（预算不得为 0）")
 
 
+def _common_audio_root(narrator_prefix: str, background_prefix: str) -> str | None:
+    """从两个作品前缀推导共同音频根目录（D5）。
+
+    返回带尾 / 的最长共同目录前缀；两前缀无任何共同目录段时返回
+    None。合法性由前缀推导而非硬编码环境名：未来整体换根（如换应用
+    名 / 根目录）后，与新根匹配的 default 源自动合法，跨根、跨环境
+    key 自动被拒——校验规则不随环境名固化。
+    """
+    narrator_segments = narrator_prefix.rstrip("/").split("/")
+    background_segments = background_prefix.rstrip("/").split("/")
+    common: list[str] = []
+    for left, right in zip(narrator_segments, background_segments, strict=False):
+        if left != right:
+            break
+        common.append(left)
+    if not common:
+        return None
+    return "/".join(common) + "/"
+
+
+def _validate_default_bgm_object_key(
+    object_key: str,
+    narrator_prefix: str,
+    background_prefix: str,
+    environment: str,
+    problems: list[str],
+) -> None:
+    """校验默认配乐私有源对象键（冻结 §2.3 + D5）：只记字段名与约束，不回显值。
+
+    规则：.mp3 扩展名、直接位于 default/ 目录下、无前导 /、无 URL 形态、
+    无空段或 . / .. 穿越、不与旁白/配乐前缀目录重叠、production 拒测试
+    前缀、与两作品前缀同音频根（D5：共同根下 default/ 直下，跨根 /
+    跨环境一律拒绝）。结构性违规（前导 /、URL、穿越）提前返回，避免
+    同一次问题重复计入多条消息。
+    """
+    field_name = "MEMOIR_DEFAULT_BGM_OBJECT_KEY"
+    if object_key.startswith("/"):
+        problems.append(f"{field_name} 不得以前导 / 开头")
+        return
+    if "://" in object_key:
+        problems.append(f"{field_name} 不得是 URL 形态")
+        return
+    segments = object_key.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        problems.append(f"{field_name} 不得含空段或 . / .. 路径穿越")
+        return
+    if not object_key.endswith(".mp3"):
+        problems.append(f"{field_name} 必须以 .mp3 扩展名结尾")
+    if len(segments) < 2 or segments[-2] != "default":
+        problems.append(f"{field_name} 必须直接位于 default/ 目录下")
+    # 前缀在此处必为非空（基础必填缺失检查已先行短路），startswith 安全。
+    if object_key.startswith(narrator_prefix) or object_key.startswith(background_prefix):
+        problems.append(
+            f"{field_name} 不得与 MEMORY_AUDIO_NARRATOR_PREFIX / "
+            "MEMORY_AUDIO_BACKGROUND_PREFIX 前缀目录重叠"
+        )
+    if environment == "production" and object_key.startswith("memoir-test/"):
+        problems.append(f"{field_name} 在 production 环境不得使用 memoir-test/ 测试前缀")
+    # D5：同根校验——默认源必须位于两个作品前缀共同音频根的 default/
+    # 直下。共同根由前缀推导（不硬编码环境名），跨环境（test 配正式源
+    # 等）与跨根（其他应用根）都不满足 startswith(root + "default/")，
+    # 一并被拒；两前缀无共同目录段时无从满足同根约束，同样拒绝。
+    common_root = _common_audio_root(narrator_prefix, background_prefix)
+    if common_root is None:
+        problems.append(
+            f"{field_name} 要求 MEMORY_AUDIO_NARRATOR_PREFIX 与 "
+            "MEMORY_AUDIO_BACKGROUND_PREFIX 有共同音频根目录"
+        )
+        return
+    default_dir = common_root + "default/"
+    if not object_key.startswith(default_dir) or "/" in object_key[len(default_dir):]:
+        problems.append(
+            f"{field_name} 必须位于与作品前缀相同音频根的 default/ 目录直下"
+        )
+
+
 def validate_memoir_audio_settings(current: Settings) -> None:
-    """校验 M8 音频配置组：禁用直接放行；启用时全部必填且取值合法。
+    """校验 M8 音频配置组：禁用直接放行；启用时按模式必填且取值合法。
 
     由部署入口在启动阶段显式调用（默认关闭不影响存量部署）；聚合所有
-    问题一次性抛出，消息只含字段名与约束描述。
+    问题一次性抛出，消息只含字段名与约束描述。基础组两种模式都校验；
+    默认配乐源 key 仅默认模式必填（D5：生成模式缺失不得阻断装配，填了
+    则按同一规则深校验，不留弱化通道）；音乐生成三项与 Action/单价/
+    hosts 深校验仅在 MEMOIR_MUSIC_GENERATION_ENABLED=true（火山原创配乐
+    付费链路）时执行，默认模式不得要求伪造音乐计费配置。
     """
     if not current.MEMOIR_AUDIO_ENABLED:
         return
+    generation_enabled = bool(current.MEMOIR_MUSIC_GENERATION_ENABLED)
+    # D5：默认配乐源 key 移出基础组——默认模式（生成开关关闭）必填，
+    # 生成模式不强制（无关依赖不得关闭已有付费生成能力）。
+    required_fields = [*_MEMOIR_AUDIO_BASE_REQUIRED_STRINGS]
+    if not generation_enabled:
+        required_fields.append("MEMOIR_DEFAULT_BGM_OBJECT_KEY")
+    if generation_enabled:
+        required_fields += _MEMOIR_AUDIO_GENERATION_REQUIRED_STRINGS
     problems: list[str] = []
     values: dict[str, str] = {}
-    for field in _MEMOIR_AUDIO_REQUIRED_STRINGS:
+    for field in required_fields:
         raw = getattr(current, field)
         values[field] = raw
         if not isinstance(raw, str) or not raw:
@@ -671,15 +767,10 @@ def validate_memoir_audio_settings(current: Settings) -> None:
     if problems:
         raise ValueError("MEMOIR_AUDIO_ENABLED 已开启但音频配置不完整: " + "; ".join(problems))
 
+    # 两种模式都要求的取值校验：TTS 单价/预算/币种/语速与前缀。
     _validate_audio_decimal(
         values["MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS"],
         "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS",
-        allow_zero=True,
-        problems=problems,
-    )
-    _validate_audio_decimal(
-        values["MEMOIR_MUSIC_PRICE_PER_SECOND"],
-        "MEMOIR_MUSIC_PRICE_PER_SECOND",
         allow_zero=True,
         problems=problems,
     )
@@ -691,8 +782,6 @@ def validate_memoir_audio_settings(current: Settings) -> None:
     )
     if values["MEMOIR_AUDIO_COST_CURRENCY"] != "CNY":
         problems.append("MEMOIR_AUDIO_COST_CURRENCY 只允许 CNY")
-    if values["MEMOIR_MUSIC_ACTION"] not in _MEMOIR_AUDIO_ALLOWED_ACTIONS:
-        problems.append("MEMOIR_MUSIC_ACTION 只允许 GenBGM 或 GenBGMForTime")
     if not -50 <= current.MEMOIR_TTS_SPEECH_RATE <= 100:
         problems.append("MEMOIR_TTS_SPEECH_RATE 必须在 [-50, 100] 范围内")
 
@@ -713,27 +802,50 @@ def validate_memoir_audio_settings(current: Settings) -> None:
     ):
         problems.append("production 环境不得使用 memoir-test/ 测试前缀")
 
-    try:
-        hosts = json.loads(values["MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON"])
-    except json.JSONDecodeError:
-        hosts = None
-        problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
-    if isinstance(hosts, list):
-        if not hosts:
-            problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 不得为空数组")
-        for host in hosts:
-            if (
-                not isinstance(host, str)
-                or not host
-                or host != host.strip()
-                or any(char in host for char in _MEMOIR_AUDIO_HOST_FORBIDDEN_CHARS)
-            ):
-                problems.append(
-                    "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 只允许精确 host（无通配符/路径/userinfo）"
-                )
-                break
-    elif hosts is not None:
-        problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
+    # 默认配乐源 key：默认模式必填（缺失已在上面短路报"缺少"）；生成
+    # 模式不进 required_fields / values，改从 Settings 实例直读，填了才
+    # 校验，规则与默认模式完全一致——同根约束同样生效，不留弱化通道。
+    default_bgm_key = current.MEMOIR_DEFAULT_BGM_OBJECT_KEY
+    if isinstance(default_bgm_key, str) and default_bgm_key:
+        _validate_default_bgm_object_key(
+            default_bgm_key,
+            narrator,
+            background,
+            current.ENVIRONMENT,
+            problems,
+        )
+
+    # 生成模式专属校验：Action、音乐单价、下载 host 精确白名单。
+    if generation_enabled:
+        _validate_audio_decimal(
+            values["MEMOIR_MUSIC_PRICE_PER_SECOND"],
+            "MEMOIR_MUSIC_PRICE_PER_SECOND",
+            allow_zero=True,
+            problems=problems,
+        )
+        if values["MEMOIR_MUSIC_ACTION"] not in _MEMOIR_AUDIO_ALLOWED_ACTIONS:
+            problems.append("MEMOIR_MUSIC_ACTION 只允许 GenBGM 或 GenBGMForTime")
+        try:
+            hosts = json.loads(values["MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON"])
+        except json.JSONDecodeError:
+            hosts = None
+            problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
+        if isinstance(hosts, list):
+            if not hosts:
+                problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 不得为空数组")
+            for host in hosts:
+                if (
+                    not isinstance(host, str)
+                    or not host
+                    or host != host.strip()
+                    or any(char in host for char in _MEMOIR_AUDIO_HOST_FORBIDDEN_CHARS)
+                ):
+                    problems.append(
+                        "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 只允许精确 host（无通配符/路径/userinfo）"
+                    )
+                    break
+        elif hosts is not None:
+            problems.append("MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON 必须是 JSON 字符串数组")
 
     if problems:
         raise ValueError("MEMOIR_AUDIO_ENABLED 配置非法: " + "; ".join(problems))

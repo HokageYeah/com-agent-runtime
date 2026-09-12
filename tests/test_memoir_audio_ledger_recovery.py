@@ -676,19 +676,29 @@ def _audio_settings_kwargs() -> dict[str, Any]:
         "MEMORY_AUDIO_BACKGROUND_PREFIX": "memoir-test/audios/background/",
         "MEMORY_AUDIO_SCOPE_HMAC_KEY": "scope-key",
         "MEMOIR_AUDIO_INPUT_HMAC_KEY": "test-input-key",
+        # M8 默认配乐（freeze 2026-09-11 §11.4）：默认源 key 仅默认模式
+        # 必填（生成模式不强制）。本 kwargs 未开生成开关 → 默认模式，
+        # 缺该键会被成组校验拒绝。
+        "MEMOIR_DEFAULT_BGM_OBJECT_KEY": "memoir-test/audios/default/memoirs.mp3",
         "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON": '["toc-host.example.com"]',
     }
 
 
 def test_r6_settings_require_input_hmac_key_when_audio_enabled() -> None:
-    """音频启用时新密钥必填非空；音频关闭时不校验（默认关闭零破坏）。"""
+    """音频启用时新密钥必填非空；音频关闭时不校验（默认关闭零破坏）。
+
+    `_env_file=None` 隔离 dotenv：否则开发者本机 .env.*.local 会回填被
+    pop 掉的密钥（历史环境泄漏红），测试语义依赖显式传入的 kwargs。
+    """
     # 完整配置：校验通过。
-    validate_memoir_audio_settings(Settings(**_audio_settings_kwargs()))
+    validate_memoir_audio_settings(
+        Settings(_env_file=None, **_audio_settings_kwargs())
+    )
     # 缺 MEMOIR_AUDIO_INPUT_HMAC_KEY：成组校验必须拒绝。
     kwargs = _audio_settings_kwargs()
     kwargs.pop("MEMOIR_AUDIO_INPUT_HMAC_KEY")
     with pytest.raises(ValueError, match="MEMOIR_AUDIO_INPUT_HMAC_KEY"):
-        validate_memoir_audio_settings(Settings(**kwargs))
+        validate_memoir_audio_settings(Settings(_env_file=None, **kwargs))
     # 音频默认关闭：缺密钥不影响启动（向后兼容铁律）。
     kwargs["MEMOIR_AUDIO_ENABLED"] = False
     validate_memoir_audio_settings(Settings(**kwargs))

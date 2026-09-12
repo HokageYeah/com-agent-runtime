@@ -608,7 +608,7 @@ policy:
 - **发布探测真实装配（R5）**：未显式注入探测口时，CLI 从 `settings.business_connectors` 装配真实 `ToolGateway`（镜像 `app/worker.py` 生产装配，含对端复核 transport）；装配失败整命令拒绝执行（退出码 2），绝不降级为"无探测继续跑"。探测身份只信权威 `AgentRun.input_json`（archive_id/snapshot_id/generation_epoch），logical_key 与发布节点逐字一致——Business 按原发布幂等键精确命中才算"已发布"；Run 缺失、发布引用缺失、epoch 漂移、网关调用失败均归未知，绝不删除。需要 Business connector 配置齐全（enabled + base_url/runtime_id/key_id/secret）。
 - 输出与日志只有计数与安全枚举，不打印对象键、凭据或私有 URL。
 
-## M8 默认配乐与服务器开关（2026-09-11，待实施）
+## M8 默认配乐与服务器开关（2026-09-11 设计；2026-09-12 已实施）
 
 本增量只有 Runtime 两个新设置，无 Business/前端新 env：
 ```dotenv
@@ -625,4 +625,4 @@ production 第二项为 `memoir/audios/default/memoirs.mp3`（无开头 /）。S
 
 默认源失败只降级配乐，不转收费。副本账本按“无供应商生成调用”明确零预留/零结算，不伪造 TaskID/请求秒数，不以假单价0隐藏未知费用；OSS 请求/存储/流量仍计费。源不进入发布清单或可清理 ledger.object_key。
 
-切换模式或更换源前暂停新增工作并排空音频 Run/上传，再统一更新进程；已发布作品不换曲。同 Run 恢复若出现不同 BGM 输入，不重新提交收费，保守降级，原未知发布保留规则不变。完整恢复边界见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md) §4；实施任务为 R9–R11，真实源/权限/试听与收费模式验证仍需人工。
+切换模式或更换源前暂停新增工作并排空音频 Run/上传，再统一更新进程；已发布作品不换曲。同 Run 恢复若出现不同 BGM 输入，不重新提交收费，保守降级，原未知发布保留规则不变。完整恢复边界见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md) §4；实施任务 R9–R11 已完成并通过双轴只读评审（2026-09-12），真实源/权限/试听与收费模式验证仍需人工。

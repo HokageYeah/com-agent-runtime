@@ -9,9 +9,11 @@
    按完整输入保守预留、按官方 text_words 实际结算）；全部分段成功后
    ffmpeg 解码重拼为单场景 MP3 并私有 OSS 上传；任一分段失败该场景
    有界降级（无旁白仍发布图文），失败不另起补音。
-3. BGM：每作品一首（固定提示词 / 固定时长），提交返回 TaskID 立即入账，
-   之后只查不重建；成功后下载（SSRF 白名单）→ 转码 → 私有上传 → 按请求
-   秒数结算；失败降级为无配乐。
+3. BGM：按 MEMOIR_MUSIC_GENERATION_ENABLED 分叉（freeze 2026-09-11）。
+   生成模式：每作品一首（固定提示词 / 固定时长），提交返回 TaskID 立即
+   入账，之后只查不重建；成功后下载（SSRF 白名单）→ 转码 → 私有上传 →
+   按请求秒数结算。默认模式：零费复制部署默认源（域拆分指纹 + 同 Run
+   互斥 + 独立私有副本 + settled_cost=0）；两条路径失败均降级为无配乐。
 4. 恢复：资产键与费用预留经 MemoirAudioJobsService 按
    (run, epoch, package, role, scene, segment, 输入 HMAC) 幂等对账——已
    上传成功资产同 Run 同输入直接复用不重复扣费；submission_unknown 永不
@@ -28,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import hmac
 import json
@@ -134,6 +137,14 @@ class MemoirAudioConfig:
         publish_reserve_seconds: float = 30.0,
         scene_concurrency: int = 2,
         worker_concurrency: int = 4,
+        # 音乐生成子开关（freeze 2026-09-11 §6）：False=默认配乐零费复制，
+        # True=火山原创配乐付费链路。生产装配经 from_settings 注入 Settings
+        # 值（生产默认 False）；直接构造（测试替身）默认 True 保持现行付费
+        # 路径零破坏——既有付费用例不因新增开关翻转行为。
+        music_generation_enabled: bool = True,
+        default_bgm_object_key: str = "",
+        # 默认源读取字节上限（对齐 MEMOIR_AUDIO_MAX_FILE_BYTES 契约值）。
+        max_file_bytes: int = 20971520,
         music_poll_interval_seconds: float = 5.0,
         music_duration_seconds: int = 60,
         tts_request_timeout_seconds: float = 45.0,
@@ -142,7 +153,7 @@ class MemoirAudioConfig:
         # 幂等指纹使用（keyed HMAC），后者是两仓共享的对象 scope 摘要密钥，
         # 两者不得复用同一值（防跨域摘要碰撞与密钥泄露面扩大）。
         # input_hmac_key 的非空强制校验在 Settings 层
-        # （_MEMOIR_AUDIO_REQUIRED_STRINGS / validate_memoir_audio_settings），
+        # （_MEMOIR_AUDIO_BASE_REQUIRED_STRINGS / validate_memoir_audio_settings），
         # 生产装配路径 build_memoir_audio_service 先跑该校验再构造本对象，
         # 空钥匙到不了这里；测试替身允许空钥匙（HMAC 仍确定性）。
         if not narrator_prefix or not background_prefix or not scope_hmac_key:
@@ -151,7 +162,16 @@ class MemoirAudioConfig:
             raise ValueError("MEMOIR_AUDIO_CONFIG_INVALID")
         if scene_concurrency < 1 or worker_concurrency < 1:
             raise ValueError("MEMOIR_AUDIO_CONFIG_INVALID")
-        if music_poll_interval_seconds <= 0 or music_duration_seconds <= 0:
+        if max_file_bytes <= 0:
+            raise ValueError("MEMOIR_AUDIO_CONFIG_INVALID")
+        if music_generation_enabled:
+            # 仅付费生成模式校验音乐轮询/时长；默认模式不触达这两个值
+            # （freeze §6：默认模式不得因未使用的音乐配置装配失败），
+            # 生成模式校验一字不放宽。
+            if music_poll_interval_seconds <= 0 or music_duration_seconds <= 0:
+                raise ValueError("MEMOIR_AUDIO_CONFIG_INVALID")
+        elif not default_bgm_object_key:
+            # 默认模式必须有源 key：Settings 层基础必填的快照层防线。
             raise ValueError("MEMOIR_AUDIO_CONFIG_INVALID")
         self.narrator_prefix = narrator_prefix
         self.background_prefix = background_prefix
@@ -161,6 +181,9 @@ class MemoirAudioConfig:
         self.publish_reserve_seconds = float(publish_reserve_seconds)
         self.scene_concurrency = int(scene_concurrency)
         self.worker_concurrency = int(worker_concurrency)
+        self.music_generation_enabled = bool(music_generation_enabled)
+        self.default_bgm_object_key = default_bgm_object_key
+        self.max_file_bytes = int(max_file_bytes)
         self.music_poll_interval_seconds = float(music_poll_interval_seconds)
         self.music_duration_seconds = int(music_duration_seconds)
         self.tts_request_timeout_seconds = float(tts_request_timeout_seconds)
@@ -183,6 +206,15 @@ class MemoirAudioConfig:
             ),
             worker_concurrency=int(
                 getattr(settings, "MEMOIR_AUDIO_WORKER_CONCURRENCY", 4)
+            ),
+            music_generation_enabled=bool(
+                getattr(settings, "MEMOIR_MUSIC_GENERATION_ENABLED", False)
+            ),
+            default_bgm_object_key=str(
+                getattr(settings, "MEMOIR_DEFAULT_BGM_OBJECT_KEY", "")
+            ),
+            max_file_bytes=int(
+                getattr(settings, "MEMOIR_AUDIO_MAX_FILE_BYTES", 20971520)
             ),
             music_poll_interval_seconds=float(
                 getattr(settings, "MEMOIR_MUSIC_POLL_INTERVAL_SECONDS", 5.0)
@@ -758,7 +790,211 @@ class MemoirAudioService:
     async def _generate_background_music(
         self, ctx: _RunCtx, refs: _AudioRefs, lease_context: object
     ) -> None:
-        """作品级 BGM：复用 → 在途续查 → 新提交轮询；失败置 None。"""
+        """作品级 BGM：按部署模式分叉（付费生成 / 默认零费复制）；失败置 None。"""
+        if self.config.music_generation_enabled:
+            await self._generate_volcano_background_music(ctx, refs, lease_context)
+            return
+        await self._generate_default_background_music(ctx, refs, lease_context)
+
+    async def _generate_default_background_music(
+        self, ctx: _RunCtx, refs: _AudioRefs, lease_context: Any
+    ) -> None:
+        """默认配乐（freeze 2026-09-11 §5/§6）：零费复制默认源为独立私有副本。
+
+        状态流（永不 mark_submitting/submitted/processing，零火山调用）：
+        读源 → 域拆分指纹 → 复用检查 → 同 Run 互斥核对 → 零成本预留 →
+        ffprobe 实测时长转码 → 持键独立 commit → 上传副本 → 零费结算 →
+        record_upload。任何失败仅降级为无配乐（旁白与图文照常），绝不自动
+        切换付费生成。
+        """
+        if ctx.should_stop() is not None:
+            return
+        # 1. 读默认源：指纹携带源字节 SHA256（freeze §5：源换代 → 新指纹），
+        #    必须先读源才能计算指纹；读取失败仅降级 BGM，绝不切付费生成。
+        try:
+            data = await self._download_default_source(ctx)
+        except Exception as exc:
+            # reason 只带安全维度：存储层 MemoirAudioStorageError 携带
+            # 安全枚举 .code，其余异常退化为类名——绝不携带 key/凭据/字节。
+            logging.warning(
+                "MemoirAgent 默认配乐源读取失败降级 run_id=%s reason=%s "
+                "code=AUDIO_SOURCE_READ_FAILED",
+                refs.run_id,
+                getattr(exc, "code", type(exc).__name__),
+            )
+            return
+        if not data:
+            # 空字节源等同损坏：降级无配乐（拒绝语义在转码入口，这里不转码）。
+            logging.warning(
+                "MemoirAgent 默认配乐源为空降级 run_id=%s code=AUDIO_TRANSCODE_INPUT_INVALID",
+                refs.run_id,
+            )
+            return
+        # 2. 域拆分指纹：mode/default 域标记 + source_key + 源字节摘要，
+        #    与火山分支（action/duration/model）键集不同，canonical JSON
+        #    不可能相等。
+        bgm_hmac = compute_input_hmac(
+            self.config.input_hmac_key,
+            {
+                "role": ROLE_BACKGROUND_MUSIC,
+                "mode": "default",
+                "source_key": self.config.default_bgm_object_key,
+                "package_version": refs.package_version,
+                "content_digest": hashlib.sha256(data).hexdigest(),
+            },
+        )
+        # 3. 恢复复用：同 Run 同源（同指纹）已有成功资产直接复用不再上传。
+        reused = self._jobs.find_reusable_uploaded_asset(
+            run_id=refs.run_id,
+            generation_epoch=refs.generation_epoch,
+            package_version=refs.package_version,
+            role=ROLE_BACKGROUND_MUSIC,
+            scene_id=WORK_SCENE_ID,
+            input_hmac=bgm_hmac,
+        )
+        if reused is not None and reused.object_key and reused.duration_ms:
+            logging.info(
+                "MemoirAgent 默认配乐资产复用 run_id=%s code=MEMOIR_AUDIO_ASSET_REUSED",
+                refs.run_id,
+            )
+            ctx.background_music = self._bgm_entry(refs, bgm_hmac, reused)
+            return
+        # 4. 同 Run 互斥（freeze §4.3/§11.1 两模式共用防线）：火山在途/已结算
+        #    行或不同指纹默认行（源换代）存在 → 保守降级，不建第二槽。
+        if self._bgm_mutex_degraded(refs, bgm_hmac, mode="default"):
+            return
+        existing = self._jobs.find_job(
+            run_id=refs.run_id,
+            generation_epoch=refs.generation_epoch,
+            package_version=refs.package_version,
+            role=ROLE_BACKGROUND_MUSIC,
+            scene_id=WORK_SCENE_ID,
+            input_hmac=bgm_hmac,
+            segment_index=NO_SEGMENT_INDEX,
+        )
+        if existing is not None and not self._bgm_slot_retryable(existing):
+            return
+        # 5. 零成本预留：不占预算、不带音乐秒数（freeze §4.1 裁决）。
+        reservation = MemoirAudioJobReservation(
+            job_id=self._job_id(refs, ROLE_BACKGROUND_MUSIC, WORK_SCENE_ID, bgm_hmac),
+            business_id=refs.business_id,
+            run_id=refs.run_id,
+            generation_epoch=refs.generation_epoch,
+            package_version=refs.package_version,
+            role=ROLE_BACKGROUND_MUSIC,
+            scene_id=WORK_SCENE_ID,
+            input_hmac=bgm_hmac,
+            estimated_cost=Decimal("0"),
+            lease_owner=refs.lease_owner,
+            lease_ttl_seconds=_JOB_LEASE_TTL_SECONDS,
+            requested_music_seconds=None,
+        )
+        try:
+            outcome = self._jobs.reserve_job(reservation)
+            job = outcome.job
+        except MemoirAudioJobsError as exc:
+            self._absorb_jobs_error(ctx, exc.code, "default_bgm_reserve")
+            return
+        if outcome.outcome == "reused" and job.object_key and job.duration_ms:
+            ctx.background_music = self._bgm_entry(refs, bgm_hmac, job)
+            return
+        token = job.lease_token
+        # 6. 转码实测时长：ffprobe 真实整数毫秒，绝不默认 60s；空字节/损坏
+        #    由转码入口拒绝 → 仅降级无配乐（零费槽无对象键，等待 lease 过期
+        #    由维护对账收敛；源损坏确定性失败，重试无意义）。
+        try:
+            concat = await self._call_with_slot(
+                ctx, self._transcoder.transcode_to_mp3(data),
+                timeout=ctx.remaining(),
+            )
+        except Exception:
+            logging.warning(
+                "MemoirAgent 默认配乐转码失败降级 run_id=%s code=AUDIO_TRANSCODE_FAILED",
+                refs.run_id,
+            )
+            return
+        # 7. 副本落在现行 background 工作目录：随机不透明名，绝不共享源 key；
+        #    源 key 永不进入账本 object_key / audio_object_keys / 发布清单。
+        #    D3（freeze §11.2）：复活槽已持旧键时必须复用同键重试上传——
+        #    无条件再生成新键会被 jobs 层 MEMOIR_AUDIO_OBJECT_KEY_CONFLICT
+        #    拒绝并整槽降级；同键 record_object_key 幂等，仅无键槽才建新键。
+        object_key = job.object_key or build_audio_object_key(
+            self.config.background_prefix, refs.scope_hex,
+            role=AUDIO_ROLE_BACKGROUND,
+        )
+        try:
+            self._jobs.record_object_key(job.job_id, token, object_key, AUDIO_MIME)
+            # R2 铁律：副本键先独立事务真实 commit 再上传 OSS（同旁白口径）。
+            if not self._commit_ledger(ctx):
+                return
+            await self._upload_audio_bytes(ctx, refs, concat.audio, object_key)
+            # 零费结算（freeze §4.2/§7）：上传成功后写 settled_cost=0；幂等，
+            # 付费已结算会被 MEMOIR_AUDIO_SETTLE_CONFLICT 拒绝。
+            self._jobs.settle_default_music_usage(job.job_id, token)
+            self._jobs.record_upload(
+                job.job_id, token, duration_ms=concat.duration_ms
+            )
+        except MemoirAudioJobsError as exc:
+            self._absorb_jobs_error(ctx, exc.code, "default_bgm_finalize")
+            return
+        except Exception as exc:
+            # 上传超时不得 mark_failed（迟到副作用由 token fencing + 维护
+            # 对账收敛）；非超时失败转 failed 释放槽位——零费槽复活重试
+            # 不产生第二笔费用。
+            logging.warning(
+                "MemoirAgent 默认配乐交付失败降级 run_id=%s code=AUDIO_UPLOAD_FAILED",
+                refs.run_id,
+            )
+            if not isinstance(exc, TimeoutError):
+                try:
+                    self._jobs.mark_failed(
+                        job.job_id, token, error_code="AUDIO_UPLOAD_FAILED"
+                    )
+                    self._commit_ledger(ctx)
+                except Exception:
+                    logging.warning(
+                        "MemoirAgent 默认配乐失败入账被吸收 run_id=%s "
+                        "code=AUDIO_UPLOAD_FAILED",
+                        refs.run_id,
+                    )
+            return
+        self._commit_ledger(ctx)
+        self._heartbeat_run_lease(ctx, refs, lease_context)
+        ctx.background_music = {
+            "media_id": self._media_id("audio-bgm", refs, WORK_SCENE_ID, bgm_hmac),
+            "object_key": object_key,
+            "mime": AUDIO_MIME,
+            "duration_ms": concat.duration_ms,
+        }
+
+    async def _download_default_source(self, ctx: _RunCtx) -> bytes:
+        """读默认源字节：同步 SDK 读取走节点专用线程池，受剩余时限约束。
+
+        字节上限 max_file_bytes（契约 MEMOIR_AUDIO_MAX_FILE_BYTES）、超时为
+        节点剩余时间；存储层保证超时后调用方立即拿到失败不阻塞。
+        """
+        if ctx.executor is None:
+            # 防御：generate() 必定注入专用执行器；缺失说明内部约定被破坏。
+            raise MemoirAudioProviderError(
+                "AUDIO_UPLOAD_EXECUTOR_MISSING", "音频上传执行器未初始化"
+            )
+        loop = asyncio.get_running_loop()
+        download = functools.partial(
+            self._uploader.download_private_bytes,
+            self.config.default_bgm_object_key,
+            max_bytes=self.config.max_file_bytes,
+            timeout_seconds=ctx.remaining(),
+        )
+        return await asyncio.wait_for(
+            loop.run_in_executor(ctx.executor, download),
+            timeout=ctx.remaining(),
+        )
+
+    async def _generate_volcano_background_music(
+        self, ctx: _RunCtx, refs: _AudioRefs, lease_context: object
+    ) -> None:
+        """火山原创配乐付费链路（现行行为，一字不动）：复用 → 在途续查 →
+        新提交轮询；失败置 None。"""
         bgm_hmac = compute_input_hmac(
             self.config.input_hmac_key,
             {
@@ -825,6 +1061,14 @@ class MemoirAudioService:
         """新提交一首 BGM；限流允许一次退避重试，未知结果永不重提。"""
         for _attempt in range(MAX_SUBMIT_ATTEMPTS):
             if ctx.should_stop() is not None:
+                return None
+            # D2 共用防线（freeze §11.1）：作品级互斥判定放在提交尝试循环内
+            # ——建槽/提交付费任务之前必须完成；429 限流重试后回到循环顶部
+            # 重新判定（重试期间其他执行者可能已为同一作品建了 BGM 槽）。
+            # 与 reserve_job 之间无 commit：判定、占槽在同一数据库事务边界
+            # 内完成，锁序（预算行若存在先 FOR UPDATE → hmac-less 查询 →
+            # 判定 → 预留）不可重排。
+            if self._bgm_mutex_degraded(refs, bgm_hmac, mode="volcano"):
                 return None
             existing = self._jobs.find_job(
                 run_id=refs.run_id,
@@ -1145,11 +1389,56 @@ class MemoirAudioService:
             )
         return False
 
+    def _bgm_mutex_degraded(
+        self, refs: _AudioRefs, bgm_hmac: str, *, mode: str
+    ) -> bool:
+        """作品级 BGM 互斥判定（freeze §11.1 D2：两模式共用防线）。
+
+        为什么必须在同一数据库事务边界内、且紧邻占槽/提交之前调用：
+        唯一约束 uq_memoir_audio_job_slot 含 input_hmac，挡不住"换输入建
+        第二条 BGM 行"——只有本查询（hmac-less，§4.3）能看到同作品全部
+        BGM 行。查到与自身 input_hmac 不同的行（不论对方是火山在途/已结算
+        行还是不同指纹默认行）→ 保守降级为无 BGM：不建第二槽、不提交付费
+        任务、不清零未知火山费用。
+
+        锁序（禁止重排）：list_work_background_music_jobs 内部先对预算行
+        （若存在）with_for_update() 再做 hmac-less 查询；调用方必须保证
+        判定 → 预留（reserve_job）之间没有任何 commit，使预算行锁与 BGM
+        查询、占槽落在同一事务里。预算行不存在时绝不为锁创建；首建竞争由
+        reserve_job 的 savepoint 重试兜底（同 hmac 竞争者行与自身指纹相同，
+        互斥判定不受影响）。真实并发验证依赖 PostgreSQL 行锁——SQLite
+        忽略 FOR UPDATE，只验证判定逻辑放置正确。
+        """
+        siblings = self._jobs.list_work_background_music_jobs(
+            refs.run_id, refs.generation_epoch, refs.package_version
+        )
+        if any(row.input_hmac != bgm_hmac for row in siblings):
+            logging.warning(
+                "MemoirAgent 配乐作品级互斥降级 run_id=%s mode=%s "
+                "code=MEMOIR_AUDIO_BGM_MUTEX_DEGRADED",
+                refs.run_id, mode,
+            )
+            return True
+        return False
+
     def _bgm_slot_retryable(self, existing: MemoirAudioJob) -> bool:
-        """配乐槽是否允许重新提交：已结算/在途/未知一律禁止（防双付费）。"""
-        if existing.settled_cost is not None:
+        """配乐槽是否允许重新提交：已结算/在途/未知一律禁止（防双付费）。
+
+        例外（freeze 2026-09-11 §6）：零费默认槽（reserved_cost==0 且无
+        provider_task_id）的已结算态（settled_cost=0）不得阻止恢复重试——
+        默认路径零费结算先于 record_upload，崩溃窗口内 settled=0 但槽位
+        仍应可复活重试；付费分支语义一字不动。
+        """
+        if existing.settled_cost is None:
+            return self._segment_slot_retryable(existing)
+        zero_fee_default = (
+            (existing.reserved_cost or Decimal("0")) == 0
+            and existing.provider_task_id is None
+        )
+        if not zero_fee_default:
             return False
-        return self._segment_slot_retryable(existing)
+        # 零费默认槽：已结算 0 不拦截，仅按终态失败 + 重试上限判定。
+        return existing.state == STATE_FAILED and existing.attempt < MAX_SUBMIT_ATTEMPTS
 
     def _mark_provider_failure(
         self, ctx: _RunCtx, job_id: str, token: int, code: str
@@ -1275,14 +1564,23 @@ def build_memoir_audio_service(
 
     try:
         validate_memoir_audio_settings(runtime_settings)
+        # 模式分叉（freeze 2026-09-11 §6）：默认模式不校验/装配音乐生成
+        # 依赖（火山音乐客户端、音乐单价必填、下载白名单）；音乐单价占位
+        # "0" 仅作结构完整，默认路径永不调用 estimate_music_cost。
+        generation_enabled = bool(
+            getattr(runtime_settings, "MEMOIR_MUSIC_GENERATION_ENABLED", False)
+        )
+        music_price_raw = (
+            str(getattr(runtime_settings, "MEMOIR_MUSIC_PRICE_PER_SECOND", ""))
+            if generation_enabled
+            else "0"
+        )
         policy = MemoirAudioCostPolicy(
             currency=str(getattr(runtime_settings, "MEMOIR_AUDIO_COST_CURRENCY", "")),
             tts_price_per_1000_text_words=Decimal(
                 str(getattr(runtime_settings, "MEMOIR_TTS_PRICE_PER_1000_TEXT_WORDS", ""))
             ),
-            music_price_per_second=Decimal(
-                str(getattr(runtime_settings, "MEMOIR_MUSIC_PRICE_PER_SECOND", ""))
-            ),
+            music_price_per_second=Decimal(music_price_raw),
             max_cost_per_run=Decimal(
                 str(getattr(runtime_settings, "MEMOIR_AUDIO_MAX_COST_PER_RUN", ""))
             ),
@@ -1303,17 +1601,39 @@ def build_memoir_audio_service(
                 getattr(runtime_settings, "MEMOIR_TTS_REQUEST_TIMEOUT_SECONDS", 45.0)
             ),
         )
-        music_client = VolcanoMusicClient(
-            access_key=str(getattr(runtime_settings, "VOLCANO_CV_ACCESS_KEY", "")),
-            secret_key=str(getattr(runtime_settings, "VOLCANO_CV_SECRET_KEY", "")),
-            action=str(getattr(runtime_settings, "MEMOIR_MUSIC_ACTION", "")),
-            duration_seconds=int(
-                getattr(runtime_settings, "MEMOIR_MUSIC_DURATION_SECONDS", 60)
-            ),
-            request_timeout_seconds=float(
-                getattr(runtime_settings, "MEMOIR_MUSIC_REQUEST_TIMEOUT_SECONDS", 15.0)
-            ),
-        )
+        if generation_enabled:
+            music_client = VolcanoMusicClient(
+                access_key=str(getattr(runtime_settings, "VOLCANO_CV_ACCESS_KEY", "")),
+                secret_key=str(getattr(runtime_settings, "VOLCANO_CV_SECRET_KEY", "")),
+                action=str(getattr(runtime_settings, "MEMOIR_MUSIC_ACTION", "")),
+                duration_seconds=int(
+                    getattr(runtime_settings, "MEMOIR_MUSIC_DURATION_SECONDS", 60)
+                ),
+                request_timeout_seconds=float(
+                    getattr(runtime_settings, "MEMOIR_MUSIC_REQUEST_TIMEOUT_SECONDS", 15.0)
+                ),
+            )
+            downloader = SecureAudioDownloader(
+                allowed_hosts=frozenset(
+                    json.loads(
+                        str(
+                            getattr(
+                                runtime_settings,
+                                "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON",
+                                "[]",
+                            )
+                        )
+                    )
+                ),
+                max_bytes=int(
+                    getattr(runtime_settings, "MEMOIR_AUDIO_MAX_FILE_BYTES", 20971520)
+                ),
+            )
+        else:
+            # 默认配乐模式：音乐生成客户端与官方 URL 下载器永不触达，
+            # 置 None 由模式分叉保证零调用。
+            music_client = None
+            downloader = None
         uploader = AliyunAudioOSSUploader(
             access_key_id=str(
                 getattr(runtime_settings, "MEMORY_AUDIO_OSS_ACCESS_KEY_ID", "")
@@ -1335,22 +1655,6 @@ def build_memoir_audio_service(
                 getattr(runtime_settings, "MEMOIR_AUDIO_SUBPROCESS_TIMEOUT_SECONDS", 60.0)
             ),
             max_input_bytes=int(
-                getattr(runtime_settings, "MEMOIR_AUDIO_MAX_FILE_BYTES", 20971520)
-            ),
-        )
-        downloader = SecureAudioDownloader(
-            allowed_hosts=frozenset(
-                json.loads(
-                    str(
-                        getattr(
-                            runtime_settings,
-                            "MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON",
-                            "[]",
-                        )
-                    )
-                )
-            ),
-            max_bytes=int(
                 getattr(runtime_settings, "MEMOIR_AUDIO_MAX_FILE_BYTES", 20971520)
             ),
         )

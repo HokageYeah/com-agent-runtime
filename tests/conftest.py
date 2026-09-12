@@ -4,7 +4,57 @@ import os
 from collections.abc import Generator
 from unittest.mock import patch
 
+import pydantic_settings.sources as _pydantic_settings_sources
 import pytest
+
+# --- 测试进程配置隔离（D6）-----------------------------------------------
+# 模块级 `settings = Settings()` 单例在导入 app.core.config 时创建；本块必须
+# 在任何 `app.*` 导入前执行，保证单例只读下方固定假值与类默认值，读不到
+# 开发者本机 `.env.*.local` 或继承 shell 的真实密钥/数据库密码/私有 URL。
+# 只影响当前 pytest 进程：不读写任何 env 文件，不改生产配置加载器。
+
+# Runtime Settings 消费的凭据/资源/URL 前缀与裸名；新增 Settings 字段时同步。
+_TEST_ENV_STRIP_PREFIXES = (
+    "ACCESS_KEY_ID",
+    "ACCESS_KEY_SECRET",
+    "BACKEND_CORS_ORIGINS",
+    "BUCKET_NAME",
+    "DB_",
+    "ENDPOINT",
+    "MEMOIR_",
+    "MEMORY_",
+    "MODEL_",
+    "MYSQL_",
+    "OSS_",
+    "REGION",
+    "RUNTIME_",
+    "USER_AUTH_",
+    "VOLCANO_",
+)
+for _leaked_name in (
+    _name for _name in list(os.environ) if _name.startswith(_TEST_ENV_STRIP_PREFIXES)
+):
+    del os.environ[_leaked_name]
+
+# 测试进程固定环境：ENVIRONMENT 决定 Settings 使用 test 默认值分支（例如
+# 默认配乐源 key 的 memoir-test 前缀）；不写字节码，避免污染仓库 __pycache__。
+os.environ["ENVIRONMENT"] = "test"
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
+
+def _blocked_dotenv_source(_self: object) -> dict[str, str]:
+    # 阻断 dotenv 源：pydantic-settings 在本进程内读不到任何 .env 文件。
+    # 生产配置加载器保持原样；需要真实 dotenv 行为的用例不属于本测试进程。
+    return {}
+
+
+# 保存原始实现：个别必须验证真实 dotenv 行为的测试可用
+# monkeypatch.setattr(DotEnvSettingsSource, "__call__", ORIGINAL_DOTENV_SOURCE_CALL)
+# 临时恢复（用后自动还原），不必绕开本隔离。
+ORIGINAL_DOTENV_SOURCE_CALL = _pydantic_settings_sources.DotEnvSettingsSource.__call__
+
+_pydantic_settings_sources.DotEnvSettingsSource.__call__ = _blocked_dotenv_source
+# --------------------------------------------------------------------------
 
 # 测试进程必须与开发者的 .env.*.local 隔离。这些都是固定的假测试值，
 # 只在当前 pytest 进程生效，不会覆盖本地文件或被应用日志输出。
