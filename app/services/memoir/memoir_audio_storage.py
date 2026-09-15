@@ -32,6 +32,7 @@ import shutil
 import signal
 import socket
 import tempfile
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from concurrent import futures
@@ -253,24 +254,33 @@ class AliyunAudioOSSUploader:
     def download_private_bytes(
         self, object_key: str, *, max_bytes: int, timeout_seconds: float
     ) -> bytes:
-        """默认源私有读取（freeze 2026-09-11 §3 + D1 修复）：对精确 key 有界 GetObject。
+        """默认源私有读取（freeze 2026-09-11 §3 + D1/S1 修复）：对精确 key 有界 GetObject。
 
         只读合同：不 delete / put / 改 ACL。字节上限与超时均由调用方传入
         （上限对齐 MEMOIR_AUDIO_MAX_FILE_BYTES，超时为节点剩余时间），
         超限/超时立即中断失败。空字节允许返回（拒绝是转码入口的职责）。
 
         超时语义（D1 如实表述）：future.result(timeout) 超时只是"停止等待"，
-        不证明底层读取已停止，也不强杀线程；调用方通过共享 body holder
-        尽力 close 响应体打断在途读，后台读取由连接超时与资源释放约束
-        最终收敛，调用方绝不因后台读取而阻塞。
+        不证明底层读取已停止，也不强杀线程；调用方通过锁保护的共享发布
+        状态尽力 close 响应体打断在途读，后台读取由连接超时与资源释放
+        约束最终收敛，调用方绝不因后台读取而阻塞。
+
+        发布/迟到关闭（S1 修复）：工作线程拿到 body 后在锁内发布；
+        caller 超时在锁内标记放弃并认领已发布 body，交给一次性有界后台
+        关闭线程（caller 立即返回，不因 close 等在途读的锁而拖住）；caller
+        已放弃后才到手的迟到 body 由工作线程在锁内发现标志并就地关闭。
+        锁保证任意 body 的关闭责任恰好归属一方，杜绝"已发布无人关闭"
+        的泄漏。旧实现用空列表 + truthiness 守卫，发布与消费双向死代码。
         """
         if not isinstance(object_key, str) or not object_key:
             raise MemoirAudioStorageError("AUDIO_OBJECT_KEY_INVALID", "对象键为空")
         if max_bytes <= 0 or timeout_seconds <= 0:
             raise MemoirAudioStorageError("AUDIO_SOURCE_READ_FAILED", "读取上限或超时非法")
         client, oss = self._ensure_client()
-        # 共享 holder：工作线程拿到响应体后回填；超时路径据此同步尽力释放。
-        body_holder: list[Any] = []
+        # 锁保护的发布槽：body=None 表示未发布；abandoned=True 表示 caller
+        # 已超时放弃。所有读写都在锁内完成，发布/放弃的先后次序因此可判定。
+        release_lock = threading.Lock()
+        shared: dict[str, Any] = {"body": None, "abandoned": False}
         executor = futures.ThreadPoolExecutor(max_workers=1)
         try:
             worker = executor.submit(
@@ -280,15 +290,35 @@ class AliyunAudioOSSUploader:
                 object_key,
                 max_bytes,
                 timeout_seconds,
-                body_holder,
+                shared,
+                release_lock,
             )
             try:
                 return worker.result(timeout=timeout_seconds)
             except futures.TimeoutError:
-                # 尽力打断在途读：close 已到手的响应体（幂等；get_object
-                # 尚未返回时 holder 为空，无需释放）。线程不杀、不等待。
-                if body_holder:
-                    self._close_response_body_best_effort(body_holder[0])
+                # S1 修复（2026-09-14 真实链路复现）：真实 SDK 的 close()
+                # 链路（StreamBodyReader → requests → urllib3）会等在途
+                # iter_bytes 读取持有的底层 BufferedReader 锁；caller 在
+                # 此同步 close 会被拖到在途读结束（30ms 期限实测被拖到
+                # ~0.4s）。因此锁内只完成"标记放弃 + 认领已发布 body"两步
+                # 决策，认领到的 body 交给一次性有界后台关闭线程，caller
+                # 立即按期限抛 AUDIO_SOURCE_READ_TIMEOUT，绝不在这里等 I/O。
+                with release_lock:
+                    shared["abandoned"] = True
+                    published = shared["body"]
+                if published is not None:
+                    # 一次性有界后台关闭：每次超时事件至多一个短生命周期
+                    # daemon 线程，close 在在途读结束后完成（生产环境由
+                    # SDK 连接/读取超时有界收敛），做完即退出。绝不把
+                    # close 排到下方 executor——唯一 worker 正阻塞在
+                    # iter_bytes 上持有 close 需要的读锁，排队即死锁。
+                    closer = threading.Thread(
+                        target=self._close_response_body_best_effort,
+                        args=(published,),
+                        name="memoir-audio-body-closer",
+                        daemon=True,
+                    )
+                    closer.start()
                 logger.warning(
                     "Memoir 音频默认源读取超时，code=AUDIO_SOURCE_READ_TIMEOUT"
                 )
@@ -319,7 +349,8 @@ class AliyunAudioOSSUploader:
         object_key: str,
         max_bytes: int,
         timeout_seconds: float,
-        body_holder: list[Any],
+        shared: dict[str, Any],
+        release_lock: threading.Lock,
     ) -> bytes:
         """分块有界读取 GetObject 字节；失败只映射安全枚举。
 
@@ -329,6 +360,10 @@ class AliyunAudioOSSUploader:
         并入前判上限，超限在流中途立即中断，不做无界整读后查长度）；每块
         之间按 monotonic 剩余期限检查；成功/异常/超限/超时四条路径都
         finally 关闭响应体。
+
+        S1 发布协议：拿到 body 后在锁内发布给超时路径；若 caller 已超时
+        放弃（迟到 body），就地关闭使后续 iter_bytes 立即失败，让本线程
+        有界收敛退出，响应体绝不遗留。
         """
         deadline = time.monotonic() + timeout_seconds
         body: Any = None
@@ -337,9 +372,18 @@ class AliyunAudioOSSUploader:
                 oss.GetObjectRequest(bucket=self._bucket, key=object_key)
             )
             body = getattr(result, "body", None)
-            # 回填共享 holder：让超时路径能在等待放弃后同步释放响应体。
-            if body_holder:
-                body_holder[0] = body
+            # 锁内发布/认领：abandoned 先置位则本线程独占迟到 body 的关闭
+            # 责任；否则 body 交给超时路径的 caller 关闭。两种先后次序下
+            # 关闭责任都恰好归属一方（修复前空列表守卫使本块是死代码）。
+            with release_lock:
+                late = shared["abandoned"]
+                if not late:
+                    shared["body"] = body
+            if late:
+                logger.warning(
+                    "Memoir 音频默认源迟到响应体由工作线程关闭，code=AUDIO_SOURCE_BODY_LATE_RELEASE"
+                )
+                self._close_response_body_best_effort(body)
             chunks: list[bytes] = []
             total = 0
             for chunk in body.iter_bytes(block_size=_DOWNLOAD_CHUNK_BYTES):

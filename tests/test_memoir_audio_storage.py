@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import socket
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -150,14 +152,24 @@ class _StreamBodyStub:
     """
 
     def __init__(
-        self, chunks: list[bytes], *, chunk_delay_seconds: float = 0.0
+        self,
+        chunks: list[bytes],
+        *,
+        chunk_delay_seconds: float = 0.0,
+        block_until_closed: bool = False,
     ) -> None:
         self._chunks = list(chunks)
         self._chunk_delay_seconds = chunk_delay_seconds
+        # 阻塞读门闩：block_until_closed 时每块读先挂起，仅 close() 解除
+        # ——模拟真实 SDK"关闭响应体会打断在途读"的收敛机制（S1 测试 d）。
+        self._read_gate = threading.Event() if block_until_closed else None
         self.closed = False
         self.close_count = 0
         self.consumed_chunks = 0
         self.iter_kwargs: dict[str, Any] | None = None
+        # 记录读取线程与退出事件：供"工作线程有界退出"断言观察线程生命周期。
+        self.reader_thread: threading.Thread | None = None
+        self.iter_exited = threading.Event()
 
     def read(self) -> bytes:
         # 真实签名：read(self) 无 size 参数；带参调用直接 TypeError。
@@ -168,19 +180,31 @@ class _StreamBodyStub:
     def iter_bytes(self, **kwargs: Any):
         # 与 SDK 一致接受关键字参数；记录 block_size 供断言有界分块。
         self.iter_kwargs = dict(kwargs)
-        for chunk in self._chunks:
-            if self._chunk_delay_seconds > 0:
-                time.sleep(self._chunk_delay_seconds)
-            if self.closed:
-                # 模拟底层响应被关闭后在途读取中断（真实 SDK 会抛出）。
-                raise OSError("response body closed while streaming")
-            self.consumed_chunks += 1
-            yield chunk
+        self.reader_thread = threading.current_thread()
+        try:
+            for chunk in self._chunks:
+                if self._read_gate is not None:
+                    # 模拟阻塞中的底层读：只有 close() 能解除（真实 SDK
+                    # 关闭响应体会让在途读立即失败）。
+                    self._read_gate.wait()
+                if self._chunk_delay_seconds > 0:
+                    time.sleep(self._chunk_delay_seconds)
+                if self.closed:
+                    # 模拟底层响应被关闭后在途读取中断（真实 SDK 会抛出）。
+                    raise OSError("response body closed while streaming")
+                self.consumed_chunks += 1
+                yield chunk
+        finally:
+            # 读取循环退出（读完 / 异常 / 被关闭打断）必有痕迹。
+            self.iter_exited.set()
 
     def close(self) -> None:
-        # 幂等关闭：调用方超时路径与工作线程 finally 都可能关闭。
+        # 幂等关闭：调用方超时路径与工作线程 finally 都可能关闭；
+        # 同时解除阻塞中的读，模拟真实 SDK 的收敛行为。
         self.close_count += 1
         self.closed = True
+        if self._read_gate is not None:
+            self._read_gate.set()
 
 
 class _FakeGetResult:
@@ -209,6 +233,7 @@ class _RecordingOSSClient:
         get_exc: Exception | None = None,
         get_delay_seconds: float = 0.0,
         chunk_delay_seconds: float = 0.0,
+        block_until_closed: bool = False,
     ) -> None:
         self.requests: list[Any] = []
         self.get_requests: list[Any] = []
@@ -222,7 +247,9 @@ class _RecordingOSSClient:
                 get_body[index : index + 4] for index in range(0, len(get_body), 4)
             ]
         self._body = _StreamBodyStub(
-            get_chunks, chunk_delay_seconds=chunk_delay_seconds
+            get_chunks,
+            chunk_delay_seconds=chunk_delay_seconds,
+            block_until_closed=block_until_closed,
         )
 
     def put_object(self, request: Any) -> _FakePutResult:
@@ -452,6 +479,213 @@ def test_download_private_bytes_slow_stream_returns_on_time_and_releases() -> No
         time.sleep(0.02)
     assert body.closed is True
     assert client.forbidden == []
+
+
+def test_download_private_bytes_timeout_closes_published_body() -> None:
+    """S1 回归（超时关闭）：caller 超时后认领已发布 body 并必然关闭。
+
+    发布后阻塞读（block_until_closed）：修复前 body_holder 发布是死代码
+    （空列表 truthiness 守卫），超时 close 分支不可达，阻塞读永不解除；
+    修复后 caller 在锁内认领 body 交给一次性后台关闭线程（真实 SDK 链路
+    同步 close 会等在途读的锁拖住 caller，见下方真实 SDK 用例），替身
+    close 立即完成并解除阻塞读（模拟真实 SDK 关闭响应体打断在途读）。
+    """
+    client = _RecordingOSSClient(
+        get_chunks=[b"x" * 4 for _ in range(5)], block_until_closed=True
+    )
+    started = time.monotonic()
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=0.2
+        )
+    elapsed = time.monotonic() - started
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+    # caller 按期返回，不被阻塞的后台读取拖住。
+    assert elapsed < 1.0
+    body = client.last_body
+    assert body is not None
+    # 发布先于读取（实现顺序保证），0.2s 期限足够工作线程完成发布：
+    # body 必已被 caller 认领并关闭（后台关闭线程异步执行，替身 close
+    # 立即完成；用有界等待而非立即断言，避免跨线程调度竞态）。
+    release_deadline = time.monotonic() + 3.0
+    while not body.closed and time.monotonic() < release_deadline:
+        time.sleep(0.02)
+    assert body.closed is True
+    assert body.close_count >= 1
+    assert client.forbidden == []
+
+
+def test_download_private_bytes_late_body_released_by_worker() -> None:
+    """S1 回归（迟到关闭）：caller 已超时后工作线程才拿到 body，由工作线程释放。
+
+    get_object 延迟 0.4s 远大于期限 0.05s：caller 超时认领时必无已发布
+    body（last_body 尚为 None 即为证据）；迟到 body 到手时 abandoned 已
+    置位，工作线程必须就地关闭且不进入有效读取。修复前迟到 body 的
+    关闭责任无人认领，只能等 finally（阻塞读下永不收敛）。
+    """
+    client = _RecordingOSSClient(get_body=b"\xff\xfb-late", get_delay_seconds=0.4)
+    started = time.monotonic()
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=0.05
+        )
+    elapsed = time.monotonic() - started
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+    # caller 按期返回，不被迟到的 get_object 拖住。
+    assert elapsed < 0.35
+    # 证据：caller 返回时 get_object 尚未返回，body 确实"迟到"。
+    assert client.last_body is None
+    stub = client._body
+    # 有界等待迟到 body 被工作线程关闭（只有工作线程可能碰它）。
+    release_deadline = time.monotonic() + 3.0
+    while not stub.closed and time.monotonic() < release_deadline:
+        time.sleep(0.02)
+    assert stub.closed is True
+    # 迟到路径先关闭再读取：关闭后首个块读取即中断，零消费。
+    assert stub.consumed_chunks == 0
+    assert client.forbidden == []
+
+
+def test_download_private_bytes_worker_exits_bounded_after_timeout() -> None:
+    """S1 回归（有界退出）：超时后工作线程不永久挂起。
+
+    阻塞读（block_until_closed）挂起工作线程；caller 超时 close 解除
+    阻塞（不强杀线程，Python 线程无法安全强杀），读取循环以异常退出、
+    工作线程收尾终止。用替身记录的读取线程做有界存活检查。
+    """
+    client = _RecordingOSSClient(
+        get_chunks=[b"x" * 4 for _ in range(5)], block_until_closed=True
+    )
+    with pytest.raises(MemoirAudioStorageError) as excinfo:
+        _uploader(client).download_private_bytes(
+            DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=0.1
+        )
+    assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+    body = client.last_body
+    assert body is not None
+    # 读取循环在关闭打断后有界退出（修复前 gate 永不解除，此处超时失败）。
+    assert body.iter_exited.wait(timeout=3.0) is True
+    assert body.reader_thread is not None
+    # 读取线程本体有界终止：close 打断阻塞读后不再有永久挂起点。
+    exit_deadline = time.monotonic() + 3.0
+    while body.reader_thread.is_alive() and time.monotonic() < exit_deadline:
+        time.sleep(0.02)
+    assert body.reader_thread.is_alive() is False
+    assert body.closed is True
+    assert client.forbidden == []
+
+
+def test_download_private_bytes_real_sdk_timeout_close_must_not_block_caller() -> None:
+    """S1 真实链路回归：已安装 SDK StreamBodyReader + os.pipe 阻塞响应体。
+
+    独立复现（2026-09-14）：真实链路 StreamBodyReader → requests →
+    urllib3 的 close() 会等在途 iter_bytes 读取持有的底层
+    BufferedReader 锁；caller 超时后同步 close 被拖到管道释放线程写端
+    关闭为止（20ms 量级期限实测 ~0.4s 才返回）。修复后 caller 在锁内
+    标记放弃并认领已发布 body，交给一次性有界后台关闭线程，立即按期限
+    抛 AUDIO_SOURCE_READ_TIMEOUT；body 在管道释放后被有界关闭、工作
+    线程有界退出。全程离线：raw 的 _fp 来自 os.pipe，不触网、不读凭据。
+    """
+    requests_lib = pytest.importorskip("requests")
+    urllib3_lib = pytest.importorskip("urllib3")
+    pytest.importorskip("alibabacloud_oss_v2")
+    from alibabacloud_oss_v2.io_utils import StreamBodyReader
+    from alibabacloud_oss_v2.transport.requests_client import (
+        _RequestsHttpResponseImpl,
+    )
+
+    # 离线构造真实 SDK 响应体链路：pipe 读端 BufferedReader 是 urllib3
+    # HTTPResponse 的底层 _fp；在途 iter_bytes 阻塞在管道读上，close()
+    # 必须等这把缓冲区锁——这正是同步 close 拖住 caller 的机制。
+    read_fd, write_fd = os.pipe()
+    reader = os.fdopen(read_fd, "rb")
+    raw = urllib3_lib.HTTPResponse(
+        body=reader, status=200, preload_content=False, decode_content=False
+    )
+    internal = requests_lib.Response()
+    internal.status_code = 200
+    internal.raw = raw
+    sdk_body = StreamBodyReader(
+        _RequestsHttpResponseImpl(
+            request=None, block_size=1024, internal_response=internal
+        )
+    )
+
+    class _RealBodyResult:
+        """假 GetObject 返回：body 为真实 SDK StreamBodyReader 链路。"""
+
+        status_code = 200
+
+        def __init__(self, body: Any) -> None:
+            self.body = body
+
+    class _RealBodyClient:
+        """返回真实 SDK body 的假 client：不触网；记录工作线程供断言。"""
+
+        def __init__(self, body: Any) -> None:
+            self._body = body
+            self.worker_thread: threading.Thread | None = None
+            self.forbidden: list[str] = []
+
+        def get_object(self, request: Any) -> _RealBodyResult:
+            self.worker_thread = threading.current_thread()
+            return _RealBodyResult(self._body)
+
+        def delete_object(self, *args: Any, **kwargs: Any) -> None:
+            self.forbidden.append("delete_object")
+
+        def put_object(self, *args: Any, **kwargs: Any) -> None:
+            self.forbidden.append("put_object")
+
+        def put_object_acl(self, *args: Any, **kwargs: Any) -> None:
+            self.forbidden.append("put_object_acl")
+
+    client = _RealBodyClient(sdk_body)
+    released = threading.Event()
+
+    def _release_pipe() -> None:
+        # 独立释放线程：400ms 后写入 16 字节并关闭写端，解除阻塞中的
+        # 管道读，使 close 与读取循环都能有界收敛（远大于 30ms 期限，
+        # 修复前 caller 会被同步 close 拖到这里）。
+        time.sleep(0.4)
+        try:
+            os.write(write_fd, b"x" * 16)
+            os.close(write_fd)
+        finally:
+            released.set()
+
+    threading.Thread(target=_release_pipe, daemon=True).start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(MemoirAudioStorageError) as excinfo:
+            _uploader(client).download_private_bytes(
+                DEFAULT_SOURCE_KEY, max_bytes=100, timeout_seconds=0.03
+            )
+        elapsed = time.monotonic() - started
+        assert excinfo.value.code == "AUDIO_SOURCE_READ_TIMEOUT"
+        # caller 按期限快速返回：修复前同步 close 被拖到管道释放（~0.4s+）。
+        assert elapsed < 0.15
+        # 认领到的 body 被一次性后台关闭线程有界关闭（≤3s）。
+        closed_deadline = time.monotonic() + 3.0
+        while not reader.closed and time.monotonic() < closed_deadline:
+            time.sleep(0.02)
+        assert reader.closed is True
+        # 工作线程有界退出：close 打断 / 管道 EOF 后读取循环必然收敛。
+        worker = client.worker_thread
+        assert worker is not None
+        exit_deadline = time.monotonic() + 3.0
+        while worker.is_alive() and time.monotonic() < exit_deadline:
+            time.sleep(0.02)
+        assert worker.is_alive() is False
+        assert client.forbidden == []
+    finally:
+        # 兜底清理管道 fd（releaser 可能已关写端，重复关闭忽略）。
+        released.wait(timeout=3.0)
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+        reader.close()
 
 
 # ---------------------------------------------------------------------------

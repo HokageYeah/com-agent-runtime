@@ -1,6 +1,6 @@
 # AgentRuntime Docker 部署契约
 
-> **2026-09-11 默认配乐部署增量（待实施）：** 仅 Runtime 外置 env 增加 `MEMOIR_MUSIC_GENERATION_ENABLED=false`、`MEMOIR_DEFAULT_BGM_OBJECT_KEY`（测试 `memoir-test/audios/default/memoirs.mp3`；正式 `memoir/audios/default/memoirs.mp3`）。沿原 RUNTIME_ENV_FILE/env_file 链，无 CD_ 前缀、无需 Dockerfile 新依赖。源由运维上传，应用凭据仅对精确源只读，副本写入原 background 前缀。先排空再统一更新容器；详见[ENV_CONFIG](../../ENV_CONFIG.md)末尾与[设计](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md)。未执行部署。
+> **2026-09-14 S1–S4 收尾（本轮自动化，未执行部署）：** S2 锁序冻结已完成，见 Business [冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md)。仅 Runtime 外置 env 增加 `MEMOIR_MUSIC_GENERATION_ENABLED=false`、`MEMOIR_DEFAULT_BGM_OBJECT_KEY`（测试 `memoir-test/audios/default/memoirs.mp3`；正式 `memoir/audios/default/memoirs.mp3`）。沿原 RUNTIME_ENV_FILE/env_file 链，无 CD_ 前缀、无需 Dockerfile 新依赖。源由运维上传，应用凭据仅对精确源只读。先排空再统一更新容器。未执行部署。
 
 **状态：** 部署合同；当前仓库已提供基础 `Dockerfile`、test/production Compose、Docker CI，以及 tag 触发的腾讯云远程部署工作流（见第 9 节）。
 

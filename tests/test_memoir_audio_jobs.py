@@ -1063,14 +1063,41 @@ def test_settle_default_music_usage_refuses_paid_settlement(
 def test_list_work_background_music_jobs_is_hmac_less(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """同 Run 不同 hmac 的 BGM 行都能列出（hmac 不参与互斥查询）。"""
+    """同 Run 不同 hmac 的 BGM 行都能列出（hmac 不参与互斥查询）。
+
+    S2（2026-09-14 冻结裁决）后 reserve_job 拒绝新增不同 hmac 的作品级
+    行，但查询必须保持 hmac-less：它同时服务服务层咨询性预检与
+    reserve_job 权威守卫，且存量历史数据（S2 之前建立的双行形态）仍须
+    全量可见，供守卫判定与维护对账。第二条（付费 hmac）行因此直接造行
+    模拟存量数据，绕过已被守卫收口的预留路径。
+    """
     with session_factory() as session:
         _make_run(session, "run-d4")
         service = MemoirAudioJobsService(session, _policy())
         default = service.reserve_job(
             _default_music_reservation("run-d4", "hmac-default")
         ).job
-        paid = service.reserve_job(_music_reservation("run-d4", "hmac-paid")).job
+        # 存量付费行（S2 前的历史形态）：直接造行，不经 reserve_job。
+        paid = MemoirAudioJob(
+            job_id="job-bgm-legacy-paid",
+            business_id="biz-1",
+            run_id="run-d4",
+            generation_epoch=3,
+            package_version="1.0.8",
+            role=ROLE_BACKGROUND_MUSIC,
+            scene_id=WORK_SCENE_ID,
+            segment_index=NO_SEGMENT_INDEX,
+            input_hmac="hmac-paid",
+            attempt=1,
+            state=STATE_RESERVED,
+            reserved_cost=Decimal("3.0"),
+            currency="CNY",
+            requested_music_seconds=60,
+            lease_owner="worker-a",
+            lease_token=1,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        session.add(paid)
         # 干扰项：旁白作业不得混入作品级 BGM 互斥查询结果。
         service.reserve_job(_narration_reservation("run-d4", "scene-1", "hmac-nar"))
         session.commit()
@@ -1084,7 +1111,12 @@ def test_list_work_background_music_jobs_is_hmac_less(
 def test_list_work_background_music_jobs_with_budget_row_keeps_it_untouched(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """已有预算行时先锁预算行再查询：不创建、不改动预算行。"""
+    """已有预算行时查询为纯读：不创建、不改动、不锁定预算行。
+
+    S2（2026-09-14 冻结裁决）删除了原"预算行先 FOR UPDATE 再查"的预锁
+    （零费默认模式不建预算行，该锁对首建竞争无效且构成 AB-BA 死锁对）；
+    本用例钉住删除后的语义：查询前后预算行原样。
+    """
     with session_factory() as session:
         _make_run(session, "run-d5")
         service = MemoirAudioJobsService(session, _policy())
@@ -1600,30 +1632,38 @@ def test_dual_session_paid_same_slot_race_keeps_single_reservation(
             assert float(budget.reserved_total_cost) == pytest.approx(3.0)
 
 
-def test_dual_session_zero_fee_different_hmac_gap_is_known_and_reported(
+def test_dual_session_zero_fee_different_hmac_mutex_blocks_second_row(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """D2 已知缺口探针（freeze §11.1"零费双插入缺口"：复现即报告，不自修）。
+    """S2（2026-09-14 冻结裁决）：不同 hmac 的零费 BGM 双 Session 首建互斥。
 
-    无预算行时两个不同 hmac 的零费 BGM 预留可并插——唯一约束
-    uq_memoir_audio_job_slot 含 input_hmac，挡不住换指纹建第二行；
-    SQLite 串行交错下稳定复现为 2 行。本用例把现状钉成可观测事实：
-    主 Agent 若以新约束/迁移收口此缺口，必须同步把断言改为 ≤1；
-    本批次禁止自行加迁移/新表/新约束（§4.3/§11.1 原条款继续有效）。
+    取代 D2 时代的"缺口探针"（原断言第二行成立、2 行并存）：reserve_job
+    在 _assert_run_active 取得的 AgentRun 行锁下复查 hmac-less 守卫——
+    S1 提交 hmac-a 后，S2 的守卫查询必见该行并拒绝。SQLite 串行交错下
+    SELECT 在 DML 之外跑 autocommit、能看到已提交行，故互斥在 SQLite
+    也成立；本用例只验证串行交错的判定与占槽放置，真实并发（两事务
+    真并行）的行锁竞争依赖 PostgreSQL 行锁（无安全 DSN 时 PG harness
+    用例显式 skip，如实报告）。
     """
     with session_factory() as session_a, session_factory() as session_b:
-        _make_run(session_a, "run-d2-gap")
+        _make_run(session_a, "run-s2-mutex")
         service_a = MemoirAudioJobsService(session_a, _policy())
         service_b = MemoirAudioJobsService(session_b, _policy())
-        # 双方互斥查询都查空（首建竞争 + 不同指纹）。
-        assert service_a.list_work_background_music_jobs("run-d2-gap", 3, "1.0.8") == []
-        assert service_b.list_work_background_music_jobs("run-d2-gap", 3, "1.0.8") == []
-        first = service_a.reserve_job(_default_music_reservation("run-d2-gap", "hmac-a"))
-        assert first.outcome == "created"
+        # S1查 → S2查：首建竞争前置，两边的互斥查询都未见任何 BGM 行。
+        assert service_a.list_work_background_music_jobs("run-s2-mutex", 3, "1.0.8") == []
+        assert service_b.list_work_background_music_jobs("run-s2-mutex", 3, "1.0.8") == []
+        # S1预留（零费 hmac-a）→ commit：首个槽建立。
+        created = service_a.reserve_job(
+            _default_music_reservation("run-s2-mutex", "hmac-a")
+        )
+        assert created.outcome == "created"
         session_a.commit()
-        # S2 不同 hmac：唯一键不冲突、零费不触预算 → 第二行成立（缺口复现）。
-        second = service_b.reserve_job(_default_music_reservation("run-d2-gap", "hmac-b"))
-        assert second.outcome == "created"
+        # S2不同 hmac 抢建第二行：守卫必见已提交的 hmac-a 行 → 拒绝。
+        with pytest.raises(MemoirAudioJobsError) as err:
+            service_b.reserve_job(
+                _default_music_reservation("run-s2-mutex", "hmac-b")
+            )
+        assert err.value.code == "MEMOIR_AUDIO_JOB_SLOT_ACTIVE"
         session_b.commit()
 
         with session_factory() as check:
@@ -1632,5 +1672,93 @@ def test_dual_session_zero_fee_different_hmac_gap_is_known_and_reported(
                     MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC
                 )
             ).all()
-            # 缺口现状：2 行并存。已按 §11.1 报告主 Agent，等待裁决。
-            assert len(rows) == 2
+            # 互斥收口：全文只剩赢家的 1 行；零费路径全程无预算行。
+            assert len(rows) == 1
+            assert rows[0].input_hmac == "hmac-a"
+            assert check.scalar(sa.select(MemoirAudioRunBudget)) is None
+
+
+def test_inflight_default_row_blocks_paid_reservation_of_different_hmac(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """S2 跨模式互斥：默认槽在途时，付费（火山）不同输入不得抢建。
+
+    对应合同"至多一个作品级 BGM 槽"+"切换来源前排空在途音频"：作品级
+    槽一旦被默认配乐（hmac-a）占用且仍在途，付费模式（hmac-b）的首建
+    在同一守卫处被拒——不存在"默认与付费各建一行"的形态。付费被拒时
+    预留整体未发生：不建预算行、不产生任何金额占用。
+    """
+    with session_factory() as session:
+        _make_run(session, "run-s2-cross-mode")
+        service = MemoirAudioJobsService(session, _policy())
+        created = service.reserve_job(
+            _default_music_reservation("run-s2-cross-mode", "hmac-a")
+        )
+        assert created.outcome == "created"
+        session.commit()
+
+        with pytest.raises(MemoirAudioJobsError) as err:
+            service.reserve_job(_music_reservation("run-s2-cross-mode", "hmac-b"))
+        assert err.value.code == "MEMOIR_AUDIO_JOB_SLOT_ACTIVE"
+        session.commit()
+
+        rows = session.scalars(
+            sa.select(MemoirAudioJob).where(
+                MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].input_hmac == "hmac-a"
+        # 付费预留被守卫拒绝在 savepoint 之前：预算表零写入。
+        assert session.scalar(sa.select(MemoirAudioRunBudget)) is None
+
+
+def test_failed_bgm_row_blocks_different_hmac_but_same_hmac_retry_revives(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """S2 终态阻断：failed 的作品级行仍占槽，只有同输入可复活。
+
+    守卫刻意含终态行（failed/cancelled/cleaned）：任何不同 HMAC 的作品级
+    行都阻断新来源首建；失败行仅由同 HMAC（同输入）重试经
+    _reserve_existing 复活（attempt+1、outcome=retried），复活后槽仍归
+    同一输入，不产生第二行。
+    """
+    with session_factory() as session:
+        _make_run(session, "run-s2-terminal")
+        service = MemoirAudioJobsService(session, _policy())
+        created = service.reserve_job(
+            _default_music_reservation("run-s2-terminal", "hmac-a")
+        )
+        assert created.outcome == "created"
+        session.commit()
+        service.mark_failed(
+            created.job.job_id,
+            created.job.lease_token,
+            error_code="AUDIO_SOURCE_READ_FAILED",
+        )
+        session.commit()
+
+        # 不同输入：failed 行仍占槽 → 拒绝。
+        with pytest.raises(MemoirAudioJobsError) as err:
+            service.reserve_job(
+                _default_music_reservation("run-s2-terminal", "hmac-b")
+            )
+        assert err.value.code == "MEMOIR_AUDIO_JOB_SLOT_ACTIVE"
+        session.commit()
+
+        # 同输入重试：唯一合法的复活路径。
+        revived = service.reserve_job(
+            _default_music_reservation("run-s2-terminal", "hmac-a")
+        )
+        assert revived.outcome == "retried"
+        session.commit()
+
+        rows = session.scalars(
+            sa.select(MemoirAudioJob).where(
+                MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0].input_hmac == "hmac-a"
+        assert rows[0].state == STATE_RESERVED
+        assert rows[0].attempt == 2

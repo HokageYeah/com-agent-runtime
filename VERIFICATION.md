@@ -1,6 +1,6 @@
 # AgentRuntime 验证流程
 
-> **2026-09-12 默认配乐增量：已实施并通过自动化验证、双轴只读评审与 D1–D6 必要修复轮（R9–R11 + D1–D6 全部落地）。** Runtime 8 文件套件 222 passed / 1 skipped（PG DSN 既有设计）/ 0 failed（`test_config.py` 全量 43 passed、毒化 env 探针通过，D6 测试进程 env 隔离后无历史红）；`ruff check app tests` 全绿。默认模式零火山提交/查询/下载、零费资产恢复互斥、源 key 不入账本/发布/清理、同 Run 变输入不二次付费均已用例实证；消费端 Business 5 文件 71 passed / 0 failed（D6 隔离后实测全绿，跨仓 fixture 注入 skip 与历史 env 泄漏红均已消除）+ ruff 绿，前端两契约文件 67/0。真实源上传、RAM/ACL、试听、收费模式样本与部署仍需人工。下方"M8 待实施验证"清单（2026-09-08）属真实供应商时代人工门禁，不因本批自动化通过而勾选。
+> **2026-09-14 S1–S4 收尾（本轮自动化）：** 默认配乐已实施。锁序/隔离以 Business 冻结 §11.1 为准：默认 MySQL REPEATABLE READ 下锁 AgentRun 不刷新一致快照，权威互斥是 Run 锁后对作品级 BGM 做 `FOR UPDATE` 当前读；不为局部音频改公共库全局隔离。本轮 Runtime 9 文件+`tests/test_memoir_audio_mysql_rr_isolation.py` **236 passed / 3 skipped / 17.20s**（skip：`test_memoir_audio_jobs.py` PG DSN 未提供、MySQL RR DSN 未提供、PG RR 快照隔离不作 MySQL 当前读验收）；S1 本地 41 passed。消费端 Business 5 文件 **79 passed / 1 warning / 9.11s**（既有 Starlette/httpx deprecation）；前端两契约文件 **67 passed / 0 fail / 2823ms**。SQLite 双 Session generate 只证明服务层吸收（至多一槽、输家 `submit_count==0`），不把 SQLite 当真行锁通过。真实源上传、RAM/ACL、试听、收费样本、真库 RR 与部署仍需人工。下方"M8 待实施验证"清单（2026-09-08）不因本批自动化勾选。
 
 ## M8 待实施验证（2026-09-08 文档收口）
 

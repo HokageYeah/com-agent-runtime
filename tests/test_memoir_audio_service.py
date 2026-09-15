@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -26,6 +27,7 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401 确保全部模型注册进 Base.metadata
 from app.core.config import Settings
@@ -732,6 +734,171 @@ def test_bgm_slot_retryable_zero_fee_and_paid_semantics() -> None:
 # ---------------------------------------------------------------------------
 # 付费生成模式回归
 # ---------------------------------------------------------------------------
+
+
+def _cross_generate_factory(tmp_path: Path) -> sessionmaker[Session]:
+    """S2 双 Session generate：文件 SQLite + NullPool，每 Session 独立连接。
+
+    不复用 _build()（内存 sqlite:// 单连接）。SQLite 忽略 FOR UPDATE，
+    本工厂只证明 generate 吸收 SLOT_ACTIVE、至多一槽、输家零付费提交。
+    真库 RR 当前读走 test_memoir_audio_mysql_rr_isolation.py。
+    """
+    engine = sa.create_engine(
+        f"sqlite:///{tmp_path / 'memoir-audio-s2-generate.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 15},
+    )
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _make_run_for_id(session: Session, run_id: str) -> AgentRun:
+    """独立 run_id：双 Session generate 不能复用硬编码 RUN_ID。"""
+    run = AgentRun(
+        run_id=run_id,
+        agent_id="memoir_agent",
+        agent_version=PACKAGE_VERSION,
+        package_digest="digest-test",
+        contract_version="1.1.0",
+        business_type="couple_memory",
+        business_id="archive-svc",
+        input_json={
+            "archive_id": "archive-svc",
+            "snapshot_id": "snapshot-svc",
+            "generation_epoch": 0,
+        },
+        capability_snapshot_json={"execution_policy": {"max_run_seconds": 1200}},
+        active_elapsed_ms=0,
+        execution_attempt=1,
+        authorization_version=1,
+        caller_id="caller-1",
+        tenant_id="couple-diary",
+        create_idempotency_key=f"idem-{run_id}",
+        callback_target_id="memory_callback",
+        business_connector_id="couple_diary_backend",
+        trace_id=f"trace-{run_id}",
+        run_deadline_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    session.add(run)
+    session.commit()
+    return run
+
+
+def _service_on_session(
+    session: Session,
+    *,
+    config: MemoirAudioConfig | None = None,
+    uploader: FakeUploader | None = None,
+    music: FakeMusicClient | None = None,
+) -> SimpleNamespace:
+    music = music or FakeMusicClient()
+    uploader = uploader or FakeUploader()
+    service = MemoirAudioService(
+        tts_client=FakeTTSClient(),
+        music_client=music,
+        uploader=uploader,
+        transcoder=FakeTranscoder(),
+        downloader=FakeDownloader(),
+        jobs_service=MemoirAudioJobsService(session, _cost_policy()),
+        config=config or _config(),
+        session=session,
+    )
+    return SimpleNamespace(session=session, service=service, music=music, uploader=uploader)
+
+
+def _assert_single_bgm_slot(session_factory: sessionmaker[Session]) -> MemoirAudioJob:
+    with session_factory() as check:
+        rows = list(
+            check.scalars(
+                sa.select(MemoirAudioJob).where(
+                    MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC
+                )
+            )
+        )
+        assert len(rows) == 1
+        return rows[0]
+
+
+def test_dual_session_generate_default_vs_default_keeps_single_slot(
+    tmp_path: Path,
+) -> None:
+    """S2：默认/默认不同源字节 → 至多一槽，输家零付费提交。"""
+    factory = _cross_generate_factory(tmp_path)
+    run_id = "run-s2-gen-dd"
+    with factory() as setup:
+        run = _make_run_for_id(setup, run_id)
+    with factory() as session_a, factory() as session_b:
+        winner = _service_on_session(
+            session_a, uploader=FakeUploader(source_bytes=b"default-bgm-source-a")
+        )
+        loser = _service_on_session(
+            session_b, uploader=FakeUploader(source_bytes=b"default-bgm-source-b")
+        )
+        won = winner.service.generate(run, _playback())
+        session_a.commit()
+        lost = loser.service.generate(run, _playback())
+        session_b.commit()
+
+    assert won["background_music"] is not None
+    assert lost["background_music"] is None
+    assert len(lost["narrations"]) == 1
+    assert winner.music.submit_count == 0
+    assert loser.music.submit_count == 0
+    _assert_single_bgm_slot(factory)
+
+
+def test_dual_session_generate_default_winner_paid_loser_zero_submit(
+    tmp_path: Path,
+) -> None:
+    """S2：默认赢家 / 付费输家 → 至多一槽，输家 submit_count==0。"""
+    factory = _cross_generate_factory(tmp_path)
+    run_id = "run-s2-gen-dp"
+    with factory() as setup:
+        run = _make_run_for_id(setup, run_id)
+    with factory() as session_a, factory() as session_b:
+        winner = _service_on_session(session_a)
+        loser = _service_on_session(
+            session_b, config=_config(music_generation_enabled=True)
+        )
+        won = winner.service.generate(run, _playback())
+        session_a.commit()
+        lost = loser.service.generate(run, _playback())
+        session_b.commit()
+
+    assert won["background_music"] is not None
+    assert lost["background_music"] is None
+    assert len(lost["narrations"]) == 1
+    assert winner.music.submit_count == 0
+    assert loser.music.submit_count == 0
+    _assert_single_bgm_slot(factory)
+
+
+def test_dual_session_generate_paid_winner_default_loser_zero_submit(
+    tmp_path: Path,
+) -> None:
+    """S2：付费赢家 / 默认输家 → 至多一槽，赢家提交一次，输家零提交。"""
+    factory = _cross_generate_factory(tmp_path)
+    run_id = "run-s2-gen-pd"
+    with factory() as setup:
+        run = _make_run_for_id(setup, run_id)
+    with factory() as session_a, factory() as session_b:
+        winner = _service_on_session(
+            session_a, config=_config(music_generation_enabled=True)
+        )
+        loser = _service_on_session(
+            session_b, uploader=FakeUploader(source_bytes=b"default-bgm-source-loser")
+        )
+        won = winner.service.generate(run, _playback())
+        session_a.commit()
+        lost = loser.service.generate(run, _playback())
+        session_b.commit()
+
+    assert won["background_music"] is not None
+    assert lost["background_music"] is None
+    assert len(lost["narrations"]) == 1
+    assert winner.music.submit_count == 1
+    assert loser.music.submit_count == 0
+    _assert_single_bgm_slot(factory)
 
 
 def test_generation_mode_keeps_volcano_paid_path() -> None:

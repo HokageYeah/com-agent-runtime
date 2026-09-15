@@ -1,6 +1,6 @@
 # AgentRuntime 敏感与条件环境配置
 
-> **2026-09-11 增量待开发：** 默认配乐分支尚不存在，不能只填 env 就视为启用。下方原 M8 的音乐必填条件在增量实现后仅用于生成模式；新增变量与文件落点见本文末尾，技术主定义见[默认配乐设计](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md)。
+> **2026-09-14 S1–S4 收尾（本轮自动化）：** 默认配乐已实施。锁序/隔离以 Business [冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md) 为准；不为局部音频改公共库全局隔离。未部署，人工门禁未执行。下方原 M8 的音乐必填条件仅用于生成模式；新增变量与文件落点见本文末尾。
 
 ## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；R6–R8 已实现，未部署）
 
@@ -62,7 +62,7 @@ API host、SSE path、音频 MP3/24000Hz/64000bit、音乐 API Version `2024-08-
 
 ### C. Docker 文件具体改哪里
 
-| 文件 | 待实施变更 |
+| 文件 | 已实施变更 |
 |---|---|
 | `app/core/config.py` | 上表 Settings 字段和条件校验，Key 安全类型；能力关闭不阻断其他 Agent 启动 |
 | `.env.example` | 开发占位与各变量说明；不含真实 Key |
@@ -625,4 +625,4 @@ production 第二项为 `memoir/audios/default/memoirs.mp3`（无开头 /）。S
 
 默认源失败只降级配乐，不转收费。副本账本按“无供应商生成调用”明确零预留/零结算，不伪造 TaskID/请求秒数，不以假单价0隐藏未知费用；OSS 请求/存储/流量仍计费。源不进入发布清单或可清理 ledger.object_key。
 
-切换模式或更换源前暂停新增工作并排空音频 Run/上传，再统一更新进程；已发布作品不换曲。同 Run 恢复若出现不同 BGM 输入，不重新提交收费，保守降级，原未知发布保留规则不变。完整恢复边界见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md) §4；实施任务 R9–R11 已完成并通过双轴只读评审（2026-09-12），真实源/权限/试听与收费模式验证仍需人工。
+切换模式或更换源前暂停新增工作并排空音频 Run/上传，再统一更新进程；已发布作品不换曲。同 Run 恢复若出现不同 BGM 输入，不重新提交收费，保守降级，原未知发布保留规则不变。完整恢复边界见[技术主定义](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/designs/2026-09-11-M8默认配乐与生成开关设计说明.md) §4；作品级互斥锁序见[冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md)。R9–R11 已落码；2026-09-14 S1–S4 收尾完成自动化套件。不为局部音频改引擎全局隔离。真实源/权限/试听与收费模式验证仍需人工。

@@ -1065,9 +1065,10 @@ class MemoirAudioService:
             # D2 共用防线（freeze §11.1）：作品级互斥判定放在提交尝试循环内
             # ——建槽/提交付费任务之前必须完成；429 限流重试后回到循环顶部
             # 重新判定（重试期间其他执行者可能已为同一作品建了 BGM 槽）。
-            # 与 reserve_job 之间无 commit：判定、占槽在同一数据库事务边界
-            # 内完成，锁序（预算行若存在先 FOR UPDATE → hmac-less 查询 →
-            # 判定 → 预留）不可重排。
+            # S2（2026-09-14 冻结裁决）：本判定是咨询性快速路径，不持任何
+            # 锁；权威互斥由 reserve_job 在 AgentRun 行锁下的 hmac-less 守卫
+            # 强制。与 reserve_job 之间保持无 commit：判定、占槽在同一数据
+            # 库事务边界内完成，缩小（而非消除）判定与占槽之间的竞窗。
             if self._bgm_mutex_degraded(refs, bgm_hmac, mode="volcano"):
                 return None
             existing = self._jobs.find_job(
@@ -1401,13 +1402,13 @@ class MemoirAudioService:
         行还是不同指纹默认行）→ 保守降级为无 BGM：不建第二槽、不提交付费
         任务、不清零未知火山费用。
 
-        锁序（禁止重排）：list_work_background_music_jobs 内部先对预算行
-        （若存在）with_for_update() 再做 hmac-less 查询；调用方必须保证
-        判定 → 预留（reserve_job）之间没有任何 commit，使预算行锁与 BGM
-        查询、占槽落在同一事务里。预算行不存在时绝不为锁创建；首建竞争由
-        reserve_job 的 savepoint 重试兜底（同 hmac 竞争者行与自身指纹相同，
-        互斥判定不受影响）。真实并发验证依赖 PostgreSQL 行锁——SQLite
-        忽略 FOR UPDATE，只验证判定逻辑放置正确。
+        S2（2026-09-14 §11.1）：本判定必须保持无锁三参查询。它在
+        reserve_job 的 AgentRun 行锁之前调用，若此处 FOR UPDATE 会与
+        Run→BGM 锁序构成 AB-BA。权威互斥由 reserve_job 锁内对 BGM
+        的 FOR UPDATE 当前读强制；MySQL RR 下不能假设"锁了 Run 之后
+        普通 SELECT 必然看见已提交行"。调用方仍应保证判定 → 预留
+        之间无 commit，缩小（而非消除）竞窗。SQLite 忽略 FOR UPDATE，
+        只验证判定逻辑放置；真库当前读走 MySQL RR opt-in 验收。
         """
         siblings = self._jobs.list_work_background_music_jobs(
             refs.run_id, refs.generation_epoch, refs.package_version

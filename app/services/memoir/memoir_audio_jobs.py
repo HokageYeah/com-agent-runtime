@@ -219,11 +219,32 @@ class MemoirAudioJobsService:
         """
         moment = now or datetime.now(UTC)
         self._validate_reservation(reservation)
-        # R4：预留也走执行尝试 fence——按"本次请求的 owner"校验，旧尝试的
-        # worker 在 Run 升级执行尝试后不得再抢占新槽。
-        self._assert_run_active(
-            reservation.run_id, lease_owner=reservation.lease_owner
-        )
+        # S2（2026-09-14 §11.1 重冻结）：Run 门禁 + 作品级 BGM 当前读守卫
+        # 包在同一 savepoint。MySQL 默认 RR 下，锁 AgentRun 不会刷新一致
+        # 快照，后续普通 SELECT 仍可能读到加锁前的空结果；BGM 必须在
+        # Run 锁之后对作品级行 FOR UPDATE 做当前读。不同 hmac 拒绝走
+        # savepoint 回滚立刻放锁，禁止 session.rollback()——旁白与 BGM
+        # 共用一个 Session。守卫含终态行：合同"至多一个作品级 BGM 槽"。
+        with self._session.begin_nested():
+            # R4：预留也走执行尝试 fence——按"本次请求的 owner"校验。
+            self._assert_run_active(
+                reservation.run_id, lease_owner=reservation.lease_owner
+            )
+            if (
+                reservation.role == ROLE_BACKGROUND_MUSIC
+                and reservation.scene_id == WORK_SCENE_ID
+            ):
+                siblings = self.list_work_background_music_jobs(
+                    reservation.run_id,
+                    reservation.generation_epoch,
+                    reservation.package_version,
+                    for_update=True,
+                )
+                if any(row.input_hmac != reservation.input_hmac for row in siblings):
+                    raise MemoirAudioJobsError(
+                        "MEMOIR_AUDIO_JOB_SLOT_ACTIVE",
+                        "作品级配乐槽已被不同输入占用",
+                    )
 
         existing = self._find_by_slot(reservation)
         if existing is not None:
@@ -474,35 +495,40 @@ class MemoirAudioJobsService:
         )
 
     def list_work_background_music_jobs(
-        self, run_id: str, generation_epoch: int, package_version: str
+        self,
+        run_id: str,
+        generation_epoch: int,
+        package_version: str,
+        *,
+        for_update: bool = False,
     ) -> list[MemoirAudioJob]:
-        """同 Run 作品级 BGM 互斥查询（freeze 2026-09-11 §4.3，hmac-less）。
+        """同 Run 作品级 BGM hmac-less 查询（freeze 2026-09-11 §4.3）。
 
         唯一约束 uq_memoir_audio_job_slot 含 input_hmac，挡不住"同 Run 换
         输入建第二条 BGM 行"；本查询刻意不带 input_hmac，把该 Run 全部
-        作品级 BGM 行交给调用方（R11）做保守降级判断。若该 Run 已有
-        预算行，先对其 with_for_update 再查——挂在现有 run-budget 序列化
-        上；绝不为锁去创建预算行。
+        作品级 BGM 行交给调用方做保守判断。
+
+        S2（2026-09-14 §11.1）：默认三参路径保持无锁，供咨询性预检
+        （_bgm_mutex_degraded 在 Run 锁之前调用，加锁会构成 AB-BA）。
+        reserve_job 在 AgentRun FOR UPDATE 之后传 for_update=True，对
+        BGM 行做当前读（populate_existing + FOR UPDATE）。MySQL RR 下
+        只锁 Run 不会刷新一致快照，普通 SELECT 不能当权威互斥。
         """
-        self._session.scalar(
-            sa.select(MemoirAudioRunBudget)
-            .where(MemoirAudioRunBudget.run_id == run_id)
-            .with_for_update()
-        )
-        return list(
-            self._session.scalars(
-                sa.select(MemoirAudioJob)
-                .where(
-                    MemoirAudioJob.run_id == run_id,
-                    MemoirAudioJob.generation_epoch == generation_epoch,
-                    MemoirAudioJob.package_version == package_version,
-                    MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
-                    MemoirAudioJob.scene_id == WORK_SCENE_ID,
-                    MemoirAudioJob.segment_index == NO_SEGMENT_INDEX,
-                )
-                .order_by(MemoirAudioJob.id)
+        query = (
+            sa.select(MemoirAudioJob)
+            .where(
+                MemoirAudioJob.run_id == run_id,
+                MemoirAudioJob.generation_epoch == generation_epoch,
+                MemoirAudioJob.package_version == package_version,
+                MemoirAudioJob.role == ROLE_BACKGROUND_MUSIC,
+                MemoirAudioJob.scene_id == WORK_SCENE_ID,
+                MemoirAudioJob.segment_index == NO_SEGMENT_INDEX,
             )
+            .order_by(MemoirAudioJob.id)
         )
+        if for_update:
+            query = query.execution_options(populate_existing=True).with_for_update()
+        return list(self._session.scalars(query))
 
     # ------------------------------------------------------------------
     # 状态机写入（全部走 lease fencing + Run 门禁）

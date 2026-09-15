@@ -42,18 +42,24 @@ os.environ["ENVIRONMENT"] = "test"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
-def _blocked_dotenv_source(_self: object) -> dict[str, str]:
-    # 阻断 dotenv 源：pydantic-settings 在本进程内读不到任何 .env 文件。
-    # 生产配置加载器保持原样；需要真实 dotenv 行为的用例不属于本测试进程。
+def _blocked_dotenv_read(_self: object) -> dict[str, str]:
+    # 阻断 dotenv 读取入口：pydantic-settings 2.14.1 在 DotEnvSettingsSource
+    # 构造期（_load_env_vars → _read_env_files）就读取 env_file 指向的文件，
+    # 只替换 __call__ 已经太晚——文件在 source 构造时已被读入内存。
+    # 因此必须在读取入口（_read_env_files）上打补丁，本进程内不触碰任何
+    # .env 文件；生产配置加载器保持原样。
     return {}
 
 
-# 保存原始实现：个别必须验证真实 dotenv 行为的测试可用
-# monkeypatch.setattr(DotEnvSettingsSource, "__call__", ORIGINAL_DOTENV_SOURCE_CALL)
-# 临时恢复（用后自动还原），不必绕开本隔离。
-ORIGINAL_DOTENV_SOURCE_CALL = _pydantic_settings_sources.DotEnvSettingsSource.__call__
+# 保存原始读取入口，并挂到阻断函数属性上：个别必须验证真实 dotenv 行为的
+# 测试用 monkeypatch.setattr(DotEnvSettingsSource, "_read_env_files",
+# _blocked_dotenv_read.original) 临时恢复（用后自动还原），并显式传
+# _env_file=<tmp_path 内的文件>，保证只读测试自建的临时文件。
+_blocked_dotenv_read.original = (
+    _pydantic_settings_sources.DotEnvSettingsSource._read_env_files
+)
 
-_pydantic_settings_sources.DotEnvSettingsSource.__call__ = _blocked_dotenv_source
+_pydantic_settings_sources.DotEnvSettingsSource._read_env_files = _blocked_dotenv_read
 # --------------------------------------------------------------------------
 
 # 测试进程必须与开发者的 .env.*.local 隔离。这些都是固定的假测试值，
