@@ -1,6 +1,8 @@
 # AgentRuntime 总控 Implementation Plan
 
-> **2026-09-14 S1–S4 收尾（本轮自动化）：** [M8 子计划](../backend/2026-09-07-Memoir语音与配乐开发计划.md) R9–R11 已实施。锁序以 Business [冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md) 为准。本轮 Runtime 9 文件+MySQL RR opt-in **236 passed / 3 skipped / 17.20s**。未部署，人工门禁未执行。唯一跨工程入口仍是 Business 回忆录总控。原 R6–R8 状态和人工门禁保留。
+> **2026-09-15 S2 锁事务收尾（本轮自动化）：** [M8 子计划](../backend/2026-09-07-Memoir语音与配乐开发计划.md) R9–R11 已实施。锁序/事务边界以 Business [冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md) 为准。本轮 Runtime 9 文件+MySQL RR opt-in **213 passed / 4 skipped / 1 warning / 29.77s**；锁序探针+交错 generate 定向 **5 passed / 1.47s**。不得沿用 2026-09-14 的 236/3。未部署，人工门禁未执行。唯一跨工程入口仍是 Business 回忆录总控。原 R6–R8 状态和人工门禁保留。
+>
+> **2026-09-14 S1–S4 收尾（历史自动化，不得作为 2026-09-15 锁生命周期通过证据）：** 当时 Runtime 9 文件+MySQL RR opt-in **236 passed / 3 skipped / 17.20s**。
 
 > **2026-09-08 当前增量：M8 设计/计划完成，实施未开始。** M7部署测试完成来自用户确认，实际基线最新包1.0.7；旧日期状态仅为历史证据。跨工程唯一入口仍为 [Business总控](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-08-06-回忆录-总控开发计划.md)，本仓执行 [M8设计](2026-09-07-Memoir语音与配乐设计说明.md) 与 [R6–R8子计划](../backend/2026-09-07-Memoir语音与配乐开发计划.md)。
 

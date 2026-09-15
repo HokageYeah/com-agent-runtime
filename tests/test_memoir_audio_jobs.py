@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -1762,3 +1763,149 @@ def test_failed_bgm_row_blocks_different_hmac_but_same_hmac_retry_revives(
         assert rows[0].input_hmac == "hmac-a"
         assert rows[0].state == STATE_RESERVED
         assert rows[0].attempt == 2
+
+
+def _select_lock_events(
+    session: Session,
+) -> tuple[list[tuple[frozenset[str], bool]], Any, Any]:
+    """记录 agent_runs / memoir_audio_jobs 的 SELECT 及其 compiled _for_update_arg。
+
+    SQLite 方言会从编译 SQL 剥掉 FOR UPDATE（SQLAlchemy 2.0.50 已实测），
+    不能用语句文本断言。本探针只证明锁序，不是 InnoDB 等待。
+    """
+    captured: list[tuple[frozenset[str], bool]] = []
+    engine = session.get_bind()
+
+    def _before_cursor_execute(
+        _conn: Any,
+        _cursor: Any,
+        _statement: Any,
+        _parameters: Any,
+        context: Any,
+        _executemany: Any,
+    ) -> None:
+        compiled = getattr(context, "compiled", None)
+        clause = getattr(compiled, "statement", None) if compiled is not None else None
+        if clause is None or not hasattr(clause, "get_final_froms"):
+            return
+        try:
+            tables = frozenset(
+                t.name for t in clause.get_final_froms() if hasattr(t, "name")
+            )
+        except Exception:
+            return
+        watched = tables & {"agent_runs", "memoir_audio_jobs"}
+        if not watched:
+            return
+        if not bool(getattr(clause, "is_select", False)):
+            return
+        captured.append(
+            (watched, getattr(clause, "_for_update_arg", None) is not None)
+        )
+
+    event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+    return captured, engine, _before_cursor_execute
+
+
+def _assert_run_lock_before_job_lock(
+    events: list[tuple[frozenset[str], bool]],
+) -> None:
+    locking = [(tables, locked) for tables, locked in events if locked]
+    assert locking, "expected locking SELECT"
+    first_tables, _ = locking[0]
+    assert "agent_runs" in first_tables
+    assert "memoir_audio_jobs" not in first_tables
+    assert any("memoir_audio_jobs" in tables for tables, _locked in locking[1:]), (
+        "expected Job FOR UPDATE after Run"
+    )
+    seen_run_lock = False
+    for tables, locked in events:
+        if not locked:
+            continue
+        if "agent_runs" in tables:
+            seen_run_lock = True
+        if "memoir_audio_jobs" in tables:
+            assert seen_run_lock, "Job FOR UPDATE before AgentRun FOR UPDATE"
+
+
+def test_reserve_job_lock_order_is_run_then_bgm(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """reserve_job：无 Job peek；第一把锁 AgentRun，第二把 BGM FOR UPDATE。"""
+    with session_factory() as session:
+        _make_run(session, "run-s2-lock-reserve")
+        service = MemoirAudioJobsService(session, _policy())
+        events, engine, listener = _select_lock_events(session)
+        try:
+            service.reserve_job(
+                _default_music_reservation("run-s2-lock-reserve", "hmac-lock-a")
+            )
+            session.commit()
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+        locking = [(tables, locked) for tables, locked in events if locked]
+        assert locking[0][0] == frozenset({"agent_runs"})
+        assert any("memoir_audio_jobs" in tables for tables, _locked in locking[1:])
+        first_lock_idx = next(
+            i for i, (_tables, locked) in enumerate(events) if locked
+        )
+        assert all(
+            "memoir_audio_jobs" not in tables
+            for tables, _locked in events[:first_lock_idx]
+        ), "reserve 不得在 Run 锁前 SELECT Job"
+        _assert_run_lock_before_job_lock(events)
+
+
+def test_load_for_write_paths_peek_unlocked_then_run_then_job(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """renew/rotate/record_object_key：Job peek 无锁 → Run 锁 → Job 锁。"""
+    with session_factory() as session:
+        _make_run(session, "run-s2-lock-load")
+        service = MemoirAudioJobsService(session, _policy())
+        reserved = service.reserve_job(
+            _default_music_reservation("run-s2-lock-load", "hmac-lock-b")
+        ).job
+        token = reserved.lease_token
+        session.commit()
+
+        def _probe(action: Any) -> list[tuple[frozenset[str], bool]]:
+            events, engine, listener = _select_lock_events(session)
+            try:
+                action()
+                session.commit()
+            finally:
+                event.remove(engine, "before_cursor_execute", listener)
+            return events
+
+        for events in (
+            _probe(
+                lambda: service.renew_lease(
+                    reserved.job_id, token, ttl_seconds=60.0
+                )
+            ),
+            _probe(
+                lambda: service.record_object_key(
+                    reserved.job_id,
+                    token,
+                    "memoir-test/audios/background/scope/bgm-lock.mp3",
+                    "audio/mpeg",
+                )
+            ),
+            _probe(
+                lambda: service.rotate_lease(
+                    reserved.job_id,
+                    token,
+                    owner="worker-b",
+                    ttl_seconds=60.0,
+                )
+            ),
+        ):
+            job_selects = [
+                (tables, locked)
+                for tables, locked in events
+                if "memoir_audio_jobs" in tables
+            ]
+            assert job_selects, "expected Job SELECT"
+            assert job_selects[0][1] is False, "peek 不得 FOR UPDATE"
+            _assert_run_lock_before_job_lock(events)

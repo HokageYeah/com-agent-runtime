@@ -894,6 +894,10 @@ class MemoirAudioService:
             job = outcome.job
         except MemoirAudioJobsError as exc:
             self._absorb_jobs_error(ctx, exc.code, "default_bgm_reserve")
+            # S2（2026-09-15 §11.1）：reserve 已在外层事务取得 Run/BGM
+            # 行锁。SAVEPOINT 不是放锁。提交结束持锁事务，旁白账本
+            # 一并落库。禁止 session.rollback()。
+            self._commit_ledger(ctx)
             return
         if outcome.outcome == "reused" and job.object_key and job.duration_ms:
             ctx.background_music = self._bgm_entry(refs, bgm_hmac, job)
@@ -1103,6 +1107,9 @@ class MemoirAudioService:
                 job = outcome.job
             except MemoirAudioJobsError as exc:
                 self._absorb_jobs_error(ctx, exc.code, "bgm_reserve")
+                # S2（2026-09-15 §11.1）：与默认路径同一放锁合同——
+                # 吸收已加锁的 reserve 拒绝后必须结束外层事务。
+                self._commit_ledger(ctx)
                 return None
             token = job.lease_token
             try:

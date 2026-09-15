@@ -219,12 +219,12 @@ class MemoirAudioJobsService:
         """
         moment = now or datetime.now(UTC)
         self._validate_reservation(reservation)
-        # S2（2026-09-14 §11.1 重冻结）：Run 门禁 + 作品级 BGM 当前读守卫
-        # 包在同一 savepoint。MySQL 默认 RR 下，锁 AgentRun 不会刷新一致
-        # 快照，后续普通 SELECT 仍可能读到加锁前的空结果；BGM 必须在
-        # Run 锁之后对作品级行 FOR UPDATE 做当前读。不同 hmac 拒绝走
-        # savepoint 回滚立刻放锁，禁止 session.rollback()——旁白与 BGM
-        # 共用一个 Session。守卫含终态行：合同"至多一个作品级 BGM 槽"。
+        # S2（2026-09-15 §11.1）：持行锁写入统一 Run → Job。互斥当前读
+        # 与占槽插入留在同一外层事务直到调用方 _commit_ledger。
+        # begin_nested 只作该段写回滚（守卫抛错 / IntegrityError），
+        # 不是放锁——InnoDB 行锁随外层 COMMIT 释放。禁止
+        # session.rollback() 放锁（会丢旁白未提交账本）。MySQL RR 下
+        # 锁 Run 不刷新快照，BGM 必须在 Run 锁之后 FOR UPDATE 当前读。
         with self._session.begin_nested():
             # R4：预留也走执行尝试 fence——按"本次请求的 owner"校验。
             self._assert_run_active(
@@ -508,11 +508,12 @@ class MemoirAudioJobsService:
         输入建第二条 BGM 行"；本查询刻意不带 input_hmac，把该 Run 全部
         作品级 BGM 行交给调用方做保守判断。
 
-        S2（2026-09-14 §11.1）：默认三参路径保持无锁，供咨询性预检
+        S2（2026-09-15 §11.1）：默认三参路径保持无锁，供咨询性预检
         （_bgm_mutex_degraded 在 Run 锁之前调用，加锁会构成 AB-BA）。
-        reserve_job 在 AgentRun FOR UPDATE 之后传 for_update=True，对
-        BGM 行做当前读（populate_existing + FOR UPDATE）。MySQL RR 下
-        只锁 Run 不会刷新一致快照，普通 SELECT 不能当权威互斥。
+        reserve_job 在 AgentRun FOR UPDATE 之后传 for_update=True。
+        拒绝路径由 service 吸收后 _commit_ledger 结束外层事务放锁；
+        savepoint 回滚不是即时放锁。MySQL RR 下只锁 Run 不会刷新
+        一致快照，普通 SELECT 不能当权威互斥。
         """
         query = (
             sa.select(MemoirAudioJob)
@@ -1143,12 +1144,24 @@ class MemoirAudioJobsService:
         """写前统一校验（R4 升级为当前读）：存在 → Run 门禁（含执行尝试
         fence）→ fencing → 过期 → 来源态。
 
-        populate_existing 强制刷新 Session 身份映射中的旧值（否则 MySQL RR
-        快照下旧 ORM 值会绕过 fencing 校验）；with_for_update 在 MySQL 侧
-        升级为锁定当前读，SQLite 忽略锁但刷新依然生效。
-        fence_owner 仅 rotate_lease 使用：接管路径校验"新 owner"的执行尝试
-        身份（行内旧 owner 在接管场景必然是旧 attempt，不能据此拒绝接管）。
+        S2（2026-09-15）：持行锁路径必须 Run → Job，禁止再 Job → Run。
+        peek 按 job_id 无锁取不可变 run_id（此次禁止 FOR UPDATE，否则
+        与 reserve 的 Run→Job 构成等待环）→ _assert_run_active（Run
+        FOR UPDATE；rotate_lease 仍传 fence_owner=新 owner）→ Job
+        populate_existing + FOR UPDATE → 重新校验存在 / token / 来源态
+        / 过期。peek 后行消失 → MEMOIR_AUDIO_JOB_NOT_FOUND。
         """
+        # 无锁 peek：只取 run_id / 默认 lease_owner，不加 Job 行锁。
+        peeked = self._session.scalar(
+            sa.select(MemoirAudioJob).where(MemoirAudioJob.job_id == job_id)
+        )
+        if peeked is None:
+            raise MemoirAudioJobsError("MEMOIR_AUDIO_JOB_NOT_FOUND", "作业不存在")
+        run_id = peeked.run_id
+        self._assert_run_active(
+            run_id,
+            lease_owner=peeked.lease_owner if fence_owner is None else fence_owner,
+        )
         job = self._session.scalar(
             sa.select(MemoirAudioJob)
             .where(MemoirAudioJob.job_id == job_id)
@@ -1157,10 +1170,6 @@ class MemoirAudioJobsService:
         )
         if job is None:
             raise MemoirAudioJobsError("MEMOIR_AUDIO_JOB_NOT_FOUND", "作业不存在")
-        self._assert_run_active(
-            job.run_id,
-            lease_owner=job.lease_owner if fence_owner is None else fence_owner,
-        )
         if job.lease_token != lease_token:
             raise MemoirAudioJobsError(
                 "MEMOIR_AUDIO_FENCING_REJECTED", "旧 lease 不得写入新结果"

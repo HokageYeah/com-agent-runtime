@@ -16,7 +16,9 @@ OSS / 付费服务 / 开发者真实 env。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -65,6 +67,7 @@ from app.services.memoir.memoir_audio_storage import MemoirAudioStorageError
 RUN_ID = "run-svc-default"
 PACKAGE_VERSION = "1.0.8"
 SCENE_BODY = "那年春天我们在江边老城散步看日落，晚风很轻。"
+LOSER_SCENE_BODY = "那年秋天我们在海边看潮起潮落，晚风很轻。"
 DEFAULT_SOURCE_KEY = "memoir-test/audios/default/memoirs.mp3"
 SOURCE_BYTES = b"default-bgm-source-mp3-bytes-v1"
 INPUT_KEY = "svc-test-input-key"
@@ -257,8 +260,8 @@ def _build(
     )
 
 
-def _playback() -> dict[str, Any]:
-    return {"scenes": [{"scene_id": "scene-1", "body": SCENE_BODY}]}
+def _playback(body: str = SCENE_BODY) -> dict[str, Any]:
+    return {"scenes": [{"scene_id": "scene-1", "body": body}]}
 
 
 def _default_bgm_hmac(
@@ -899,6 +902,168 @@ def test_dual_session_generate_paid_winner_default_loser_zero_submit(
     assert winner.music.submit_count == 1
     assert loser.music.submit_count == 0
     _assert_single_bgm_slot(factory)
+
+
+class _BarrierUploader(FakeUploader):
+    """只挡住 background 前缀上传：旁白共用同一 uploader，全局挡会卡在旁白。"""
+
+    def __init__(
+        self,
+        *,
+        source_bytes: bytes,
+        winner_committed: threading.Event,
+        release_winner_upload: threading.Event,
+    ) -> None:
+        super().__init__(source_bytes=source_bytes)
+        self._winner_committed = winner_committed
+        self._release_winner_upload = release_winner_upload
+
+    def upload_private_bytes(self, data: bytes, object_key: str, mime: str) -> None:
+        if object_key.startswith("memoir-test/audios/background/"):
+            self._winner_committed.set()
+            assert self._release_winner_upload.wait(timeout=15)
+        super().upload_private_bytes(data, object_key, mime)
+
+
+def _run_interleaved_generate(
+    tmp_path: Path,
+    *,
+    run_id: str,
+    winner_config: MemoirAudioConfig | None,
+    loser_config: MemoirAudioConfig | None,
+    winner_bytes: bytes,
+    loser_bytes: bytes,
+    expect_winner_submit: int,
+) -> None:
+    """双方先见空后并发 generate；输家 BGM reserve 等到赢家槽提交后再交叉。
+
+    SQLite 忽略 FOR UPDATE，本测试证明吸收 + 单槽 + 输家零提交，
+    不是 InnoDB 等待。顺序 winner.generate() 再 loser.generate() 不是本验收。
+    """
+    factory = _cross_generate_factory(tmp_path)
+    with factory() as setup:
+        run = _make_run_for_id(setup, run_id)
+    winner_committed = threading.Event()
+    release_winner_upload = threading.Event()
+    with factory() as session_a, factory() as session_b:
+        jobs_a = MemoirAudioJobsService(session_a, _cost_policy())
+        jobs_b = MemoirAudioJobsService(session_b, _cost_policy())
+        assert jobs_a.list_work_background_music_jobs(run_id, 0, PACKAGE_VERSION) == []
+        assert jobs_b.list_work_background_music_jobs(run_id, 0, PACKAGE_VERSION) == []
+        winner = _service_on_session(
+            session_a,
+            config=winner_config,
+            uploader=_BarrierUploader(
+                source_bytes=winner_bytes,
+                winner_committed=winner_committed,
+                release_winner_upload=release_winner_upload,
+            ),
+        )
+        loser = _service_on_session(
+            session_b,
+            config=loser_config,
+            uploader=FakeUploader(source_bytes=loser_bytes),
+        )
+        # 赢家槽提交后咨询互斥会看见行并跳过 reserve；本验收要走
+        # SLOT_ACTIVE 吸收，所以咨询路径强制放行。
+        loser.service._bgm_mutex_degraded = (  # type: ignore[method-assign]
+            lambda *args, **kwargs: False
+        )
+        orig_bgm = loser.service._generate_background_music
+
+        async def _delayed_bgm(*args: Any, **kwargs: Any) -> Any:
+            loop = asyncio.get_running_loop()
+            asserted = await loop.run_in_executor(
+                None, lambda: winner_committed.wait(timeout=15)
+            )
+            assert asserted
+            release_winner_upload.set()
+            return await orig_bgm(*args, **kwargs)
+
+        loser.service._generate_background_music = _delayed_bgm  # type: ignore[method-assign]
+        results: dict[str, Any] = {}
+        errors: list[BaseException] = []
+
+        def _run_winner() -> None:
+            try:
+                results["won"] = winner.service.generate(run, _playback())
+                session_a.commit()
+            except BaseException as exc:
+                errors.append(exc)
+                release_winner_upload.set()
+
+        def _run_loser() -> None:
+            try:
+                results["lost"] = loser.service.generate(
+                    run, _playback(LOSER_SCENE_BODY)
+                )
+                session_b.commit()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                # 咨询互斥若跳过 reserve，也必须放行赢家上传，避免死等。
+                release_winner_upload.set()
+
+        t_w = threading.Thread(target=_run_winner)
+        t_l = threading.Thread(target=_run_loser)
+        t_w.start()
+        t_l.start()
+        t_w.join(timeout=30)
+        t_l.join(timeout=30)
+        assert not t_w.is_alive() and not t_l.is_alive()
+        assert errors == []
+        won, lost = results["won"], results["lost"]
+        assert won["background_music"] is not None
+        assert lost["background_music"] is None
+        assert len(lost["narrations"]) == 1
+        assert winner.music.submit_count == expect_winner_submit
+        assert loser.music.submit_count == 0
+        _assert_single_bgm_slot(factory)
+
+
+def test_interleaved_generate_default_vs_default_keeps_single_slot(
+    tmp_path: Path,
+) -> None:
+    """受控交错：默认/默认不同源字节。顺序 generate 不是本验收。"""
+    _run_interleaved_generate(
+        tmp_path,
+        run_id="run-s2-int-dd",
+        winner_config=None,
+        loser_config=None,
+        winner_bytes=b"default-bgm-source-a",
+        loser_bytes=b"default-bgm-source-b",
+        expect_winner_submit=0,
+    )
+
+
+def test_interleaved_generate_default_winner_paid_loser_zero_submit(
+    tmp_path: Path,
+) -> None:
+    """受控交错：默认赢家 / 付费输家。顺序 generate 不是本验收。"""
+    _run_interleaved_generate(
+        tmp_path,
+        run_id="run-s2-int-dp",
+        winner_config=None,
+        loser_config=_config(music_generation_enabled=True),
+        winner_bytes=SOURCE_BYTES,
+        loser_bytes=b"paid-loser-unused",
+        expect_winner_submit=0,
+    )
+
+
+def test_interleaved_generate_paid_winner_default_loser_zero_submit(
+    tmp_path: Path,
+) -> None:
+    """受控交错：付费赢家 / 默认输家。顺序 generate 不是本验收。"""
+    _run_interleaved_generate(
+        tmp_path,
+        run_id="run-s2-int-pd",
+        winner_config=_config(music_generation_enabled=True),
+        loser_config=None,
+        winner_bytes=SOURCE_BYTES,
+        loser_bytes=b"default-bgm-source-loser",
+        expect_winner_submit=1,
+    )
 
 
 def test_generation_mode_keeps_volcano_paid_path() -> None:

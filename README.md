@@ -376,8 +376,8 @@ poetry run alembic heads
 chmod 600 .env.development.local
 ./agent-runtime.sh doctor development
 ./agent-runtime.sh prepare development
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.7 --dry-run
-./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.7
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.8 --dry-run
+./agent-runtime.sh register development --agent-id memoir_agent --version 1.0.8
 ./agent-runtime.sh start development
 ```
 
