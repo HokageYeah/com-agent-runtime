@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from pytest import MonkeyPatch
@@ -29,6 +30,7 @@ from app.runtime.checkpoint import (
 from app.runtime.executor import RetryableWorkflowNodeError, WorkflowExecutor
 from app.runtime.interfaces import LeaseContext
 from app.runtime.state import AgentState
+from app.runtime.tool_gateway import ToolGateway
 from app.services.lease_service import LeaseService
 
 
@@ -1590,6 +1592,7 @@ def test_executor_resume_real_memoir_runner_publishes_once_via_query_after_commi
         def __init__(self) -> None:
             self.publish_calls: list[tuple[object, ...]] = []
             self.reconciliation_calls: list[tuple[object, ...]] = []
+            self.reconciliation_contexts: list[Mapping[str, str] | None] = []
             self.snapshot_calls = 0
 
         def get_snapshot(self, *args: object) -> dict[str, object]:
@@ -1600,8 +1603,12 @@ def test_executor_resume_real_memoir_runner_publishes_once_via_query_after_commi
             self.publish_calls.append(args)
             return {"revision": 1, "content_digest": "published-digest"}
 
-        def get_publish_result(self, *args: object) -> dict[str, object]:
+        def get_publish_result(
+            self, *args: object, tool_context: Mapping[str, str] | None = None,
+        ) -> dict[str, object]:
+            # 与真实网关一致：上下文只能通过关键字传入，不混入对账坐标。
             self.reconciliation_calls.append(args)
+            self.reconciliation_contexts.append(tool_context)
             return {"revision": 1, "content_digest": "published-digest"}
 
     engine = create_engine("sqlite://")
@@ -1655,5 +1662,12 @@ def test_executor_resume_real_memoir_runner_publishes_once_via_query_after_commi
     # 经 latest_committed + get_publish_result 对账，不重发 publish_playback_document。
     assert len(gateway.publish_calls) == 1
     assert len(gateway.reconciliation_calls) == 1
+    assert gateway.reconciliation_calls[0] == (
+        "connector", "archive", "snapshot", run.run_id, 0,
+        f"{run.run_id}:publish_document:memory.publish_playback_document:0",
+    )
+    assert gateway.reconciliation_contexts == [
+        ToolGateway.build_tool_context(run, "publish_document")
+    ]
     # load_snapshot 首轮 + resume 各读一次（safe_to_rerun=True 强制重读）。
     assert gateway.snapshot_calls == 2
