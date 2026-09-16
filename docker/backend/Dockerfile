@@ -16,7 +16,7 @@ WORKDIR /app
 # 仅替换软件源主机，保留 Debian 发行版、组件和 Signed-By 校验。
 # Compose 可覆盖为就近镜像；直接 docker build 默认仍使用官方源。
 ARG APT_MIRROR=https://deb.debian.org
-RUN sed -i -E "s|https?://(deb.debian.org|security.debian.org)|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+RUN sed -i -E "s#https?://(deb[.]debian[.]org|security[.]debian[.]org)#${APT_MIRROR}#g" /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-runtime-download \
     && apt-get update -o APT::Update::Error-Mode=any \
     && apt-get install -y --no-install-recommends ffmpeg \

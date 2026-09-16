@@ -236,3 +236,30 @@ def test_ffmpeg_build_mirror_and_download_limits() -> None:
     assert dockerfile.index("apt-get install") < dockerfile.index("RUN pip install")
     assert dockerfile.index("apt-get install") < dockerfile.index("COPY pyproject.toml")
     assert "--allow-unauthenticated" not in dockerfile
+
+
+def test_apt_mirror_sed_expression_executes_and_preserves_security_fields() -> None:
+    """实际执行 Dockerfile 的 sed 表达式，避免分隔符与正则或运算符冲突。"""
+    import shlex
+    import subprocess
+
+    dockerfile = (ROOT / "docker/backend/Dockerfile").read_text()
+    command = next(line for line in dockerfile.splitlines() if line.startswith("RUN sed "))
+    expression = shlex.split(command.removesuffix("\\"))[4]
+    source = (
+        "URIs: http://deb.debian.org/debian\n"
+        "Suites: trixie trixie-updates\n"
+        "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n"
+        "URIs: https://security.debian.org/debian-security\n"
+        "URIs: http://deb.debian.org/debian-security\n"
+        "Suites: trixie-security\n"
+    )
+    for mirror in ("https://mirrors.tuna.tsinghua.edu.cn", "https://deb.debian.org"):
+        result = subprocess.run(
+            ["sed", "-E", expression.replace("${APT_MIRROR}", mirror)],
+            input=source, text=True, capture_output=True, check=True,
+        )
+        expected = source.replace("http://deb.debian.org", mirror).replace(
+            "https://security.debian.org", mirror
+        )
+        assert result.stdout == expected
