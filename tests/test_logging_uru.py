@@ -64,3 +64,29 @@ def test_shutdown_logging_drains_and_closes_handlers() -> None:
 
     complete.assert_called_once_with()
     remove.assert_called_once_with()
+
+
+def test_console_colors_and_plain_files() -> None:
+    """终端按级别着色，文件保留纯文本格式。"""
+    with (
+        patch.object(logging_uru.logger, "remove"),
+        patch.object(logging_uru.logger, "add") as add,
+        patch.object(logging_uru, "ensure_log_directories"),
+        patch.object(logging_uru.logging, "basicConfig"),
+        patch.object(logging_uru, "configure_third_party_loggers"),
+    ):
+        logging_uru.setup_logging()
+    console, *files = [call.kwargs for call in add.call_args_list]
+    assert console["colorize"] is True
+    assert "<level>{message}</level>" in console["format"]
+    assert all(sink["format"] == logging_uru.LOG_FORMAT for sink in files)
+    for level, color in (("SUCCESS", "green"), ("WARNING", "yellow"), ("ERROR", "red")):
+        assert color in logging_uru.logger.level(level).color
+
+
+def test_success_preserves_stdlib_formatting(caplog) -> None:
+    """SUCCESS 保留标准 logging 的参数格式化。"""
+    with caplog.at_level(25):
+        logging_uru.log_success("音频上传完成 count=%s", 2)
+    assert caplog.records[-1].levelname == "SUCCESS"
+    assert caplog.records[-1].getMessage() == "音频上传完成 count=2"

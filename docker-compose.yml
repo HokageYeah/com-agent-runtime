@@ -2,6 +2,9 @@ x-runtime-image: &runtime-image
   build:
     context: .
     dockerfile: docker/backend/Dockerfile
+    args:
+      # 国内云服务器构建使用就近 Debian 镜像；境外可通过外置 env 改回官方源。
+      APT_MIRROR: ${RUNTIME_APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn}
   image: ${RUNTIME_IMAGE_REPOSITORY:-com-agent-runtime}:${RUNTIME_IMAGE_TAG:-local}
 
 x-runtime-env-file: &runtime-env-file

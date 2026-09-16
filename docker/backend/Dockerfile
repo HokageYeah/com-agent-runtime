@@ -9,15 +9,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir "poetry==${POETRY_VERSION}"
-
 # M8 音频转码依赖：ffmpeg（含 ffprobe）必须在切换非 root 前以系统包管理器
 # 安装并清理 apt 索引；不通过 ARG/ENV 传 Key，运行时不联网安装。
 # Debian 的 ffmpeg 包同时提供 /usr/bin/ffmpeg 与 /usr/bin/ffprobe，
 # 与 MEMOIR_AUDIO_FFMPEG_PATH / MEMOIR_AUDIO_FFPROBE_PATH 默认值一致。
-RUN apt-get update \
+# 仅替换软件源主机，保留 Debian 发行版、组件和 Signed-By 校验。
+# Compose 可覆盖为就近镜像；直接 docker build 默认仍使用官方源。
+ARG APT_MIRROR=https://deb.debian.org
+RUN sed -i -E "s|https?://(deb.debian.org|security.debian.org)|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Retries "3";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\n' > /etc/apt/apt.conf.d/80-runtime-download \
+    && apt-get update -o APT::Update::Error-Mode=any \
     && apt-get install -y --no-install-recommends ffmpeg \
+    && ffmpeg -version > /dev/null \
+    && ffprobe -version > /dev/null \
     && rm -rf /var/lib/apt/lists/*
+
+# 独立缓存系统依赖，Python 依赖变动不应触发重新下载 ffmpeg。
+RUN pip install --no-cache-dir "poetry==${POETRY_VERSION}"
 
 COPY pyproject.toml poetry.lock ./
 RUN poetry install --only main --no-root --no-ansi

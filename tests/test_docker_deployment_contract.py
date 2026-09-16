@@ -220,3 +220,19 @@ def test_runtime_compose_keeps_env_file_chain_without_audio_secrets() -> None:
                         "MEMORY_AUDIO_OSS_ACCESS_KEY_ID",
                         "MEMORY_AUDIO_OSS_ACCESS_KEY_SECRET"):
         assert secret_name not in compose
+
+
+def test_ffmpeg_build_mirror_and_download_limits() -> None:
+    """国内构建源可覆盖，网络失败有界且安装层不依赖业务源码。"""
+    dockerfile = (ROOT / "docker/backend/Dockerfile").read_text()
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert "${RUNTIME_APT_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn}" in compose
+    assert "ARG APT_MIRROR=https://deb.debian.org" in dockerfile
+    assert "/etc/apt/sources.list.d/debian.sources" in dockerfile
+    assert 'Acquire::Retries "3"' in dockerfile
+    assert 'Acquire::https::Timeout "30"' in dockerfile
+    assert "APT::Update::Error-Mode=any" in dockerfile
+    assert "ffmpeg -version" in dockerfile and "ffprobe -version" in dockerfile
+    assert dockerfile.index("apt-get install") < dockerfile.index("RUN pip install")
+    assert dockerfile.index("apt-get install") < dockerfile.index("COPY pyproject.toml")
+    assert "--allow-unauthenticated" not in dockerfile

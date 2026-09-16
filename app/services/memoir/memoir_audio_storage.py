@@ -43,6 +43,8 @@ from typing import Any
 
 import httpx
 
+from app.core.logging_uru import log_success
+
 logger = logging.getLogger(__name__)
 
 # 角色常量：与部署前缀一一对应，object_key 文件名前缀由角色决定。
@@ -247,7 +249,7 @@ class AliyunAudioOSSUploader:
                 getattr(result, "status_code", None),
             )
             raise MemoirAudioStorageError("AUDIO_UPLOAD_FAILED", "OSS 上传返回非预期状态")
-        logger.info(
+        log_success(
             "Memoir 音频私有上传完成，size=%d，code=AUDIO_UPLOAD_DONE", len(data)
         )
 
@@ -563,7 +565,7 @@ class AudioTranscoder:
         audio = output_path.read_bytes()
         if not audio:
             raise MemoirAudioStorageError(failure_code, "音频转码产物为空")
-        logger.info("Memoir 音频转码完成，duration_ms=%d，code=AUDIO_TRANSCODE_DONE", duration_ms)
+        log_success("Memoir 音频转码完成，duration_ms=%d，code=AUDIO_TRANSCODE_DONE", duration_ms)
         return ConcatResult(audio=audio, duration_ms=duration_ms)
 
     async def _probe_duration_ms(self, media_path: Path) -> int:
@@ -694,7 +696,7 @@ class SecureAudioDownloader:
         data = b"".join(chunks)
         if not data:
             raise MemoirAudioStorageError("AUDIO_DOWNLOAD_EMPTY", "音频内容为空")
-        logger.info("Memoir 音频下载完成，size=%d，code=AUDIO_DOWNLOAD_DONE", len(data))
+        log_success("Memoir 音频下载完成，size=%d，code=AUDIO_DOWNLOAD_DONE", len(data))
         return data
 
     def _validate_url(self, url: str) -> str:

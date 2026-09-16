@@ -31,6 +31,8 @@ from typing import Any
 
 import httpx
 
+from app.core.logging_uru import log_success
+
 logger = logging.getLogger(__name__)
 
 # ---- TTS 协议常量（冻结，不可从请求改写） ----
@@ -429,6 +431,7 @@ class VolcanoTTSClient:
         if not chunks:
             logger.warning("Memoir TTS 空音频会话，words=%d，code=TTS_EMPTY_AUDIO", text_words)
             raise MemoirAudioProviderError("TTS_EMPTY_AUDIO", "TTS 会话未返回音频")
+        log_success("Memoir TTS 合成完成，code=TTS_SUCCESS")
         return TTSSegmentResult(audio=b"".join(chunks), text_words=text_words)
 
 
@@ -501,7 +504,7 @@ class VolcanoMusicClient:
             if not isinstance(audio_url, str) or not audio_url.startswith("https://"):
                 logger.warning("Memoir 音乐成功但缺 AudioUrl，code=MUSIC_AUDIO_URL_MISSING")
                 raise MemoirAudioProviderError("MUSIC_AUDIO_URL_MISSING", "音乐结果缺音频地址")
-            logger.info("Memoir 音乐任务成功，code=MUSIC_SUCCESS")
+            log_success("Memoir 音乐任务成功，code=MUSIC_SUCCESS")
             return MusicTaskSnapshot(status=status, audio_url=audio_url)
         # 0/1/3：等待或失败。FailureReason 原文不读不入日志。
         logger.info("Memoir 音乐任务状态更新，status=%s", status)

@@ -301,3 +301,9 @@ production 环境应在凭据核对和联调验收完成后再使用 `--activate
 ## 2026-09-16 M8 包版本补充
 
 CI 与两环境模板的 `AGENT_PACKAGE_VERSION` 统一为 `1.0.8`；服务器现有外置 Compose env 也须同步该值，修改模板不会覆盖服务器私有配置。保留已注册的 `memoir_agent@1.0.7`，新环境须另外注册它以支持无音频资格作品。能力接口同时校验并声明镜像中的 `1.0.7` / `1.0.8` 包，顶层 `package_digest` 仍表示 `1.0.7` 基线，不代表两个包已在数据库注册。Business 按作品冻结资格选包，历史 Run 不统一升级。
+
+## 2026-09-16 ffmpeg 构建下载超时
+
+若部署日志停在 `apt-get install ... ffmpeg` 并最终 `Run Command Timeout`，优先检查软件源网络。Compose 默认使用 `https://mirrors.tuna.tsinghua.edu.cn`，同时覆盖 Debian 主仓与 security 仓的主机，保留发行版和签名校验。可在工作流 `--env-file` 指向的服务器私有 Compose env 设置 `RUNTIME_APT_MIRROR=https://deb.debian.org` 切回官方源；不要仅写在另一个 `RUNTIME_ENV_FILE` 应用文件中。无需新增 GitHub Secret。镜像参考：https://mirrors.tuna.tsinghua.edu.cn/help/debian/ 。
+
+APT 设置单次连接/无数据等待超时 30 秒、有限重试 3 次（不是整个安装总时限）；索引更新失败直接终止，安装后检查 ffmpeg/ffprobe。系统依赖层位于 Python 依赖安装和源码复制之前，后续构建命中缓存时可复用；不要为重试添加 `--no-cache` 或清理构建缓存。首次构建仍需下载依赖，不承诺固定下载耗时。本改动无需升级 Agent 包或重新生成音频。

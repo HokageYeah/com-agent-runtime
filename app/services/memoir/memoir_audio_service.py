@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from app.core.logging_uru import log_success
 from app.models.memoir_audio_job import (
     NO_SEGMENT_INDEX,
     ROLE_BACKGROUND_MUSIC,
@@ -371,7 +372,7 @@ class MemoirAudioService:
             )
         except Exception:
             # 编排层意外异常按全量降级处理：保留已成功条目，绝不阻断发布。
-            logging.warning(
+            logging.error(
                 "MemoirAgent 音频编排异常降级 run_id=%s code=%s",
                 refs.run_id, "AUDIO_ORCHESTRATION_FAILED",
             )
@@ -537,7 +538,7 @@ class MemoirAudioService:
             input_hmac=narr_hmac,
         )
         if reused is not None and reused.object_key and reused.duration_ms:
-            logging.info(
+            log_success(
                 "MemoirAgent 旁白资产复用 run_id=%s scene=%s code=MEMOIR_AUDIO_ASSET_REUSED",
                 refs.run_id, scene_id,
             )
@@ -853,7 +854,7 @@ class MemoirAudioService:
             input_hmac=bgm_hmac,
         )
         if reused is not None and reused.object_key and reused.duration_ms:
-            logging.info(
+            log_success(
                 "MemoirAgent 默认配乐资产复用 run_id=%s code=MEMOIR_AUDIO_ASSET_REUSED",
                 refs.run_id,
             )
@@ -971,6 +972,11 @@ class MemoirAudioService:
             "duration_ms": concat.duration_ms,
         }
 
+        log_success(
+            "MemoirAgent 默认配乐副本就绪 run_id=%s code=MEMOIR_DEFAULT_BGM_READY",
+            refs.run_id,
+        )
+
     async def _download_default_source(self, ctx: _RunCtx) -> bytes:
         """读默认源字节：同步 SDK 读取走节点专用线程池，受剩余时限约束。
 
@@ -1017,7 +1023,7 @@ class MemoirAudioService:
             input_hmac=bgm_hmac,
         )
         if reused is not None and reused.object_key and reused.duration_ms:
-            logging.info(
+            log_success(
                 "MemoirAgent 配乐资产复用 run_id=%s code=MEMOIR_AUDIO_ASSET_REUSED",
                 refs.run_id,
             )
@@ -1356,7 +1362,7 @@ class MemoirAudioService:
             ),
             timeout=ctx.remaining(),
         )
-        logging.info(
+        log_success(
             "MemoirAgent 音频私有上传完成 run_id=%s code=MEMOIR_AUDIO_UPLOADED",
             refs.run_id,
         )
@@ -1499,7 +1505,7 @@ class MemoirAudioService:
             return True
         except Exception:
             ctx.stop_reason = "ledger_commit_failed"
-            logging.warning(
+            logging.error(
                 "MemoirAgent 音频账本提交失败停止 code=MEMOIR_AUDIO_LEDGER_COMMIT_FAILED"
             )
             try:
