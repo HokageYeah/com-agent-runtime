@@ -67,15 +67,11 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
         ) from exc
     # 不记录请求头中的身份、签名、Key ID 或其它凭据。
     try:
-        # capabilities 必须暴露实际不可变 package digest，供业务侧立刻发现版本漂移。
-        # 暴露当前活跃 Agent 版本 1.0.7（预算扩容：max_model_calls 8→12 等额度
-        # 扩容，恢复大素材档案下的瞬时重试余量；循环语义与 1.0.6 完全一致）；
-        # 1.0.0～1.0.6 均为不可变历史包，不修改其内容或已绑定 Run。
-        # 新 Run 固定使用 1.0.7；旧 Run 不走 capabilities，
-        # 仍按其已绑定版本 resume/retry。
-        package = AgentPackageService(Path(__file__).parents[2] / "agents").load(
-            "memoir_agent", "1.0.7"
-        )
+        # 同时声明无声与有声新作品可选的包，不能把旧图文作品统一升级。
+        # 保留顶层 package_digest 的 1.0.7 基线语义；agents 声明前逐包校验，
+        # 包文件可用不等于数据库已注册，部署仍须保留 1.0.7 并注册 1.0.8。
+        loader = AgentPackageService(Path(__file__).parents[2] / "agents")
+        packages = [loader.load("memoir_agent", version) for version in ("1.0.7", "1.0.8")]
     except AgentPackageValidationError as exc:
         logging.error("Runtime capabilities 无法加载 MemoirAgent 摘要")
         raise HTTPException(status_code=503, detail="agent package unavailable") from exc
@@ -85,8 +81,11 @@ async def runtime_capabilities(request: Request) -> dict[str, object]:
     )
     return {
         "contract_version": CONTRACT_VERSION,
-        "package_digest": package.package_digest,
-        "agents": [{"agent_id": package.agent_id, "version": package.version}],
+        "package_digest": packages[0].package_digest,
+        "agents": [
+            {"agent_id": package.agent_id, "version": package.version}
+            for package in packages
+        ],
         "model_policies": model_policies,
         "capabilities": {
             "workflow_agent": True,

@@ -117,7 +117,10 @@ def test_runtime_capabilities_requires_valid_service_signature(client) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["contract_version"] == "1.0.0"
-    assert payload["agents"] == [{"agent_id": "memoir_agent", "version": "1.0.7"}]
+    assert payload["agents"] == [
+        {"agent_id": "memoir_agent", "version": "1.0.7"},
+        {"agent_id": "memoir_agent", "version": "1.0.8"},
+    ]
     assert set(payload["capabilities"]) == {
         "workflow_agent",
         "native_sse",
@@ -158,3 +161,29 @@ def test_runtime_health_rejects_unready_root_database() -> None:
 
     assert ready is False
     assert checks["database"] == "not_ready"
+
+
+@pytest.mark.parametrize("unavailable_version", ["1.0.7", "1.0.8"])
+def test_capabilities_rejects_unavailable_declared_package(
+    client, monkeypatch, unavailable_version: str,
+) -> None:
+    """任一声明包校验失败时返回 503，不能只验证旧包便宣称支持音频。"""
+    from app.api.endpoints.capabilities_api import (
+        AgentPackageService,
+        AgentPackageValidationError,
+    )
+
+    original_load = AgentPackageService.load
+
+    def load(self, agent_id, version):
+        if version == unavailable_version:
+            raise AgentPackageValidationError("offline-invalid-package")
+        return original_load(self, agent_id, version)
+
+    monkeypatch.setattr(AgentPackageService, "load", load)
+    timestamp = str(int(datetime.now(UTC).timestamp()))
+    response = client.get(
+        _CAPABILITIES_PATH, headers=_runtime_capability_headers(timestamp)
+    )
+    assert response.status_code == 503
+    assert "offline-invalid-package" not in response.text

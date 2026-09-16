@@ -297,3 +297,7 @@ production 环境应在凭据核对和联调验收完成后再使用 `--activate
 6. test 验收后备份 production 数据库，按相同顺序发布 production，记录 Git tag/commit、image ID、AgentPackage version 和 Alembic head。
 
 相关文档：[`README.md`](../../README.md)、[`ENV_CONFIG.md`](../../ENV_CONFIG.md)、[`VERIFICATION.md`](../../VERIFICATION.md)。
+
+## 2026-09-16 M8 包版本补充
+
+CI 与两环境模板的 `AGENT_PACKAGE_VERSION` 统一为 `1.0.8`；服务器现有外置 Compose env 也须同步该值，修改模板不会覆盖服务器私有配置。保留已注册的 `memoir_agent@1.0.7`，新环境须另外注册它以支持无音频资格作品。能力接口同时校验并声明镜像中的 `1.0.7` / `1.0.8` 包，顶层 `package_digest` 仍表示 `1.0.7` 基线，不代表两个包已在数据库注册。Business 按作品冻结资格选包，历史 Run 不统一升级。
