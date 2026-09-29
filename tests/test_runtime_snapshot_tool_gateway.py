@@ -626,8 +626,10 @@ def test_generic_call_rejects_sensitive_tool_output_without_logging_payload(capl
     )
     manifest = ToolManifest(name="memory.get_snapshot", version="1.0.0", connector_id="couple_diary_backend", method="POST", relative_path="/api/v1/internal/agent-tools/memory.get_snapshot", input_from="input", output_to="snapshot")
 
-    with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
+    with caplog.at_level(logging.INFO), pytest.raises(ValueError, match="TOOL_OUTPUT_SENSITIVE"):
         gateway.call(manifest, {"archive_id": "a", "snapshot_id": "s", "run_id": "r", "generation_epoch": 2, "tool_context": _tool_context("a", "r")})
+    assert "code=TOOL_OUTPUT_SENSITIVE" in caplog.text
+    assert "HTTP Business Tool 成功" not in caplog.text
     assert "13800138000" not in caplog.text
 
 

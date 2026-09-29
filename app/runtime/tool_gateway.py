@@ -598,8 +598,9 @@ class ToolGateway:
                 inner_version,
             )
             raise ValueError("TOOL_OUTPUT_SCHEMA_VERSION_INVALID")
-        logging.info("HTTP Business Tool 成功 tool=%s connector=%s", tool_name, connector_id)
+        # 完整输出校验通过才可报告成功，避免 HTTP 200 掩盖内容被拒绝。
         self._validate_output(output, tool_name=tool_name)
+        logging.info("HTTP Business Tool 成功 tool=%s connector=%s", tool_name, connector_id)
         return output
 
     def _effective_timeout(self, fixed_timeout: float) -> float:
@@ -857,6 +858,11 @@ class ToolGateway:
         def walk(value: Any) -> None:
             if isinstance(value, str):
                 if _TOOL_OUTPUT_SENSITIVE.search(value):
+                    # 仅输出固定分类，不输出命中值、字段路径或工具正文。
+                    logging.warning(
+                        "HTTP Business Tool 输出校验拒绝 tool=%s code=TOOL_OUTPUT_SENSITIVE",
+                        tool_name,
+                    )
                     raise ValueError("TOOL_OUTPUT_SENSITIVE")
                 return
             if value is None or isinstance(value, (bool, int, float)):
@@ -869,6 +875,10 @@ class ToolGateway:
                 for item in value.values():
                     walk(item)
                 return
+            logging.warning(
+                "HTTP Business Tool 输出校验拒绝 tool=%s code=TOOL_OUTPUT_INVALID",
+                tool_name,
+            )
             raise ValueError("TOOL_OUTPUT_INVALID")
 
         walk(scanned)
