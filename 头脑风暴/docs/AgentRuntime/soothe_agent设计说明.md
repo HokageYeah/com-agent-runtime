@@ -99,7 +99,7 @@ REGISTRATION = AgentRegistration(
 
 ### 4.3 wire 契约（与业务端一致）
 
-请求外壳 `{"input": {...}}`，响应外壳 `{"output": {...}, "schema_version": "1.0.0"}`，签名沿用 4 个 `X-Agent-*` 头。
+请求外壳 `{"input": {...}, "context": {...}}`（`context` 为 `ToolGateway.build_tool_context` 构造的 7 字段，三个工具的 `input` 都含 `session_id`、`turn_id`、`run_id`），响应外壳 `{"output": {...}, "schema_version": "1.0.0"}`，签名沿用 4 个 `X-Agent-*` 头，工具线协议 `1.1.0`。业务端外壳校验与业务拒绝码（只用 `AUTHORIZATION_REVOKED`、`BUSINESS_DATA_INVALID`、`RUNTIME_SERVICE_UNAVAILABLE`）以情侣日记仓总控计划 3.4 节为准（2026-11-02 G1 审阅时修订）。
 
 | 工具 | `output` |
 |---|---|

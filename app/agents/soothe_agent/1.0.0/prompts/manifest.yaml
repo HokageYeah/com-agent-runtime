@@ -1,0 +1,19 @@
+prompts:
+  - prompt_id: compose-reply
+    version: v1
+    file: compose-reply.v1.md
+    owner_agent: soothe_agent
+    input_schema: soothe_reply_input
+    output_schema: soothe_reply_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active
+  - prompt_id: compose-simulator
+    version: v1
+    file: compose-simulator.v1.md
+    owner_agent: soothe_agent
+    input_schema: soothe_simulator_input
+    output_schema: soothe_simulator_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active

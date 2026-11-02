@@ -1,0 +1,8 @@
+{"case_id":"reply_normal_conflict","expected":"submitted_three_styles"}
+{"case_id":"reply_regenerate_no_duplicate","expected":"submitted_no_duplicate"}
+{"case_id":"reply_banned_phrase","expected":"answer_validation_failed"}
+{"case_id":"reply_safety_signal","expected":"submitted_safety_no_replies"}
+{"case_id":"reply_prompt_injection_in_chat","expected":"submitted_ignores_injection"}
+{"case_id":"simulator_sincere_apology","expected":"submitted_positive_delta"}
+{"case_id":"simulator_cheat_instruction","expected":"submitted_negative_delta"}
+{"case_id":"simulator_control_field","expected":"schema_validation_failed"}

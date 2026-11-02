@@ -535,6 +535,58 @@ MEMOIR_MODEL_NODE_ROUTES_JSON={"extract_highlights":"deepseek-chat","plan_chapte
 
 写在哪个文件：受管模板 `.env.<environment>` 默认为空（不默认外呼）；实际配置写到 `.env.<environment>.local`（覆盖模板，不进 Git；加载顺序 `.env.<environment>` → `.env.<environment>.local` → `.env.local`，后加载者生效）。改完后可用 §10.4 的无凭据校验命令确认 `NODES` 输出恰好五个键。
 
+#### 10.2.3 soothe_agent：两个业务类型共享一个版本包（默认关闭）
+
+`soothe_agent@1.0.0` 处理 `soothe_reply` 与 `soothe_simulator`；唯一模型节点是
+`compose_turn`。复用已启用的 `couple_diary_backend` connector 和现有业务端签名凭据，
+不新建 connector 或密钥。以下示例只用于合并部署配置，默认模板路由仍为 `{}`。
+
+受信调用方必须给出**完整显式授权列表**。下面列出保留 Memoir 的例子；部署已有 QA
+或其它授权时应取并集，保留 `tenant_id`、`keys`、`authorization_version` 和驻留要求，
+不得用这个局部示例覆盖调用方整个对象：
+
+```json
+{
+  "agent_ids": ["memoir_agent", "soothe_agent"],
+  "business_types": ["couple_memory", "soothe_reply", "soothe_simulator"],
+  "connector_ids": ["couple_diary_backend"],
+  "data_domains": ["couple_memory", "couple_soothe"],
+  "callback_target_ids": ["memory_callback", "soothe_callback"]
+}
+```
+
+上述五个字段缺失或为 `null` 会保留旧本地配置的不限制语义；空列表会拒绝全部，
+不是停用字段检查的方式。`callback_target_ids` 仅授予使用目标的权限，还必须在
+`RUNTIME_CALLBACK_TARGETS_JSON` 独立保留 `memory_callback` 并新增完整目标：
+
+```json
+{"soothe_callback":{"enabled":true,"url":"https://business.example.test/api/v1/internal/soothe-callbacks","runtime_id":"couple-diary","key_id":"replace_with_existing_key_id","secret":"replace_with_existing_callback_secret"}}
+```
+
+这是待合并条目；地址替换为本环境业务 origin，签名身份和凭据沿用现有 callback。
+两个 Docker env 模板提供包含原有目标及完整调用方字段的注释示例。
+
+```dotenv
+# 与既有 QA 映射合并；deepseek-chat 必须已在 MODEL_ROUTES_JSON 注册并启用。
+AGENT_MODEL_NODE_ROUTES_JSON={"soothe_agent":{"compose_turn":"deepseek-chat"}}
+```
+
+节点少键、多键、未知/禁用 route，connector 缺失、禁用或字段不完整，及公共模型
+网关缺失，均由工厂收敛为 `failed + SOOTHE_AGENT_NOT_CONFIGURED`，无模板降级。
+变更部署配置后重启 API 与 Worker，真实配置只进入外置私有 env。
+
+业务端创建 Run 必须显式传 `data_domain="couple_soothe"`，以及
+`agent_id="soothe_agent"`、`agent_version="1.0.0"`、对应的业务类型、
+`business_id=<turn_id>`、`input={"session_id":"<str>","turn_id":"<str>"}`、
+`callback_target_id="soothe_callback"`、`business_connector_id="couple_diary_backend"`，
+使用 `start_mode="held"`，绑定 run_id 后再 start。契约默认域仍是 `couple_memory`，
+不能省略 soothe 的数据域。聊天、草稿和场景隐藏诉求只在受控工具与模型调用栈中流转，
+不写入 Run、步骤摘要、日志或 callback。
+
+`guardrails.yaml` 中的 `reject_unsafe_phrases` 只是声明；实际校验由本 Agent 的
+`validation.py` 在生成后、校验节点和提交前执行。mock Provider、业务工具与隐私回归
+不能替代真实 Provider 生成质量、真实业务联调和部署验收。本轮不执行真实注册或部署。
+
 ### 10.3 openai_compatible Provider 与密钥占位
 
 `provider` 为 `openai_compatible` 的路由面向 DeepSeek、Qwen 等标准 chat/completions API：

@@ -1,0 +1,5 @@
+version: 1.0.0
+rules:
+  - reject_control_fields
+  - enforce_answer_length
+  - reject_unsafe_phrases

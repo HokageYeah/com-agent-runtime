@@ -1,0 +1,6 @@
+mode: status_only
+step_labels:
+  load_turn_context: 读取本轮内容
+  compose_turn: 生成回复
+  validate_turn: 校验回复
+  submit_turn_result: 提交结果

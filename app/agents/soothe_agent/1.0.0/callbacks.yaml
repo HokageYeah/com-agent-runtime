@@ -1,0 +1,7 @@
+# 复用 Runtime 安全事件投影，不发送本轮私密正文。
+enabled_events:
+  - run_started
+  - step_changed
+  - run_succeeded
+  - run_failed
+  - run_cancelled

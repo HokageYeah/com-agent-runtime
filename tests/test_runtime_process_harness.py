@@ -442,6 +442,8 @@ def test_loopback_mock_projects_only_signed_safe_callback() -> None:
             "qa_submissions": 0,
             "qa_submit_blocked": False,
             "qa_submit_started": False,
+            "soothe_context_reads": 0,
+            "soothe_submissions": 0,
         }
 
 

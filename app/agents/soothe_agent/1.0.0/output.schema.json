@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "仅安全提交状态，不包含回复正文。",
+  "type": "object",
+  "required": ["submitted", "revision"],
+  "properties": {
+    "submitted": {"type": "boolean", "description": "业务端已确认本轮提交"},
+    "revision": {"type": "integer", "minimum": 1, "description": "业务端提交版本号"}
+  },
+  "additionalProperties": false
+}

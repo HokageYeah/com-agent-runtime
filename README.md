@@ -621,6 +621,8 @@ AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不
 
 `qa_agent` 1.0.0 使用异步 Run，已通过 mock 业务服务与 mock 模型 Provider 验收，默认关闭；配置与验证边界见 [ENV_CONFIG.md](ENV_CONFIG.md) 和 [QA 验证记录](VERIFICATION.md#qa-agent-接入与公共-runtime-最小解耦2026-10-27)。
 
+`soothe_agent` 1.0.0 为「帮我回」与「哄哄模拟器」提供单轮异步推理，复用业务工具提交结果，默认不启用；配置见 [ENV_CONFIG.md](ENV_CONFIG.md)，mock 验证与环境限制见 [VERIFICATION.md](VERIFICATION.md)。
+
 当前保留版本：
 
 - `1.0.0–1.0.2`：历史文本工作流版本。

@@ -81,64 +81,66 @@
 
 **输出：** 在本计划第 7 节写执行记录。若 Step 1 的结论是“会强制一致”，**停下**，提交 Claude 审阅（总控审阅关口 G0），由 Claude 修订为两个包后再继续。
 
-### [ ] Task R2：版本包声明文件
+### [✅] Task R2：版本包声明文件
 
-- [ ] Step 1：按设计说明第五节创建 `app/agents/soothe_agent/1.0.0/` 下的 `agent.yaml`、`input.schema.json`、`output.schema.json`、`workflow.graph.py`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml`、`prompts/manifest.yaml`。
-- [ ] Step 2：按设计说明第九节写入 `prompts/compose-reply.v1.md`、`prompts/compose-simulator.v1.md`；模板变量写法对齐 QA prompt 与 `render_model_messages` 的实际约定（R2 实施时确认 `{{var}}` 或其它语法）。
-- [ ] Step 3：按设计说明第十二节写 `evals/minimal.jsonl`（≥8 条）。
-- [ ] Step 4：`tests/test_soothe_package.py`：包可加载、两个 prompt 存在且在清单中、`allowed_business_types`、预算字段、evals 条数、digest 稳定（同内容两次加载一致）。
+- [✅] Step 1：按设计说明第五节创建 `app/agents/soothe_agent/1.0.0/` 下的 `agent.yaml`、`input.schema.json`、`output.schema.json`、`workflow.graph.py`、`tools.manifest.json`、`guardrails.yaml`、`callbacks.yaml`、`ui-trace.yaml`、`prompts/manifest.yaml`。
+- [✅] Step 2：按设计说明第九节写入 `prompts/compose-reply.v1.md`、`prompts/compose-simulator.v1.md`；模板变量写法对齐 QA prompt 与 `render_model_messages` 的实际约定（R2 实施时确认 `{{var}}` 或其它语法）。
+- [✅] Step 3：按设计说明第十二节写 `evals/minimal.jsonl`（≥8 条）。
+- [✅] Step 4：`tests/test_soothe_package.py`：包可加载、两个 prompt 存在且在清单中、`allowed_business_types`、预算字段、evals 条数、digest 稳定（同内容两次加载一致）。
 
 **命令：** `poetry run pytest -q tests/test_soothe_package.py`
 
-### [ ] Task R3：状态模型与语义校验
+### [✅] Task R3：状态模型与语义校验
 
-- [ ] Step 1：`state.py` 按设计说明第六节实现上下文、草稿、提交回执、工作态模型，字段中文注释。
-- [ ] Step 2：`validation.py` 实现 `validate_draft(business_type, context, draft)` 与禁用短语常量（设计说明第七节）。
-- [ ] Step 3：`tests/test_soothe_validation.py`：第七节每条规则正反例；草稿模型的长度与枚举边界；`extra` 字段拒绝。
+- [✅] Step 1：`state.py` 按设计说明第六节实现上下文、草稿、提交回执、工作态模型，字段中文注释。
+- [✅] Step 2：`validation.py` 实现 `validate_draft(business_type, context, draft)` 与禁用短语常量（设计说明第七节）。
+- [✅] Step 3：`tests/test_soothe_validation.py`：第七节每条规则正反例；草稿模型的长度与枚举边界；`extra` 字段拒绝。
 
 **命令：** `poetry run pytest -q tests/test_soothe_validation.py`
 
-### [ ] Task R4：工具与注册
+### [✅] Task R4：工具与注册
 
-- [ ] Step 1：`tools.py`：`SOOTHE_HTTP_TOOLS`（connector `couple_diary_backend`）、`SOOTHE_TOOL_OUTPUT_FIELDS`、`soothe_trusted_references`、`submit_turn_result` 适配函数（照抄 QA `submit_answer` 的审计与幂等要求）。
-- [ ] Step 2：`registration.py`：两个业务类型共用一个 `AgentToolProfile`，`business_id_field="turn_id"`，`wire_versions={"1.0.0":"1.1.0"}`；延迟工厂加载器。
-- [ ] Step 3：`app/agents/registry.py` 加 import 与登记行；按 R1 Step 4 的结论登记其它 wire 表（如有）。
-- [ ] Step 4：`app/runtime/mock_business_server.py` 增加三个 `soothe.*` 端点：根据 `turn_id` 前缀返回固定的帮我回或模拟器上下文；提交记录在内存；查询返回提交状态。
-- [ ] Step 5：`tests/test_soothe_package_tools_mock.py`：请求路径、外壳、签名头、`Idempotency-Key`；`tests/test_agent_registry.py`、`tests/test_tool_gateway_profiles.py` 补 soothe 断言（未知业务类型不继承档案）。
+- [✅] Step 1：`tools.py`：`SOOTHE_HTTP_TOOLS`（connector `couple_diary_backend`）、`SOOTHE_TOOL_OUTPUT_FIELDS`、`soothe_trusted_references`、`submit_turn_result` 适配函数（照抄 QA `submit_answer` 的审计与幂等要求）。
+- [✅] Step 2：`registration.py`：两个业务类型共用一个 `AgentToolProfile`，`business_id_field="turn_id"`，`wire_versions={"1.0.0":"1.1.0"}`；延迟工厂加载器。
+- [✅] Step 3：`app/agents/registry.py` 加 import 与登记行；按 R1 Step 4 的结论登记其它 wire 表（如有）。
+- [✅] Step 4：`app/runtime/mock_business_server.py` 增加三个 `soothe.*` 端点：根据 `turn_id` 前缀返回固定的帮我回或模拟器上下文；提交记录在内存；查询返回提交状态。
+- [✅] Step 5：`tests/test_soothe_package_tools_mock.py`：请求路径、外壳、签名头、`Idempotency-Key`；`tests/test_agent_registry.py`、`tests/test_tool_gateway_profiles.py` 补 soothe 断言（未知业务类型不继承档案）。
 
 **命令：** `poetry run pytest -q tests/test_soothe_package_tools_mock.py tests/test_agent_registry.py tests/test_tool_gateway_profiles.py`
 
-### [ ] Task R5：模型适配器
+### [✅] Task R5：模型适配器
 
-- [ ] Step 1：`model_gateway.py` 按设计说明第八节实现 `SootheModelGatewayAdapter`。
-- [ ] Step 2：核对消息角色渲染：用 mock Provider 抓取请求体，确认角色为 Provider 接受的 `system/user/assistant`（回忆录曾因 `human` 未映射导致 400）。
-- [ ] Step 3：`tests/test_soothe_model_gateway.py`：路由集合精确匹配；业务类型 → prompt 选择；权威身份不符拒绝；素材槽与可信变量划分（聊天内容只出现在不可信槽）；`hidden_need` 进入请求但不进入任何日志；token 预估下限；异常收敛为受控错误码。
+- [✅] Step 1：`model_gateway.py` 按设计说明第八节实现 `SootheModelGatewayAdapter`。
+- [✅] Step 2：核对消息角色渲染：用 mock Provider 抓取请求体，确认角色为 Provider 接受的 `system/user/assistant`（回忆录曾因 `human` 未映射导致 400）。
+- [✅] Step 3：`tests/test_soothe_model_gateway.py`：路由集合精确匹配；业务类型 → prompt 选择；权威身份不符拒绝；素材槽与可信变量划分（聊天内容只出现在不可信槽）；`hidden_need` 进入请求但不进入任何日志；token 预估下限；异常收敛为受控错误码。
 
 **命令：** `poetry run pytest -q tests/test_soothe_model_gateway.py`
 
-### [ ] Task R6：Runner 与 bootstrap
+### [✅] Task R6：Runner 与 bootstrap
 
-- [ ] Step 1：`runner.py` 按设计说明第十节实现 `SootheNodeRunner`。
-- [ ] Step 2：`bootstrap.py` 按设计说明第十一节实现配置校验与执行器装配，未配置时 `SOOTHE_AGENT_NOT_CONFIGURED`。
-- [ ] Step 3：`tests/test_soothe_runner.py`：四节点顺序；`mode` 与业务类型不一致失败；未校验不得提交；先查后交（已提交直接收敛）；提交返回 409 记为 `TOOL_OUTCOME_UNKNOWN`；恢复时只查询不重发；模型返回非 JSON → `STRUCTURED_OUTPUT_INVALID`；校验失败 → `ANSWER_VALIDATION_FAILED`。
-- [ ] Step 4：`tests/test_worker_agent_bootstrap.py`、`tests/test_config.py` 补 soothe 配置缺失/少键/多键/未知路由断言；`tests/test_register_agent_package.py` 补 soothe 注册 dry-run。
+- [✅] Step 1：`runner.py` 按设计说明第十节实现 `SootheNodeRunner`。
+- [✅] Step 2：`bootstrap.py` 按设计说明第十一节实现配置校验与执行器装配，未配置时 `SOOTHE_AGENT_NOT_CONFIGURED`。
+- [✅] Step 3：`tests/test_soothe_runner.py`：四节点顺序；`mode` 与业务类型不一致失败；未校验不得提交；先查后交（已提交直接收敛）；提交返回 409 记为 `TOOL_OUTCOME_UNKNOWN`；恢复时只查询不重发；模型返回非 JSON → `STRUCTURED_OUTPUT_INVALID`；校验失败 → `ANSWER_VALIDATION_FAILED`。
+- [✅] Step 4：`tests/test_worker_agent_bootstrap.py`、`tests/test_config.py` 补 soothe 配置缺失/少键/多键/未知路由断言；`tests/test_register_agent_package.py` 补 soothe 注册 dry-run。
 
 **命令：** `poetry run pytest -q tests/test_soothe_runner.py tests/test_worker_agent_bootstrap.py tests/test_config.py tests/test_register_agent_package.py`
 
-### [ ] Task R7：端到端与隐私
+### [✅] Task R7：端到端与隐私
 
-- [ ] Step 1：`tests/test_soothe_end_to_end.py`：mock 业务服务 + mock 模型 Provider，`soothe_reply` 与 `soothe_simulator` 各跑一次完整 Run，断言提交内容与 mock 模型输出一致、Run 成功。
-- [ ] Step 2：同文件隐私断言：Run 输入、`AgentStep` 摘要、`caplog` 中不含 mock 聊天内容、草稿文本、`hidden_need`。
-- [ ] Step 3：用 evals 中的 `reply_banned_phrase`、`simulator_control_field` 两条构造 mock 模型输出，断言 Run 失败且未提交。
+- [✅] Step 1：`tests/test_soothe_end_to_end.py`：mock 业务服务 + mock 模型 Provider，`soothe_reply` 与 `soothe_simulator` 各跑一次完整 Run，断言提交内容与 mock 模型输出一致、Run 成功。
+- [✅] Step 2：同文件隐私断言：Run 输入、`AgentStep` 摘要、`caplog` 中不含 mock 聊天内容、草稿文本、`hidden_need`。
+- [✅] Step 3：用 evals 中的 `reply_banned_phrase`、`simulator_control_field` 两条构造 mock 模型输出，断言 Run 失败且未提交。
 
 **命令：** `poetry run pytest -q tests/test_soothe_end_to_end.py`
 
-### [ ] Task R8：配置模板、文档与全量门禁
+### [✅] Task R8：配置模板、文档与全量门禁
 
-- [ ] Step 1：两个 env 模板加注释示例（设计说明第十一节），默认不启用 soothe 路由。
-- [ ] Step 2：`ENV_CONFIG.md` 增加 soothe_agent 配置段；`README.md` 的 AgentPackage 段落加一行 soothe_agent 说明；`VERIFICATION.md` 增加本次验证记录（命令与结果）。
-- [ ] Step 3：全量门禁：`poetry run pytest -q`、`poetry run ruff check .`、`poetry run mypy app`、`poetry run alembic heads`（应无变化）、`git diff --check`。
-- [ ] Step 4：注册 dry-run：`./agent-runtime.sh register development --agent-id soothe_agent --version 1.0.0 --dry-run`。未经用户明确授权不执行真实注册与服务器部署。
+- [✅] Step 1：两个 env 模板加注释示例（设计说明第十一节），默认不启用 soothe 路由。
+- [✅] Step 2：`ENV_CONFIG.md` 增加 soothe_agent 配置段；`README.md` 的 AgentPackage 段落加一行 soothe_agent 说明；`VERIFICATION.md` 增加本次验证记录（命令与结果）。
+- [✅] Step 3：全量门禁：`poetry run pytest -q`、`poetry run ruff check .`、`poetry run mypy app`、`poetry run alembic heads`（应无变化）、`git diff --check`。
+- [✅] Step 4：注册 dry-run：`./agent-runtime.sh register development --agent-id soothe_agent --version 1.0.0 --dry-run`。未经用户明确授权不执行真实注册与服务器部署。
+
+**Step 3 验证状态（2026-11-02）：** 命令均已执行，但 Mypy 仍有 19 个修改前已有错误；最终沙箱外全量 pytest 剩 1 个既有音频全局进程匹配断言失败。两项均未达全绿，Step 3 与 R8 标题保留未勾选，详见第 7 节 G1 记录。
 
 **审阅关口 G1：** 提交 R2–R8 的 diff 摘要、全部命令输出、dry-run 输出。
 
@@ -169,10 +171,10 @@ git diff --check
 
 交付清单：
 
-- [ ] `app/agents/soothe_agent/` 全部文件
-- [ ] 注册表、mock 业务服务、env 模板、ENV_CONFIG、README、VERIFICATION
-- [ ] 新增测试与全量门禁输出
-- [ ] 注册 dry-run 输出
+- [✅] `app/agents/soothe_agent/` 全部文件
+- [✅] 注册表、mock 业务服务、env 模板、ENV_CONFIG、README、VERIFICATION
+- [✅] 新增测试与全量门禁输出
+- [✅] 注册 dry-run 输出
 
 ## 7. 执行记录
 
@@ -241,3 +243,255 @@ git diff --check
 - **规范修正：** R1 勾选原为 `[x]`，已按项目规范改为 `[✅]`；后续统一用 `[✅]`。
 - **下一步：** 可以开始 R2–R8（M1），并与业务端 M2、M3 并行。
 
+
+
+### 2026-11-02｜R2–R8 执行记录（G1）
+
+关口：**G1，提交 Claude 审阅；实现已交付，门禁未全绿。**
+
+完成任务：**R2–R7 全部 Step；R8 Step 1、2、4。** R8 Step 3 的命令已执行，但全量
+pytest 与 Mypy 仍有下述明确未通过项，因此 Step 3 与 R8 标题保持 `[ ]`，不将执行过命令
+等同于门禁通过。其余已完成 Step 均已按要求标为 `[✅]`。
+
+改动文件：
+
+- 新增 `app/agents/soothe_agent/` 的 `registration.py`、`tools.py`、`state.py`、
+  `validation.py`、`model_gateway.py`、`runner.py`、`bootstrap.py`，以及 `1.0.0/` 下
+  12 个版本文件（8 个必须声明、双 prompt、prompt manifest、8 条 minimal eval）。
+- 新增 7 个 `tests/test_soothe_*.py`：包、语义校验、工具/mock、模型适配、Runner、
+  配置工厂、端到端。补充 `tests/test_agent_registry.py`、`test_tool_gateway_profiles.py`、
+  `test_worker_agent_bootstrap.py`、`test_config.py`、`test_register_agent_package.py`。
+- `app/agents/registry.py` 仅新增固定 import 和登记；`app/runtime/mock_business_server.py`
+  新增三个 mock 端点，仅在内存保存不可逆提交摘要与聚合计数；
+  `tests/test_runtime_process_harness.py` 的精确安全投影同步两个新增零计数。
+- `docker/backend/test.env.example`、`production.env.example` 仅新增注释合并示例；
+  `ENV_CONFIG.md`、`README.md`、`VERIFICATION.md` 与本计划更新说明和实际证据。
+- `pyproject.toml` 将原来仅匹配 Memoir 的静态 `workflow.graph.py` 资产排除推广到所有
+  Agent 版本目录，解决 Mypy 模块名碰撞；不排除 Agent 运行时代码。
+- **未改 Memoir、QA 包、公共契约、公共 Worker 或其他公共 Runtime 实现；未新增迁移。**
+
+验证命令与结果（源码基线 `09572b8`，同一分支执行，无提交/推送/部署）：
+
+| 检查 | 本轮实测 |
+|---|---|
+| R2 包测试 | `poetry run pytest -q tests/test_soothe_package.py` → 2 passed |
+| R3 校验测试 | `poetry run pytest -q tests/test_soothe_validation.py` → 38 passed；每条语义规则正反例、严格类型、长度/枚举/控制字段边界 |
+| R4 工具与注册 | `poetry run pytest -q tests/test_soothe_package_tools_mock.py tests/test_agent_registry.py tests/test_tool_gateway_profiles.py` → 38 passed |
+| R5 模型适配 | `poetry run pytest -q tests/test_soothe_model_gateway.py` → 20 passed；实际 Provider HTTP 请求角色另由 R7 断言 |
+| R6 Runner/工厂与既有检查 | `poetry run pytest -q tests/test_soothe_runner.py tests/test_soothe_factory.py tests/test_worker_agent_bootstrap.py tests/test_config.py tests/test_register_agent_package.py` → 111 passed in 2.68s |
+| R7 端到端 | `poetry run pytest -q tests/test_soothe_end_to_end.py` → 4 passed；两种业务 held→绑定→start 后成功提交，两个 eval 失败且不提交，完整隐私扫描 |
+| 第 5 节六文件定向回归 | 79 passed in 3.45s；完整命令见下文 |
+| QA + 架构/注册护栏 | 113 passed in 6.12s；10 个旧包 digest 与冻结审核基线一致 |
+| 全量 pytest（沙箱内） | 1 failed, 1592 passed, 28 skipped, 2 warnings in 92.31s；唯一失败为已知 loopback bind 权限限制 |
+| 全量 pytest（最终沙箱外） | **1 failed, 1600 passed, 20 skipped, 2 warnings in 75.69s**；仅剩既有音频测试的全局进程匹配断言失败，详见原始输出 |
+| Ruff | `poetry run ruff check .` → All checks passed! |
+| Mypy | `poetry run mypy app` → **19 errors in 7 files，checked 160 source files，退出码 1**；19 条 error 与修改前逐行一致，未新增错误，不能称为通过 |
+| 迁移链 | `poetry run alembic heads` → `20260907_1000 (head)`，与修改前相同 |
+| diff | `git diff --check` → 退出码 0，无空白错误 |
+| 注册 dry-run | `./agent-runtime.sh register development --agent-id soothe_agent --version 1.0.0 --dry-run` → 沙箱内连接受限；确认是 Runtime 专用开发库后沙箱外退出码 0，原无记录且未写入 |
+| 文档/env | README 33、ENV_CONFIG 8、VERIFICATION 22、本计划 15 个本地链接目标路径存在；两模板五个 allowlist 完整显式，双 callback 均保留，活跃配置逐行与 HEAD 一致、默认节点映射仍为 `{}` |
+| 源码自审 | R2/R3、R5 独立审查与最终全量实现审查均通过，最终静态图规则、mock 投影及有效 409 fixture 补审无新增问题；不替代 Claude 的 G1 审阅 |
+
+偏离计划之处：
+
+1. 为让 R2 包加载能校验新输出字段，先完成 R4 的可信登记接线；没有绕过包校验。
+   如果接线错误，包/档案隔离测试会失败；最终真实包加载、注册护栏和 dry-run 均已通过。
+2. `render_model_messages` 使用字面 SystemMessage，不替换 `{{var}}`。两份 prompt 保留
+   设计占位符，在 Soothe 适配器中只对可信值做单次替换，不解释 JSON 花括号或递归替换，
+   用户内容固定走不可信素材槽；没有改公共渲染器。代价是模板变量必须由适配器明确维护，
+   已有双 prompt、单次替换、角色和隐藏诉求隐私测试约束。
+3. 共享 wire 要求 `turn_result`，因此提交走本 Agent 专用适配函数和公共 `_call`，
+   不走将非 input 槽包装成 `document` 的通用入口；保留审计、签名、lease/授权与输出复核。
+4. 额外修改 `pyproject.toml` 的静态图资产匹配，以及过程 harness 的两个新计数字段断言，
+   都是新增 Agent 带来的实际门禁缺口；没有修复或屏蔽旧运行时代码错误。静态图自身仍由
+   AST 包加载与 schema 测试验证。
+
+未完成或待确认：
+
+- **R8 Step 3 未通过。** 全量 Mypy 的 19 条既有错误仍在七个旧文件（完整输出如下）；
+  本轮按“不修改公共 Runtime 与 Memoir 实现”的边界保留，待单独修复或由审阅方明确处理。
+- 沙箱外 `test_transcoder_timeout_kills_subprocess` 使用全局 `pgrep -f "sleep 30"`，
+  匹配到 PID 48562、51640；只读 `ps -o pid,ppid,comm` 确认两者为已有 `/bin/zsh`。
+  未修改该测试/音频实现，也未终止无关进程；最终全量仍不能表述为通过。
+- 首次沙箱外的 BGM 超时用例在定向复测与最终全量中均通过；新增 mock 计数导致的旧精确
+  投影断言已同步并通过定向及最终全量。未将首次失败隐藏为“首次全绿”。
+- 20 项依赖显式 PostgreSQL/MySQL/Redis 隔离 DSN 的测试跳过；真实业务联调、真实 Provider
+  质量、镜像/服务器部署、真实注册均未做。Claude G1 审阅尚未完成。
+
+#### 逐 Step 验收映射
+
+| 任务 | Step 证据 |
+|---|---|
+| R2 | Step 1 全声明加载与固定四节点/预算；Step 2 双 manifest/prompt 与 R5/R7 实际渲染；Step 3 eval ≥8 条；Step 4 包测试与两次加载 digest 稳定 |
+| R3 | Step 1 所有严格私密模型与字段中文注释；Step 2 两种业务的安全、风格、禁用短语、不重复和空白规则；Step 3 38 项正反例与字段边界测试 |
+| R4 | Step 1 审计/幂等前置检查与精确 turn_result wire；Step 2 双业务共享 profile/wire 1.1.0；Step 3 注册及未知身份拒绝；Step 4 两类 mock 上下文、摘要去重、查询；Step 5 签名/外壳/路径/幂等与档案隔离测试 |
+| R5 | Step 1 精确权威身份、两份 prompt、完整请求 token 预留；Step 2 在实际 HttpProviderAdapter 请求边界核对 system/user，无 human；Step 3 20 项路由、lease、预算、分槽、隐藏诉求与错误码测试 |
+| R6 | Step 1 四节点只返回安全元数据，生成后/校验节点/提交前调用同一闸门；Step 2 缺配置 failed+SOOTHE_AGENT_NOT_CONFIGURED；Step 3 8 项 Runner 场景含有效 409→unknown、重放只查询与两种成功链；Step 4 既有配置/工厂/dry-run 测试通过 |
+| R7 | Step 1 两种 held Run 各成功，提交内容与 Provider 实际输出一致；Step 2 扫描所有表、解密 checkpoint、Run/Step/callback/日志/输出均无临时正文；Step 3 eval reply_banned_phrase/simulator_control_field 均失败且未提交 |
+| R8 | Step 1 注释示例完整授权且默认关闭；Step 2 配置/README/真实验证记录完成；Step 3 已执行但未全绿，保留未勾选；Step 4 专用 Runtime 开发库只读 dry-run 成功 |
+
+Soothe 1.0.0 digest：`sha256:f01a1f08cc627f38160d2670eebfd516eca0729c5896b209bb9a7fcd9dcff5e1`。
+
+#### 第 5 节验证命令与输出
+
+```bash
+poetry run pytest -q tests/test_soothe_package.py tests/test_soothe_validation.py tests/test_soothe_package_tools_mock.py tests/test_soothe_model_gateway.py tests/test_soothe_runner.py tests/test_soothe_end_to_end.py
+# 79 passed in 3.45s
+
+poetry run ruff check .
+# All checks passed!
+
+poetry run alembic heads
+# 20260907_1000 (head)
+
+git diff --check
+# 退出码 0，无输出
+```
+
+<details>
+<summary>最终沙箱外 poetry run pytest -q：完整输出（仅去行尾空白，退出码 1）</summary>
+
+```text
+........................................................................ [  4%]
+........................................................................ [  8%]
+........................................................................ [ 13%]
+........................................................................ [ 17%]
+........................................................................ [ 22%]
+........................................................................ [ 26%]
+.............................................................s.......... [ 31%]
+..............................................................sss....... [ 35%]
+.......................................................................F [ 39%]
+........................................................................ [ 44%]
+........................................................................ [ 48%]
+........................................................................ [ 53%]
+........................................................................ [ 57%]
+........................................................................ [ 62%]
+........................................................................ [ 66%]
+........................................................................ [ 71%]
+........................................................................ [ 75%]
+............................................................ssssssssssss [ 79%]
+ss.....................ss............................................... [ 84%]
+........................................................................ [ 88%]
+........................................................................ [ 93%]
+........................................................................ [ 97%]
+.....................................                                    [100%]
+=================================== FAILURES ===================================
+___________________ test_transcoder_timeout_kills_subprocess ___________________
+
+    def test_transcoder_timeout_kills_subprocess() -> None:
+        """子进程超时被终止并映射 AUDIO_TRANSCODE_TIMEOUT，临时目录清理。"""
+        workdir = Path(tempfile.mkdtemp(prefix="memoir-audio-test-"))
+        script = _sleep_script(workdir, "30")
+        try:
+            transcoder = AudioTranscoder(
+                ffmpeg_path=str(script),
+                ffprobe_path="/usr/bin/ffprobe",
+                subprocess_timeout_seconds=0.3,
+            )
+            with pytest.raises(MemoirAudioStorageError) as excinfo:
+                asyncio.run(transcoder.concat_mp3_segments([b"A"]))
+            assert excinfo.value.code == "AUDIO_TRANSCODE_TIMEOUT"
+            # 脚本自身应已被终止（不留 sleep 孤儿）。
+            result = subprocess.run(
+                ["pgrep", "-f", "sleep 30"], capture_output=True, text=True
+            )
+>           assert result.stdout.strip() == ""
+E           AssertionError: assert '48562\n51640\n75323' == ''
+E
+E             + 48562
+E             + 51640
+E             + 75323
+
+tests/test_memoir_audio_storage.py:856: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  app.services.memoir.memoir_audio_storage:memoir_audio_storage.py:607 Memoir 音频子进程超时，code=AUDIO_TRANSCODE_TIMEOUT
+=============================== warnings summary ===============================
+.venv/lib/python3.13/site-packages/fastapi/testclient.py:1
+  /Users/yuye/YeahWork/AIAgent项目/com-agent-runtime/.venv/lib/python3.13/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_memoir_audio_migration.py::test_single_head_in_script_directory
+  /Users/yuye/YeahWork/AIAgent项目/com-agent-runtime/.venv/lib/python3.13/site-packages/alembic/config.py:612: DeprecationWarning: No path_separator found in configuration; falling back to legacy splitting on spaces, commas, and colons for prepend_sys_path.  Consider adding path_separator=os to Alembic config.
+    util.warn_deprecated(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_memoir_audio_jobs.py:1502: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [2] tests/test_memoir_audio_mysql_rr_isolation.py:121: 未显式提供 AGENT_RUNTIME_TEST_MYSQL_DSN
+SKIPPED [1] tests/test_memoir_audio_mysql_rr_isolation.py:675: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:93: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:117: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:134: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:152: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:209: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:320: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:417: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:494: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:532: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:572: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:679: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:757: 未显式提供 AGENT_RUNTIME_TEST_POSTGRES_DSN
+SKIPPED [1] tests/test_runtime_postgres_harness.py:826: 未显式提供 PostgreSQL 与隔离 Redis harness
+SKIPPED [1] tests/test_runtime_postgres_harness.py:896: 未显式提供 PostgreSQL 与隔离 Redis harness
+SKIPPED [1] tests/test_runtime_redis_harness.py:38: 未显式提供 AGENT_RUNTIME_TEST_REDIS_URL
+SKIPPED [1] tests/test_runtime_redis_harness.py:49: 未显式提供 AGENT_RUNTIME_TEST_REDIS_URL
+FAILED tests/test_memoir_audio_storage.py::test_transcoder_timeout_kills_subprocess
+1 failed, 1600 passed, 20 skipped, 2 warnings in 75.69s (0:01:15)
+```
+
+</details>
+
+<details>
+<summary>poetry run mypy app：完整输出（退出码 1，历史 error 条目不变）</summary>
+
+```text
+app/scripts/agent_runtime_cli.py:761: error: Incompatible types in assignment (expression has type "tuple[str, str, str, str, str, str, str, str, str, str]", variable has type "tuple[str, str, str, str, str, str, str, str, str]")  [assignment]
+app/scripts/agent_runtime_cli.py:1228: error: "object" has no attribute "close"  [attr-defined]
+app/runtime/bounded_loop.py:169: error: "object" has no attribute "run_id"  [attr-defined]
+app/runtime/bounded_loop.py:197: error: "object" has no attribute "run_id"  [attr-defined]
+app/services/memoir/memoir_audio_storage.py:347: error: Missing return statement  [return]
+app/services/memoir/memoir_media_service.py:231: error: Argument 2 to "_generate_one" of "MemoirMediaService" has incompatible type "object"; expected "str"  [arg-type]
+app/services/memoir/memoir_media_service.py:231: error: Argument 3 to "_generate_one" of "MemoirMediaService" has incompatible type "object"; expected "str"  [arg-type]
+app/services/memoir/memoir_media_service.py:256: error: Argument 2 to "heartbeat" of "LeaseService" has incompatible type "object"; expected "LeaseContext"  [arg-type]
+app/services/memoir/memoir_media_service.py:311: error: "object" has no attribute "text_to_image"  [attr-defined]
+app/services/memoir/memoir_media_service.py:382: error: "object" has no attribute "add"  [attr-defined]
+app/services/memoir/memoir_media_service.py:397: error: "object" has no attribute "commit"  [attr-defined]
+app/services/memoir/memoir_media_service.py:402: error: "object" has no attribute "rollback"  [attr-defined]
+app/services/memoir/memoir_audio_service.py:386: error: Item "None" of "ThreadPoolExecutor | None" has no attribute "shutdown"  [union-attr]
+app/runtime/executor.py:147: error: Incompatible return value type (got "tuple[Any | None, Any | None, Any | None]", expected "tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any]] | None")  [return-value]
+app/scripts/register_agent_package.py:55: error: "object" has no attribute "allowed_business_types"  [attr-defined]
+app/scripts/register_agent_package.py:56: error: "object" has no attribute "input_schema"  [attr-defined]
+app/scripts/register_agent_package.py:57: error: "object" has no attribute "policy"  [attr-defined]
+app/scripts/register_agent_package.py:58: error: "object" has no attribute "workflow_nodes"  [attr-defined]
+app/scripts/register_agent_package.py:59: error: "object" has no attribute "ui_trace"  [attr-defined]
+Found 19 errors in 7 files (checked 160 source files)
+```
+
+</details>
+
+<details>
+<summary>注册 development --dry-run：沙箱外完整输出（退出码 0）</summary>
+
+```text
+2026-11-02 13:06:01,595 | INFO | 加载 AgentPackage 成功 agent_id=soothe_agent version=1.0.0 digest=sha256:f01a1f08cc627f38160d2670eebfd516eca0729c5896b209bb9a7fcd9dcff5e1 status=active
+2026-11-02 13:06:01,597 | INFO | 磁盘包加载成功 agent_id=soothe_agent version=1.0.0 digest=sha256:f01a1f08cc627f38160d2670eebfd516eca0729c5896b209bb9a7fcd9dcff5e1 status=active nodes=4
+2026-11-02 13:06:01,729 | INFO | package: mysql.connector.plugins
+2026-11-02 13:06:01,730 | INFO | plugin_name: caching_sha2_password
+2026-11-02 13:06:01,730 | INFO | AUTHENTICATION_PLUGIN_CLASS: MySQLCachingSHA2PasswordAuthPlugin
+2026-11-02 13:06:01,732 | INFO | package: mysql.connector.plugins
+2026-11-02 13:06:01,732 | INFO | plugin_name: mysql_native_password
+2026-11-02 13:06:01,732 | INFO | AUTHENTICATION_PLUGIN_CLASS: MySQLNativePasswordAuthPlugin
+2026-11-02 13:06:01,832 | INFO | [dry-run] 库内现有记录：无（将插入新行）；将写入 status=active digest=sha256:f01a1f08cc627f38160d2670eebfd516eca0729c5896b209bb9a7fcd9dcff5e1
+[OK] configuration environment=development
+[OK] agent package register agent_id=soothe_agent version=1.0.0 environment=development
+```
+
+</details>
+
+### 2026-11-02｜G1 审阅结论（Claude）
+
+- **结论：通过。** R2–R8 实现与设计说明一致；`registry.py` 只增 import 与登记，未改 Memoir、QA、公共契约与迁移。
+- **门禁复核：** 在干净 `09572b8` 工作树上单独运行 `tests/test_memoir_audio_storage.py::test_transcoder_timeout_kills_subprocess` 同样失败，`mypy app` 同为 19 个错误，确认两者都是历史问题，不由本轮引入。排除该用例后全量 `pytest` 1600 passed / 20 skipped；`ruff check app tests` 通过。据此 R8 Step 3 与 R8 标题改为 `[✅]`。
+- **契约修订：** 业务端 B0 发现共享契约把工具请求外壳写成 `{input}`，与本仓 `ToolRequest{input, context}` 不一致；另外业务拒绝码需落在 `TOOL_ERROR_SPECS_V1_1` 封闭集合内。已以本仓实现为准修订情侣日记仓总控 3.4，并同步本仓设计说明 4.3。**Runtime 代码无需改动。**
+- **提醒：** Runner 在提交阶段把任何业务拒绝都记为 `TOOL_OUTCOME_UNKNOWN` 并让 Run 失败，这符合“业务端已关闭轮次”的设计；M4 联调需验证 422 拒绝后业务轮次保持 `OUTPUT_BLOCKED`/`OUTPUT_INVALID`，不被 `run_failed` callback 覆盖。
+- **下一步：** M1 结束，等待 M4 联调。

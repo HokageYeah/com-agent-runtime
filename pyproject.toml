@@ -79,8 +79,8 @@ exclude = '''(?x)(
     ^app/(?:
         # workflow.graph.py 是 Package Loader 以 AST 静态读取的非 importable
         # 资产；两个 version 目录同名会被 mypy 映射为重复 workflow.graph。
-        # 仅排除这两个动态包资产，不排除 memoir_agent 的运行时代码。
-        agents/memoir_agent/[^/]+/workflow\.graph\.py|
+        # 仅排除各 Agent 版本目录的静态图资产，不排除 Agent 运行时代码。
+        agents/[^/]+/[^/]+/workflow\.graph\.py|
         agents/memoir_agent/runner\.py|
         api/endpoints/memoir/memory_api\.py|
         core/logging_uru\.py|

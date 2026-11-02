@@ -8,7 +8,7 @@ import pytest
 from app.agents.registry import get_executor_factory
 
 
-@pytest.mark.parametrize("agent_id", ["memoir_agent", "qa_agent"])
+@pytest.mark.parametrize("agent_id", ["memoir_agent", "qa_agent", "soothe_agent"])
 def test_registered_factory_belongs_to_agent_bootstrap(agent_id: str) -> None:
     factory = get_executor_factory(agent_id)
     assert factory is not None

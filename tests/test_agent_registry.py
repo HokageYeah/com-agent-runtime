@@ -12,9 +12,10 @@ import pytest
 def test_memoir_and_qa_are_registered_as_executable() -> None:
     from app.agents.registry import EXECUTABLE_AGENT_IDS, is_executable_agent
 
-    assert EXECUTABLE_AGENT_IDS == frozenset({"memoir_agent", "qa_agent"})
+    assert EXECUTABLE_AGENT_IDS == frozenset({"memoir_agent", "qa_agent", "soothe_agent"})
     assert is_executable_agent("memoir_agent") is True
     assert is_executable_agent("qa_agent") is True
+    assert is_executable_agent("soothe_agent") is True
 
 
 @pytest.mark.parametrize("agent_id", ["agent", "unknown_agent"])
@@ -55,6 +56,8 @@ def test_identity_lookup_does_not_import_worker_dependencies() -> None:
         "scenes", "actions", "playback_document", "publish_result", "media_tasks", "safety_report",
     })),
     ("qa_agent", "business_qa", "qa.", "turn_id", frozenset({"question_context", "submit_result"})),
+    ("soothe_agent", "soothe_reply", "soothe.", "turn_id", frozenset({"turn_context", "submit_result"})),
+    ("soothe_agent", "soothe_simulator", "soothe.", "turn_id", frozenset({"turn_context", "submit_result"})),
 ])
 def test_registration_exposes_existing_tool_permissions(
     agent_id: str, business_type: str, prefix: str, business_id: str, outputs: frozenset[str],
@@ -67,7 +70,7 @@ def test_registration_exposes_existing_tool_permissions(
     from app.runtime.agent_registration import AgentToolProfile
     from app.runtime.tool_gateway import AgentToolProfile as LegacyProfile
 
-    assert {item.agent_id for item in REGISTRATIONS} == {"memoir_agent", "qa_agent"}
+    assert {item.agent_id for item in REGISTRATIONS} == {"memoir_agent", "qa_agent", "soothe_agent"}
     profile = get_tool_profile(agent_id, business_type)
     assert isinstance(profile, AgentToolProfile)
     assert LegacyProfile is AgentToolProfile

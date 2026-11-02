@@ -1,0 +1,35 @@
+[
+  {
+    "name": "soothe.get_turn_context",
+    "version": "1.0.0",
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/soothe.get_turn_context",
+    "input_from": "input",
+    "output_to": "turn_context",
+    "side_effect": false,
+    "cancellation_behavior": "cancellable"
+  },
+  {
+    "name": "soothe.submit_turn_result",
+    "version": "1.0.0",
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/soothe.submit_turn_result",
+    "input_from": "turn_result",
+    "output_to": "submit_result",
+    "side_effect": true,
+    "cancellation_behavior": "query_after_commit"
+  },
+  {
+    "name": "soothe.get_turn_result",
+    "version": "1.0.0",
+    "connector_id": "couple_diary_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/soothe.get_turn_result",
+    "input_from": "input",
+    "output_to": "submit_result",
+    "side_effect": false,
+    "cancellation_behavior": "cancellable"
+  }
+]

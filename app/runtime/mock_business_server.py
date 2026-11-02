@@ -40,6 +40,9 @@ class _MockState(TypedDict):
     # harness 提交后阻塞开关与已到达提交点状态。
     qa_submit_blocked: bool
     qa_submit_started: bool
+    # 帮哄同样只保留聚合计数，不在服务状态保存上下文或草稿。
+    soothe_context_reads: int
+    soothe_submissions: int
 
 
 def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
@@ -55,12 +58,16 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
         "qa_submissions": 0,
         "qa_submit_blocked": False,
         "qa_submit_started": False,
+        "soothe_context_reads": 0,
+        "soothe_submissions": 0,
     }
     publish_release = Event()
     qa_submit_release = Event()
     # 只保存 scope 与正文的不可逆摘要；锁保证并发重发不会重复提交。
     qa_answers: dict[str, str] = {}
     qa_lock = Lock()
+    soothe_results: dict[str, str] = {}
+    soothe_lock = Lock()
     # 仅保留不可逆内容摘要，供 query-after-commit fixture 返回；不写入 /state。
     published_digest: str | None = None
     runtimes: dict[str, dict[str, object]] = {
@@ -114,6 +121,9 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
                 "/api/v1/internal/agent-tools/qa.get_question_context",
                 "/api/v1/internal/agent-tools/qa.submit_answer",
                 "/api/v1/internal/agent-tools/qa.get_answer_result",
+                "/api/v1/internal/agent-tools/soothe.get_turn_context",
+                "/api/v1/internal/agent-tools/soothe.submit_turn_result",
+                "/api/v1/internal/agent-tools/soothe.get_turn_result",
                 "/api/v1/internal/agent-tools/memory.get_snapshot",
                 "/api/v1/internal/agent-tools/memory.publish_playback_document",
                 "/api/v1/internal/agent-tools/memory.get_publish_result",
@@ -155,6 +165,9 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
             if "/qa." in self.path:
                 self._qa_tool(payload, input_data)
                 return
+            if "/soothe." in self.path:
+                self._soothe_tool(payload, input_data)
+                return
             if self.path.endswith("memory.get_snapshot"):
                 state["snapshot_reads"] += 1
                 # 只返回最小 fixture；mock 不留存请求内的 archive/run/snapshot 标识。
@@ -192,6 +205,75 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
             published_digest = digest
             self._json(200, {"output": {"revision": 1, "content_digest": digest}})
             return
+
+        def _soothe_tool(self, payload: dict[str, object], input_data: dict[str, object]) -> None:
+            """三种帮哄工具复用验签入口；按轮次前缀选择固定结构，正文只在当前栈。"""
+            context = payload.get("context")
+            names = ("session_id", "turn_id", "run_id")
+            if (
+                any(not isinstance(input_data.get(name), str) or not input_data[name] for name in names)
+                or not isinstance(context, dict)
+                or context.get("agent_id") != "soothe_agent"
+                or context.get("business_type") not in {"soothe_reply", "soothe_simulator"}
+                or context.get("business_id") != input_data["turn_id"]
+                or context.get("run_id") != input_data["run_id"]
+                or self.headers.get("X-Agent-Tool-Contract-Version") != "1.1.0"
+            ):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            if self.path.endswith("soothe.get_turn_context"):
+                state["soothe_context_reads"] += 1
+                # 测试正文运行时生成，避免真实素材或固定私密 fixture 进入源码/输出。
+                def material() -> str:
+                    return uuid4().hex.translate(str.maketrans("0123456789", "ghijklmnop"))
+
+                if str(input_data["turn_id"]).startswith("reply-"):
+                    turn_context: dict[str, object] = {
+                        "mode": "reply", "chat_text": material(), "background": None,
+                        "tone": "any", "previous_replies": [],
+                    }
+                elif str(input_data["turn_id"]).startswith(("simulator-", "sim-")):
+                    turn_context = {
+                        "mode": "simulator", "scenario": {
+                            "key": "forgot_anniversary", "title": material(),
+                            "anger_reason": material(), "hidden_need": material(),
+                        }, "partner_gender": "female", "partner_name": "TA",
+                        "forgiveness": 20, "round_count": 0, "history": [], "user_message": material(),
+                    }
+                else:
+                    self._qa_error("BUSINESS_DATA_INVALID")
+                    return
+                self._json(200, {"output": {"turn_context": turn_context}, "schema_version": "1.0.0"})
+                return
+            key = self.headers.get("Idempotency-Key", "")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            scope = hashlib.sha256(json.dumps(
+                [input_data[name] for name in names] + [key], separators=(",", ":")
+            ).encode()).hexdigest()
+            if self.path.endswith("soothe.get_turn_result"):
+                with soothe_lock:
+                    submitted = scope in soothe_results
+                output = {"submitted": True, "revision": 1} if submitted else {"submitted": False}
+                self._json(200, {"output": output, "schema_version": "1.0.0"})
+                return
+            result = input_data.get("turn_result")
+            if set(input_data) != {*names, "turn_result"} or not isinstance(result, dict):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            digest = hashlib.sha256(json.dumps(
+                result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            with soothe_lock:
+                previous = soothe_results.get(scope)
+                if previous is not None and previous != digest:
+                    self._qa_error("IDEMPOTENCY_CONFLICT")
+                    return
+                if previous is None:
+                    soothe_results[scope] = digest
+                    state["soothe_submissions"] += 1
+            self._json(200, {"output": {"submitted": True, "revision": 1}, "schema_version": "1.0.0"})
 
         def _qa_tool(self, payload: dict[str, object], input_data: dict[str, object]) -> None:
             """模拟业务授权引用、逻辑幂等与提交后查询；正文只停留在当前栈。"""

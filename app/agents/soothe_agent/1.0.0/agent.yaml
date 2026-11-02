@@ -1,0 +1,20 @@
+agent_id: soothe_agent
+version: 1.0.0
+contract_version: 1.0.0
+status: active
+allowed_business_types:
+  - soothe_reply
+  - soothe_simulator
+policy:
+  waiting_human_timeout_action: failed
+  # 四节点无循环；额外一次模型调用只给 compose 节点的自动重试使用。
+  max_model_calls: 2
+  max_tokens: 16000
+  max_model_cost: 0.1
+  max_steps: 8
+  max_tool_calls: 6
+  max_run_seconds: 90
+  max_auto_retry_per_step: 1
+prompts:
+  - compose-reply.v1.md
+  - compose-simulator.v1.md

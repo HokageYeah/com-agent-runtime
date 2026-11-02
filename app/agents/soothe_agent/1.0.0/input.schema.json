@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Run 只携带业务引用，聊天正文与对局历史由已授权工具读取。",
+  "type": "object",
+  "required": ["session_id", "turn_id"],
+  "properties": {
+    "session_id": {"type": "string", "minLength": 1, "description": "业务会话引用"},
+    "turn_id": {"type": "string", "minLength": 1, "description": "本轮引用，同时绑定工具 business_id"}
+  },
+  "additionalProperties": false
+}

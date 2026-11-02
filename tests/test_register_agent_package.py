@@ -120,3 +120,17 @@ def test_real_qa_package_can_register_active(tmp_path: Path, monkeypatch, dry_ru
                 assert definition.definition_json["allowed_business_types"] == ["business_qa"]
     finally:
         engine.dispose()
+
+
+def test_soothe_registration_dry_run_keeps_isolated_database_empty(tmp_path: Path, monkeypatch) -> None:
+    """真实包经过共享注册门禁，但 dry-run 不向任何环境写入定义。"""
+    url = f"sqlite:///{tmp_path / 'soothe-registration.db'}"
+    engine = create_engine(url)
+    AgentDefinition.__table__.create(engine)
+    monkeypatch.setattr(registration, "get_database_url", lambda: url)
+    try:
+        assert registration.register("soothe_agent", "1.0.0", dry_run=True) == 0
+        with Session(engine) as session:
+            assert list(session.scalars(select(AgentDefinition))) == []
+    finally:
+        engine.dispose()

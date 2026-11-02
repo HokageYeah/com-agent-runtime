@@ -968,3 +968,72 @@ PY
 实际结果：`app/agents/README.md` 25 个、`VERIFICATION.md` 20 个、`ENV_CONFIG.md` 8 个本地链接，缺失路径 0，退出码 0。
 
 未完成的环境验证：沙箱外端口用例、依赖隔离 DSN 的 PostgreSQL/MySQL/Redis 测试，以及真实业务、真实 Provider 和部署验证。本轮未操作数据库、执行迁移或修改现有包。
+
+
+## soothe_agent 接入（2026-11-02，G1 待审）
+
+范围：新增 `soothe_agent@1.0.0`，`soothe_reply` / `soothe_simulator` 共用四节点流程，
+复用 `couple_diary_backend`；按业务类型选择两份 prompt，严格私密模型与确定性校验，
+稳定幂等键先查后交，结果未知只查询不重发。业务、Provider 和 Redis 使用内存替身；
+端到端走真实工厂、队列、执行器、公共网关以及已验签的 mock 业务 handler，创建采用
+held → 绑定引用 → start，显式 `data_domain=couple_soothe`。没有真实注册或部署。
+
+实际执行结果（源码基线 `09572b8`）：
+
+```bash
+poetry run pytest -q tests/test_soothe_package.py tests/test_soothe_validation.py tests/test_soothe_package_tools_mock.py tests/test_soothe_model_gateway.py tests/test_soothe_runner.py tests/test_soothe_end_to_end.py
+# 79 passed in 3.45s，无失败/跳过；两种成功 Run、两个 eval 失败与隐私断言均通过。
+
+poetry run pytest -q tests/test_soothe_runner.py tests/test_soothe_factory.py tests/test_worker_agent_bootstrap.py tests/test_config.py tests/test_register_agent_package.py
+# 111 passed in 2.68s；包含缺配置终态、精确节点/route 与 SQLite 隔离 dry-run。
+
+poetry run pytest -q tests/test_qa_package_tools_mock.py tests/test_qa_runner.py tests/test_qa_model_gateway.py tests/test_qa_factory.py tests/test_qa_end_to_end.py tests/test_agent_architecture_boundaries.py tests/test_agent_registration_consistency.py
+# 113 passed in 6.12s；含 Memoir 1.0.0–1.0.8 与 QA 1.0.0 的 10 个冻结 digest。
+
+poetry run pytest -q
+# 沙箱内：1 failed, 1592 passed, 28 skipped, 2 warnings in 92.31s。
+# 失败为既有 test_api_listener_uses_kernel_port_and_is_listening_before_handoff，回环 bind 被沙箱拒绝。
+# 最终沙箱外补跑：1 failed, 1600 passed, 20 skipped, 2 warnings in 75.69s。
+
+poetry run ruff check .
+# All checks passed!
+
+poetry run mypy app
+# Found 19 errors in 7 files (checked 160 source files)，退出码 1，非通过。
+# error 条目与修改前逐行相同（修改前检查 154 source files），无新增类型错误。
+
+poetry run alembic heads
+# 20260907_1000 (head)，与修改前相同，无新增迁移。
+
+git diff --check
+# 退出码 0，无空白错误。
+
+./agent-runtime.sh register development --agent-id soothe_agent --version 1.0.0 --dry-run
+# 沙箱内读取 MySQL 时被权限拒绝；已确认目标为 Runtime 专用开发库后在沙箱外补跑，退出码 0。
+# [dry-run] 库内现有记录：无（将插入新行）；没有写入注册记录。
+# [OK] agent package register agent_id=soothe_agent version=1.0.0 environment=development
+```
+
+沙箱外剩余失败：`tests/test_memoir_audio_storage.py::test_transcoder_timeout_kills_subprocess`，
+其全局 `pgrep -f "sleep 30"` 断言匹配到已有进程；只读 `ps -o pid,ppid,comm` 核对到
+PID 48562、51640 均为 `/bin/zsh`。本轮未修改音频服务/测试，未终止这些进程，
+因此不能将全量 pytest 表述为全绿。首次沙箱外另有一条 BGM 超时测试失败，定向重跑及
+最终全量均通过；mock `/state` 的精确断言已同步新增两个 Soothe 聚合计数，并通过真实
+loopback handler 复测。20 项跳过因未提供 PostgreSQL/MySQL/Redis 隔离 DSN。
+
+Mypy 的七个历史文件为 `app/scripts/agent_runtime_cli.py`、`app/runtime/bounded_loop.py`、
+`app/services/memoir/memoir_audio_storage.py`、`app/services/memoir/memoir_media_service.py`、
+`app/services/memoir/memoir_audio_service.py`、`app/runtime/executor.py`、
+`app/scripts/register_agent_package.py`。本轮只将已有的 AST 静态图资产排除规则推广到所有
+Agent 的版本目录，解决新增 `workflow.graph.py` 与 QA 的模块名碰撞；没有排除 Agent
+运行时代码，也没有修改 Memoir/QA 包。上述历史错误与全量测试限制使 R8 Step 3 保持未勾选。
+
+Soothe 包 digest：`sha256:f01a1f08cc627f38160d2670eebfd516eca0729c5896b209bb9a7fcd9dcff5e1`。
+两份 prompt 的 Provider 消息角色实测为 `system/user`，隐藏诉求只进模型请求；禁用短语会
+让 Run 失败并阻止提交。所有测试正文均为临时生成，检查所有 Runtime 表、解密 checkpoint、
+步骤摘要、日志、stdout/stderr 和 callback，未发现正文泄漏。
+
+两个 Docker env 模板只新增注释示例，默认 `AGENT_MODEL_NODE_ROUTES_JSON={}`；完整显式授权
+与部署前提见 [ENV_CONFIG.md](ENV_CONFIG.md)。G1 逐 Step 证据及原始门禁输出见
+[soothe 开发计划](头脑风暴/docs/AgentRuntime/plans/2026-11-02-soothe_agent-开发计划.md) 第 7 节。
+未验证：真实业务与真实 Provider 的生成质量、带显式 DSN 的并发语义、镜像构建和服务器部署。

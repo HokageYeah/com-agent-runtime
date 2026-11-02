@@ -189,6 +189,9 @@ def test_memoir_and_qa_profiles_are_registered_in_production() -> None:
 
     assert get_tool_profile("memoir_agent", "couple_memory") is not None
     assert get_tool_profile("qa_agent", "business_qa") is not None
+    assert get_tool_profile("soothe_agent", "soothe_reply") is not None
+    assert get_tool_profile("soothe_agent", "soothe_simulator") is not None
+    assert get_tool_profile("soothe_agent", "unknown_business") is None
 
 
 def test_gateway_does_not_import_concrete_agents_or_keep_private_profiles() -> None:

@@ -2,6 +2,7 @@
 
 from app.agents.memoir_agent.registration import REGISTRATION as MEMOIR_REGISTRATION
 from app.agents.qa_agent.registration import REGISTRATION as QA_REGISTRATION
+from app.agents.soothe_agent.registration import REGISTRATION as SOOTHE_REGISTRATION
 from app.runtime.agent_registration import (
     AgentRegistration,
     AgentToolProfile,
@@ -12,6 +13,7 @@ from app.runtime.agent_registration import (
 REGISTRATIONS: tuple[AgentRegistration, ...] = (
     MEMOIR_REGISTRATION,
     QA_REGISTRATION,
+    SOOTHE_REGISTRATION,
 )
 
 # 导入时检查身份唯一性，禁止字典覆盖悄悄改变同一 Agent 的执行权限。

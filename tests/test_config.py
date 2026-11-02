@@ -4,6 +4,7 @@ import pytest
 
 from app.core import config
 from app.core.config import Settings
+from tests.test_soothe_factory import soothe_run as soothe_run
 
 
 def test_normalize_environment_aliases() -> None:
@@ -517,3 +518,35 @@ def test_agent_model_node_routes_replaces_qa_specific_setting() -> None:
     assert "AGENT_MODEL_NODE_ROUTES_JSON" in Settings.model_fields
     assert "QA_MODEL_NODE_ROUTES_JSON" not in Settings.model_fields
     assert not hasattr(Settings, "qa_model_node_routes")
+
+
+@pytest.mark.parametrize("raw", [
+    '{}', '{"soothe_agent":{}}', '{"soothe_agent":{"other":"fixture"}}',
+    '{"soothe_agent":{"compose_turn":"fixture","extra":"fixture"}}',
+    '{"soothe_agent":{"compose_turn":"unknown"}}',
+])
+def test_soothe_deployment_routes_require_exact_enabled_node_mapping(soothe_run, raw: str) -> None:
+    """通用配置交给本 Agent 工厂复核；缺键、多键和未知路由均终态失败。"""
+    import json
+    from datetime import UTC, datetime, timedelta
+
+    from app.agents.soothe_agent.bootstrap import configured_soothe_executor
+    from app.runtime.interfaces import LeaseContext
+    from app.runtime.test_harness import RuntimeDependencies
+    from tests.test_soothe_factory import _model_routes_json
+
+    session, run = soothe_run
+    configuration = config.settings.model_copy(update={
+        "AGENT_MODEL_NODE_ROUTES_JSON": raw,
+        "MODEL_ROUTES_JSON": _model_routes_json(),
+        "RUNTIME_BUSINESS_CONNECTORS_JSON": json.dumps({"couple_diary_backend": {
+            "enabled": True, "base_url": "https://business.example.test", "runtime_id": "runtime",
+            "key_id": "test-only", "secret": "test-only",
+        }}),
+    })
+    dependencies = RuntimeDependencies(settings=configuration, session_factory=None, clock=None,
+                                       callback_client=None, tool_client=None, transport_verifier=None)
+    lease = LeaseContext(execution_attempt=1, lease_owner="worker", fencing_token=1,
+                         lease_expires_at=datetime.now(UTC)+timedelta(minutes=1), privacy_version=1, authorization_version=1)
+    result = configured_soothe_executor(session, run.run_id, lease, dependencies=dependencies).run(run.run_id, lease)
+    assert (result.status, result.error_code) == ("failed", "SOOTHE_AGENT_NOT_CONFIGURED")
