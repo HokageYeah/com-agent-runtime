@@ -733,15 +733,15 @@ def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) 
     M8 默认配乐（freeze 2026-09-11 §6）：基础 15 项（含默认源 key）齐全
     即可装配默认配乐模式；生成三项仅在生成开关 true 时必填。
     """
-    import app.worker as worker
+    from app.agents.memoir_agent import bootstrap as memoir_bootstrap
     from app.core.config import Settings
 
     # 默认关闭：不触网不装配。
-    assert worker.configured_audio_service(worker.settings, None) is None
+    assert memoir_bootstrap.configured_audio_service(memoir_bootstrap.settings, None) is None
     # 开关打开但配置缺失：按能力关闭（不抛异常）。
-    monkeypatch.setattr(worker.settings, "MEMOIR_AUDIO_ENABLED", True, raising=False)
-    assert worker.configured_audio_service(worker.settings, None) is None
-    monkeypatch.setattr(worker.settings, "MEMOIR_AUDIO_ENABLED", False, raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "MEMOIR_AUDIO_ENABLED", True, raising=False)
+    assert memoir_bootstrap.configured_audio_service(memoir_bootstrap.settings, None) is None
+    monkeypatch.setattr(memoir_bootstrap.settings, "MEMOIR_AUDIO_ENABLED", False, raising=False)
     # 基础公共字段（两种模式共用，占位值不触网）。
     base = dict(
         MEMOIR_AUDIO_ENABLED=True,
@@ -765,7 +765,7 @@ def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) 
     )
     # 默认配乐模式：不含音乐生成三项也能正常装配（消除配置拆分过渡态）。
     default_mode = Settings(**base)
-    service = worker.configured_audio_service(default_mode, None)
+    service = memoir_bootstrap.configured_audio_service(default_mode, None)
     assert isinstance(service, MemoirAudioService)
     assert service.config.worker_concurrency == 4  # 进程级信号量默认值落点
     assert service.config.music_generation_enabled is False
@@ -781,6 +781,6 @@ def test_worker_assembles_audio_service_only_when_fully_configured(monkeypatch) 
         MEMOIR_MUSIC_PRICE_PER_SECOND="0.1",
         MEMOIR_MUSIC_DOWNLOAD_ALLOWED_HOSTS_JSON='["toc-host.example.com"]',
     )
-    service = worker.configured_audio_service(generation_mode, None)
+    service = memoir_bootstrap.configured_audio_service(generation_mode, None)
     assert isinstance(service, MemoirAudioService)
     assert service.config.music_generation_enabled is True

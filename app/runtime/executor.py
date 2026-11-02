@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from time import monotonic
 from typing import Protocol
 from uuid import uuid4
@@ -44,6 +45,32 @@ class WorkflowNodeRunner(Protocol):
     def run_node(
         self, node: dict[str, object], run: AgentRun, state: AgentState
     ) -> dict[str, object]: ...
+
+
+class WorkflowNodeErrorCode(StrEnum):
+    """代码登记的节点失败原因；禁止从模型或工具错误文本动态取码。"""
+
+    # 模型不可用或预算耗尽时直接失败，供无模板降级的 Agent 使用。
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    MODEL_BUDGET_EXCEEDED = "MODEL_BUDGET_EXCEEDED"
+    # 结构化结果和最终答案的确定性校验失败，均不得进入提交阶段。
+    STRUCTURED_OUTPUT_INVALID = "STRUCTURED_OUTPUT_INVALID"
+    ANSWER_VALIDATION_FAILED = "ANSWER_VALIDATION_FAILED"
+    # 外部工具结果失败或未知；未知结果只能以原逻辑键查询。
+    TOOL_CALL_FAILED = "TOOL_CALL_FAILED"
+    TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
+    # 物理副作用预算耗尽，不得继续发送。
+    TOOL_CALL_LIMIT_EXCEEDED = "TOOL_CALL_LIMIT_EXCEEDED"
+
+
+class WorkflowNodeError(RuntimeError):
+    """仅携带固定枚举码的受控失败，绝不携带正文或上游异常消息。"""
+
+    def __init__(self, code: WorkflowNodeErrorCode) -> None:
+        if not isinstance(code, WorkflowNodeErrorCode):
+            raise ValueError("WORKFLOW_NODE_ERROR_CODE_INVALID")
+        self.code = code
+        super().__init__(code.value)
 
 
 class RetryableWorkflowNodeError(RuntimeError):
@@ -481,6 +508,16 @@ class WorkflowExecutor:
                                 step.step_attempt,
                                 str(exc),
                             )
+            except WorkflowNodeError as exc:
+                # 受控节点失败只接受代码枚举；Memoir 的既有异常仍沿用下方原路径。
+                step.status = "failed"
+                step.error_code = exc.code.value
+                step.finished_at = datetime.now(UTC)
+                logging.warning(
+                    "Workflow 节点受控失败 run_id=%s node=%s code=%s",
+                    run_id, node_id, exc.code.value,
+                )
+                return self._fail(run, lease_context, exc.code.value)
             except Exception:  # noqa: BLE001 - 节点异常必须转为安全错误码。
                 step.status = "failed"
                 step.error_code = "WORKFLOW_NODE_FAILED"

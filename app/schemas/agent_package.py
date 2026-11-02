@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agents.registry import AGENT_TOOL_OUTPUT_FIELDS, get_tool_output_fields
 from app.runtime.state import SAFE_TOOL_OUTPUT_FIELDS
 
 
@@ -107,7 +108,9 @@ class ToolManifest(PackageSchema):
             not self.relative_path.startswith("/") or "://" in self.relative_path
         ):
             raise ValueError("relative_path 只能是以 / 开头的相对路径")
-        if self.output_to and self.output_to not in SAFE_TOOL_OUTPUT_FIELDS:
+        # 独立构造只接受代码已登记字段的并集；具体 Agent 权限由包级再次收紧。
+        allowed = SAFE_TOOL_OUTPUT_FIELDS.union(*AGENT_TOOL_OUTPUT_FIELDS.values())
+        if self.output_to and self.output_to not in allowed:
             raise ValueError("output_to 必须是受控的 AgentState 业务字段")
         return self
 
@@ -201,6 +204,16 @@ class AgentPackage(PackageSchema):
     guardrails: dict[str, Any]
     evals: list[dict[str, Any]]
     package_digest: str
+
+    @model_validator(mode="after")
+    def validate_tool_output_targets(self) -> AgentPackage:
+        """包声明不能扩展代码授予该 Agent 的工具写入权限。"""
+        allowed = get_tool_output_fields(self.agent_id)
+        if allowed is None:
+            allowed = SAFE_TOOL_OUTPUT_FIELDS
+        if any(tool.output_to and tool.output_to not in allowed for tool in self.tools):
+            raise ValueError("output_to 必须是受控的 AgentState 业务字段")
+        return self
 
     @field_validator("workflow_nodes")
     @classmethod

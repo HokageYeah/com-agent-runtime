@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import signal
 import socket
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.models  # noqa: F401
+from app.agents.memoir_agent import bootstrap as memoir_bootstrap
+from app.agents.memoir_agent.bootstrap import configured_model_gateway
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.db.sqlalchemy_db import Base
 from app.models import (
@@ -34,7 +37,7 @@ from app.runtime.tool_gateway import BusinessConnector, ToolGateway
 from app.services.agent_run_service import AgentRunService
 from app.services.reconciliation_service import ReconciliationService
 from app.services.tool_call_audit_service import ToolCallAuditService
-from app.worker import WorkerLoop, configured_executor, configured_model_gateway
+from app.worker import WorkerLoop, configured_executor
 
 
 class FakeExecutor:
@@ -57,6 +60,94 @@ class FakeExecutor:
             status="succeeded",
             execution_attempt=lease_context.execution_attempt,
         )
+
+
+@pytest.fixture
+def registered_worker_run() -> Iterator[tuple[Session, AgentRun, LeaseContext]]:
+    """只建隔离 Runtime SQLite 与安全引用，不调用外部工具或模型。"""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        now = datetime.now(UTC)
+        run = AgentRun(
+            run_id="registry-run", agent_id="memoir_agent", agent_version="1.0.0",
+            package_digest="digest", contract_version="1.0.0",
+            business_type="couple_memory", business_id="archive",
+            status="running", dispatch_state="claimed", input_json={},
+            authorization_version=1, caller_id="couple-diary", tenant_id="couple-diary",
+            create_idempotency_key="key", callback_target_id="memory_callback",
+            business_connector_id="couple_diary_backend", trace_id="trace",
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=now + timedelta(minutes=1),
+            run_deadline_at=now + timedelta(days=1),
+        )
+        session.add(run)
+        session.commit()
+        lease = LeaseContext(
+            execution_attempt=1, lease_owner="worker", fencing_token=1,
+            lease_expires_at=run.lease_expires_at,
+            privacy_version=1, authorization_version=1,
+        )
+        yield session, run, lease
+    engine.dispose()
+
+
+def test_registered_memoir_factory_builds_fresh_workflow_executors(
+    registered_worker_run, monkeypatch,
+) -> None:
+    import app.worker as worker
+    from app.agents.registry import get_executor_factory
+
+    # 仅装配不发包；使用静态安全域名，避免通用夹具的回环地址触发 SSRF 门禁。
+    monkeypatch.setattr(
+        worker.settings, "RUNTIME_BUSINESS_CONNECTORS_JSON",
+        '{"couple_diary_backend":{"enabled":true,"base_url":"https://business.example.test",'
+        '"runtime_id":"agent-runtime","key_id":"dev","secret":"test-secret"}}',
+    )
+    session, run, lease = registered_worker_run
+    factory = get_executor_factory(run.agent_id)
+    assert factory is not None
+
+    first = factory(session, run.run_id, lease, is_draining=lambda: False, dependencies=None)
+    second = factory(session, run.run_id, lease, is_draining=lambda: False, dependencies=None)
+
+    assert isinstance(first, WorkflowExecutor)
+    assert isinstance(second, WorkflowExecutor)
+    assert first is not second
+
+
+@pytest.mark.parametrize("method", ["run", "resume"])
+@pytest.mark.parametrize("agent_id", ["agent", "unknown_agent"])
+def test_unregistered_worker_agent_keeps_bootstrap_fallback(
+    registered_worker_run, agent_id: str, method: str,
+) -> None:
+    session, run, lease = registered_worker_run
+    run.agent_id = agent_id
+    session.commit()
+
+    result = getattr(configured_executor(session), method)(run.run_id, lease)
+
+    assert (result.run_id, result.status, result.error_code, result.execution_attempt) == (
+        run.run_id, "pending", "WORKFLOW_EXECUTOR_NOT_CONFIGURED", 1,
+    )
+
+
+@pytest.mark.parametrize("method", ["run", "resume"])
+def test_memoir_incomplete_connector_keeps_bootstrap_fallback(
+    registered_worker_run, monkeypatch, method: str,
+) -> None:
+    import app.worker as worker
+
+    session, run, lease = registered_worker_run
+    monkeypatch.setattr(worker.settings, "RUNTIME_BUSINESS_CONNECTORS_JSON", "{}")
+    result = getattr(configured_executor(session), method)(run.run_id, lease)
+
+    assert (result.status, result.error_code) == (
+        "pending", "WORKFLOW_EXECUTOR_NOT_CONFIGURED",
+    )
+    audit = session.scalar(select(RuntimeAuditRecord))
+    assert audit is not None and audit.reason_code == "CONNECTOR_DISABLED"
+    assert audit.metadata_summary == {"run_id": run.run_id}
 
 
 def _add_active_test_package(session, changed_at: datetime) -> None:
@@ -509,7 +600,7 @@ def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> Non
 
     monkeypatch.setattr(worker, "Redis", FakeRedis)
     monkeypatch.setattr(
-        worker.settings,
+        memoir_bootstrap.settings,
         "MODEL_ROUTES_JSON",
         '[{"route_id":"memoir","provider":"provider","model":"model",'
         '"endpoint":"https://model.example.test/v1","rate_limit_key":"memoir",'
@@ -521,9 +612,9 @@ def test_configured_model_gateway_uses_only_trusted_settings(monkeypatch) -> Non
             '"enabled":true,"allowed_tenant_ids":["*"],'
             '"allowed_model_policies":["balanced","emotional_writing","strict"]}]',
     )
-    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     monkeypatch.setattr(
-        worker.settings,
+        memoir_bootstrap.settings,
         "MEMOIR_MODEL_NODE_ROUTES_JSON",
         '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir",'
         '"generate_scene_batch":"memoir","repair_coverage_gaps":"memoir"}',
@@ -579,12 +670,12 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
     monkeypatch.setattr(worker, "Redis", FakeRedis)
     monkeypatch.setattr(worker, "HttpProviderAdapter", RecordingProvider)
-    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":10,"tpm_limit":10,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
-    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "MODEL_ROUTES_JSON", '[{"route_id":"memoir","provider":"provider","model":"model","endpoint":"https://model.example.test/v1","rate_limit_key":"memoir","max_concurrency":1,"rpm_limit":10,"tpm_limit":10,"timeout_seconds":1,"permit_ttl_seconds":2,"settle_margin_seconds":0,"price_unit":"usd_per_1k_tokens","input_price":0,"output_price":0,"route_config_version":"v1","pricing_config_version":"v1","capabilities":["structured_output","private_residency"],"data_residency":"private","max_context_tokens":2048,"max_output_tokens":512,"enabled":true,"allowed_tenant_ids":["*"],"allowed_model_policies":["balanced","emotional_writing","strict"]}]')
+    monkeypatch.setattr(memoir_bootstrap.settings, "RUNTIME_REDIS_URL", "redis://trusted", raising=False)
     # M7 循环体与覆盖修复节点须一并列全，否则集合门禁禁用模型网关。
-    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir","generate_scene_batch":"memoir","repair_coverage_gaps":"memoir"}', raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", '{"extract_highlights":"memoir","plan_chapters":"memoir","generate_scenes":"memoir","generate_scene_batch":"memoir","repair_coverage_gaps":"memoir"}', raising=False)
     monkeypatch.setattr(
-        worker.settings,
+        memoir_bootstrap.settings,
         "RUNTIME_TRUSTED_CLIENTS_JSON",
         '{"caller":{"authorization_version":1}}',
         raising=False,
@@ -641,7 +732,7 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
     # 同一 Run 冻结的版本与当前权威授权不一致时，模型边界必须在触网前拒绝。
     monkeypatch.setattr(
-        worker.settings,
+        memoir_bootstrap.settings,
         "RUNTIME_TRUSTED_CLIENTS_JSON",
         '{"caller":{"authorization_version":2}}',
         raising=False,
@@ -651,11 +742,9 @@ def test_configured_model_gateway_honors_live_draining_guard(monkeypatch) -> Non
 
 
 def test_configured_model_gateway_is_disabled_for_incomplete_settings(monkeypatch) -> None:
-    import app.worker as worker
-
-    monkeypatch.setattr(worker.settings, "MODEL_ROUTES_JSON", "[]")
-    monkeypatch.setattr(worker.settings, "RUNTIME_REDIS_URL", "", raising=False)
-    monkeypatch.setattr(worker.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", "{}", raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "MODEL_ROUTES_JSON", "[]")
+    monkeypatch.setattr(memoir_bootstrap.settings, "RUNTIME_REDIS_URL", "", raising=False)
+    monkeypatch.setattr(memoir_bootstrap.settings, "MEMOIR_MODEL_NODE_ROUTES_JSON", "{}", raising=False)
 
     assert configured_model_gateway(object()) is None
 

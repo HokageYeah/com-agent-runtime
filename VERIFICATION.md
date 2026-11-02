@@ -798,3 +798,173 @@ git diff --check
 ```
 
 覆盖要点：旧两字段响应 keep_unknown 零删除；非法清单（None/非 list/int/None 元素）零删除；显式 `[]` 仍未引用删除（既有 dry-run/execute 路径）；三字段合法摘要通过；敏感 keys 仍 `TOOL_OUTPUT_SENSITIVE` 后 keep_unknown。未验证项同第三轮。第三轮历史 78 passed / 1 skipped 不改写。
+
+## QA Agent 接入与公共 Runtime 最小解耦（2026-10-27）
+
+范围：公共 Runtime 的 Agent 注册、工具档案、输出目标、上下文预算和模型网关装配最小解耦，以及 `qa_agent@1.0.0` 的异步 Run 固定工作流。业务服务与模型 Provider 使用 mock；真实业务系统接入与部署不在本次验收内。历史验收依据为[开发计划](头脑风暴/docs/AgentRuntime/plans/2026-10-27-QA-Agent接入与公共Runtime最小解耦开发计划.md)第 6 节 T0–T5 审核记录。
+
+以下命令已在 T0–T5 执行；全量结果采用 T5 审核方沙箱外实测，不能与 Codex 沙箱内结果混用：
+
+```bash
+poetry run pytest -q
+# 审核方沙箱外：1417 passed / 0 failed / 20 skipped（仅缺 PostgreSQL/MySQL/Redis DSN）
+
+poetry run ruff check .
+# All checks passed!
+
+poetry run mypy app
+# 19 个历史错误，涉及 7 个文件；与 T0 基线一致，无新增，非通过
+
+poetry run alembic heads
+# 20260907_1000 (head) —— 单 head，无分叉
+```
+
+T6 文档收尾在 Codex 沙箱内重跑 QA 五个测试文件，命令与实际结果：
+
+```bash
+poetry run pytest -q tests/test_qa_package_tools_mock.py tests/test_qa_runner.py tests/test_qa_model_gateway.py tests/test_qa_factory.py tests/test_qa_end_to_end.py
+# 80 passed in 5.28s，无失败、无跳过
+
+git diff --check
+# 通过，无空白错误
+```
+
+T6 同时重跑上述 Ruff、Mypy 和 Alembic 命令：Ruff 通过；Mypy 仍为 19 errors in 7 files（checked 149 source files，退出码 1）；Alembic 仍为单 head `20260907_1000`。本轮未重跑全量 pytest，全量数字沿用审核方记录。
+
+| QA 测试文件 | 验证内容 |
+|---|---|
+| [test_qa_package_tools_mock.py](tests/test_qa_package_tools_mock.py) | 包加载、固定图与预算、QA 工具隔离、可信引用和 mock 业务 handler |
+| [test_qa_runner.py](tests/test_qa_runner.py) | 四节点流程、无证据回答、引用/控制字段校验、提交幂等与查询恢复 |
+| [test_qa_model_gateway.py](tests/test_qa_model_gateway.py) | 上下文分槽与预算、精确节点路由、lease/step 门禁、模型失败与敏感输出隔离 |
+| [test_qa_factory.py](tests/test_qa_factory.py) | 可信工厂、独立实例、缺失/非法配置经真实队列收敛为 `failed + QA_AGENT_NOT_CONFIGURED` |
+| [test_qa_end_to_end.py](tests/test_qa_end_to_end.py) | 20 项覆盖 T5 E1–E10：正常/无证据/非法引用、提交响应丢失后恢复、撤权、取消、预算、配置缺失、checkpoint 白名单和隐私；同时锁定包 digest |
+
+包 digest 由上述 `test_t5_package_digests_match_reviewed_t0_and_t4_records` 断言复核：
+
+| 包 | 实际结果 |
+|---|---|
+| `memoir_agent` 1.0.0–1.0.8 | 9/9 与开发计划 T0 digest 基线一致，包内容与 digest 不变 |
+| `qa_agent` 1.0.0 | `sha256:9513dc262c64832ad2d4c6fa564459be79d47bdeeb6bf42797efe48f51ef6466`，与 T4 审核值一致 |
+
+未验证项：Docker/PostgreSQL/Redis harness 与真实数据库/Redis 运行语义（MySQL DSN 相关测试也未执行）；真实业务系统与业务库；真实模型 Provider；镜像构建、部署与目标环境注册。本次 mock 验收不替代这些验证。配置及默认关闭行为见 [ENV_CONFIG.md](ENV_CONFIG.md)。
+
+## 多 Agent 注册收口（2026-10-27）
+
+本节记录[多 Agent 注册收口计划](头脑风暴/docs/AgentRuntime/plans/2026-10-27-多Agent注册收口开发计划.md) R3 在 Codex workspace-write 沙箱内的实际执行结果。新增 [AST 架构护栏](tests/test_agent_architecture_boundaries.py)、[注册一致性护栏](tests/test_agent_registration_consistency.py) 和 [Agent 接入指南](app/agents/README.md)，不改业务行为、冻结契约、版本包或迁移；计划中的 R3 保持未勾选，由审核方验收。
+
+审核方确认的工具口径：启用的 HTTP 工具必须在本 Agent / 业务类型的档案中；禁用声明只豁免档案成员检查，所有 HTTP 工具仍检查前缀，所有声明仍检查 `output_to`。依据为 `ToolGateway.call()` 先以 `TOOL_CAPABILITY_DISABLED` 拒绝禁用工具，之后才查档案。Memoir 各冻结包中的禁用 `memory.enqueue_tts` 不作修改。
+
+### 护栏、全量回归与静态检查
+
+以下命令均已实际执行（全量 pytest 输出保存至 `/private/tmp/r3-full-pytest.txt`）：
+
+```bash
+poetry run pytest -q tests/test_agent_architecture_boundaries.py tests/test_agent_registration_consistency.py
+# 28 passed in 2.78s：架构 18 项，注册一致性 10 项
+
+poetry run pytest -q
+# 1 failed, 1476 passed, 28 skipped, 2 warnings in 82.53s
+
+poetry run ruff check .
+# All checks passed!
+
+poetry run mypy app
+# Found 19 errors in 7 files (checked 154 source files)，退出码 1，非通过
+
+cmp /private/tmp/r3-mypy-before.txt /private/tmp/r3-mypy-after.txt
+# 退出码 0：修改前后的 Mypy 输出逐字节相同，无新增错误
+
+poetry run pytest -q tests/test_qa_end_to_end.py::test_t5_package_digests_match_reviewed_t0_and_t4_records
+# 1 passed in 2.22s；用 AgentPackageService.load 核对 Memoir 1.0.0–1.0.8 和 QA 1.0.0
+
+git diff --check
+# 退出码 0，无空白错误
+```
+
+全量唯一失败：`tests/test_runtime_process_harness.py::test_api_listener_uses_kernel_port_and_is_listening_before_handoff`，在 `app/runtime/process_harness.py:244` 执行 `listener.bind(("127.0.0.1", 0))` 时抛出 `PermissionError: [Errno 1] Operation not permitted`。这与既有 Codex 沙箱限制一致，需审核方在沙箱外补测；本轮全量 pytest 未全绿。28 个跳过中，20 个因未提供 PostgreSQL/MySQL/Redis 隔离 DSN，另 8 个因沙箱禁止 loopback 绑定（delayed provider 2 项、process harness 6 项）。两条 warning 来自 Starlette/httpx 和 Alembic 的既有弃用提示。
+
+与 R2 审核方沙箱外基线 `1457 passed / 0 failed / 20 skipped` 对比：新增 28 个护栏用例全部通过，沙箱多出 1 个已知端口失败和 8 个跳过，未发现新增业务失败。10 个包 digest 均与审核基线一致；不是重新计算后自行更新基线。`ENV_CONFIG.md` 的 `AGENT_MODEL_NODE_ROUTES_JSON` 说明已在 R2 完整提供，本轮核对后不重复添加。
+
+### 故意违规验证与恢复
+
+以下脚本已实际执行一次。先保存含既有工作区改动的原始字节和 `git diff`，临时向 `app/runtime/state.py` 追加一行违规导入；无论测试结果如何，均在 `finally` 恢复。未使用 Git 恢复或其他 Git 写操作。
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+
+path = Path('app/runtime/state.py')
+backup = Path('/private/tmp/r3-state-before.py')
+diff_before_path = Path('/private/tmp/r3-state-before.diff')
+original = path.read_bytes()
+backup.write_bytes(original)
+diff_before = subprocess.check_output(['git', 'diff', '--', str(path)])
+diff_before_path.write_bytes(diff_before)
+print('备份：app/runtime/state.py -> /private/tmp/r3-state-before.py', flush=True)
+print('保存：git diff -- app/runtime/state.py -> /private/tmp/r3-state-before.diff', flush=True)
+try:
+    path.write_bytes(original + b'\nimport app.agents.qa_agent\n')
+    print('注入：追加 import app.agents.qa_agent', flush=True)
+    command = ['poetry', 'run', 'pytest', '-q', 'tests/test_agent_architecture_boundaries.py']
+    print('运行：' + ' '.join(command), flush=True)
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    Path('/private/tmp/r3-injection-pytest.txt').write_text(result.stdout + result.stderr)
+    print(result.stdout + result.stderr, flush=True)
+    assert result.returncode == 1, result.returncode
+    assert 'app/runtime/state.py:' in result.stdout
+    assert 'app.agents.qa_agent' in result.stdout
+    assert '1 failed, 17 passed' in result.stdout
+finally:
+    path.write_bytes(backup.read_bytes())
+    print('恢复：按备份字节写回原文件', flush=True)
+    assert path.read_bytes() == original
+    diff_after = subprocess.check_output(['git', 'diff', '--', str(path)])
+    Path('/private/tmp/r3-state-after.diff').write_bytes(diff_after)
+    assert diff_after == diff_before
+    print('确认：恢复后文件字节、git diff -- app/runtime/state.py 均与注入前完全一致', flush=True)
+PY
+
+git diff --no-index /private/tmp/r3-state-before.diff /private/tmp/r3-state-after.diff
+# 退出码 0，无差异；既有未提交改动已保留
+```
+
+注入后的实际结果为 `1 failed, 17 passed in 0.56s`，失败用例为 `test_public_layers_do_not_import_concrete_agents`，准确指出 `app/runtime/state.py:89: app.agents.qa_agent`。恢复后的全量回归中，18 个架构护栏用例全部通过。
+
+### 文档本地链接
+
+已执行以下检查，覆盖接入指南、本文件与环境配置中的 Markdown 本地路径，跳过代码块和外部 URL；不把路径存在检查称为网页或锚点验证：
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import re
+from urllib.parse import unquote, urlsplit
+
+documents = [Path('app/agents/README.md'), Path('VERIFICATION.md'), Path('ENV_CONFIG.md')]
+missing = []
+for document in documents:
+    content = re.sub(r'```.*?```', '', document.read_text(encoding='utf-8'), flags=re.S)
+    count = 0
+    for match in re.finditer(r'\[[^\]]*\]\(([^\n)]+)\)', content):
+        target = match.group(1).strip()
+        if target.startswith('<'):
+            target = target[1:target.index('>')]
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc:
+            continue
+        count += 1
+        path = document.parent / unquote(parsed.path) if parsed.path else document
+        if not path.exists():
+            missing.append(f'{document}: {target}')
+    print(f'{document}: {count} 个本地链接已检查')
+print(f'缺失路径: {len(missing)}')
+for item in missing:
+    print(item)
+raise SystemExit(bool(missing))
+PY
+```
+
+实际结果：`app/agents/README.md` 25 个、`VERIFICATION.md` 20 个、`ENV_CONFIG.md` 8 个本地链接，缺失路径 0，退出码 0。
+
+未完成的环境验证：沙箱外端口用例、依赖隔离 DSN 的 PostgreSQL/MySQL/Redis 测试，以及真实业务、真实 Provider 和部署验证。本轮未操作数据库、执行迁移或修改现有包。

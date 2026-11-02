@@ -619,6 +619,8 @@ API 文档默认位于 `http://127.0.0.1:<PORT>/docs`，OpenAPI JSON 位于 `/ap
 
 AgentPackage 位于 `app/agents/<agent_id>/<version>/`。包版本和 digest 不可变；修改受管文件应发布新版本，不覆盖旧版本。调用方和部署脚本都必须显式指定版本，不会自动选择磁盘最新版。
 
+`qa_agent` 1.0.0 使用异步 Run，已通过 mock 业务服务与 mock 模型 Provider 验收，默认关闭；配置与验证边界见 [ENV_CONFIG.md](ENV_CONFIG.md) 和 [QA 验证记录](VERIFICATION.md#qa-agent-接入与公共-runtime-最小解耦2026-10-27)。
+
 当前保留版本：
 
 - `1.0.0–1.0.2`：历史文本工作流版本。

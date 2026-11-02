@@ -1,0 +1,6 @@
+mode: status_only
+step_labels:
+  load_question_context: 读取问题与授权证据
+  compose_answer: 生成回答
+  validate_answer: 校验回答
+  submit_answer: 提交回答

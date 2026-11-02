@@ -108,6 +108,23 @@ def test_context_manager_uses_node_cap_and_keeps_tool_summary_inside_the_same_wi
     assert "绝不能进入上下文" not in str(context.untrusted_items)
 
 
+def test_context_manager_custom_caps_replace_default_node_permissions() -> None:
+    """受信任调用方传入独立上限表，既不扩大模型窗口也不隐式继承 Memoir 节点。"""
+    manager = ContextManager(node_token_caps={"fixture_node": 64})
+
+    assert manager.node_token_budget("fixture_node", 100) == 64
+    assert manager.node_token_budget("fixture_node", 32) == 32
+    for unknown in ("extract_highlights", "unregistered_node"):
+        with pytest.raises(ValueError, match="MODEL_NODE_BUDGET_UNAVAILABLE"):
+            manager.node_token_budget(unknown, 100)
+
+
+def test_context_manager_empty_caps_reject_all_nodes() -> None:
+    """空表表示没有已登记节点，不能误回退为默认表。"""
+    with pytest.raises(ValueError, match="MODEL_NODE_BUDGET_UNAVAILABLE"):
+        ContextManager(node_token_caps={}).node_token_budget("extract_highlights", 100)
+
+
 def test_structured_parser_repairs_fenced_json_and_rejects_unknown_source_ref() -> None:
     parser = StructuredOutputParser()
 

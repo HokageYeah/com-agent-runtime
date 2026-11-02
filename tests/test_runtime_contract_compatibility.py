@@ -214,7 +214,9 @@ def test_tool_wire_map_registers_every_memoir_package_version() -> None:
     HTTP）。1.0.8（M8 语音与配乐）只演进业务发布文档（2.0.0 audio 键），
     Tool/Snapshot 合同零变更，沿用 1.1.0。
     """
-    from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
+    from app.agents.memoir_agent.registration import REGISTRATION as MEMOIR_REGISTRATION
+
+    _TOOL_WIRE_VERSION_BY_AGENT_VERSION = MEMOIR_REGISTRATION.tool_profiles["couple_memory"].wire_versions
 
     expected = {
         "1.0.0": "1.0.0",

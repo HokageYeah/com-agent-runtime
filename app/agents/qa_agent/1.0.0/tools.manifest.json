@@ -1,0 +1,35 @@
+[
+  {
+    "name": "qa.get_question_context",
+    "version": "1.0.0",
+    "connector_id": "qa_business_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/qa.get_question_context",
+    "input_from": "input",
+    "output_to": "question_context",
+    "side_effect": false,
+    "cancellation_behavior": "cancellable"
+  },
+  {
+    "name": "qa.submit_answer",
+    "version": "1.0.0",
+    "connector_id": "qa_business_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/qa.submit_answer",
+    "input_from": "answer_draft",
+    "output_to": "submit_result",
+    "side_effect": true,
+    "cancellation_behavior": "query_after_commit"
+  },
+  {
+    "name": "qa.get_answer_result",
+    "version": "1.0.0",
+    "connector_id": "qa_business_backend",
+    "method": "POST",
+    "relative_path": "/api/v1/internal/agent-tools/qa.get_answer_result",
+    "input_from": "input",
+    "output_to": "submit_result",
+    "side_effect": false,
+    "cancellation_behavior": "cancellable"
+  }
+]

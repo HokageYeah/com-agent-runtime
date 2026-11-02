@@ -41,17 +41,21 @@ class NodeContext:
 class ContextManager:
     """不可信内容只能进入 data 槽，不能覆盖 Runtime/Package 指令。"""
 
+    def __init__(self, node_token_caps: Mapping[str, int] | None = None) -> None:
+        # 上限表仅由受信任装配代码传入；独立复制，空表不回退到 Memoir 默认节点。
+        self._node_token_caps = dict(_NODE_TOKEN_CAPS if node_token_caps is None else node_token_caps)
+
     def node_token_budget(self, node_id: str, model_token_budget: int) -> int:
         """节点 cap 只能收紧已由 route/policy 计算的可信输入窗口。"""
         if (
             not isinstance(node_id, str)
-            or node_id not in _NODE_TOKEN_CAPS
+            or node_id not in self._node_token_caps
             or isinstance(model_token_budget, bool)
             or not isinstance(model_token_budget, int)
             or model_token_budget <= 0
         ):
             raise ValueError("MODEL_NODE_BUDGET_UNAVAILABLE")
-        return min(_NODE_TOKEN_CAPS[node_id], model_token_budget)
+        return min(self._node_token_caps[node_id], model_token_budget)
 
     def build_node_context(
         self, *, trusted_instructions: str, materials: Iterable[object],

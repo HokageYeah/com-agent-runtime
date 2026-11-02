@@ -81,7 +81,9 @@ def test_tool_wire_version_registers_1_0_6() -> None:
     TOOL_WIRE_VERSION_INVALID 瞬时失败（无日志、无 HTTP），
     表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
     """
-    from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
+    from app.agents.memoir_agent.registration import REGISTRATION as MEMOIR_REGISTRATION
+
+    _TOOL_WIRE_VERSION_BY_AGENT_VERSION = MEMOIR_REGISTRATION.tool_profiles["couple_memory"].wire_versions
 
     assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.6"] == "1.1.0"
     # 历史版本的登记不得漂移。
@@ -96,7 +98,9 @@ def test_tool_wire_version_registers_1_0_7() -> None:
     未登记时 Worker 发包前以 TOOL_WIRE_VERSION_INVALID 瞬时失败（无日志、
     无 HTTP），表现为 load_snapshot 节点 WORKFLOW_NODE_FAILED。
     """
-    from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
+    from app.agents.memoir_agent.registration import REGISTRATION as MEMOIR_REGISTRATION
+
+    _TOOL_WIRE_VERSION_BY_AGENT_VERSION = MEMOIR_REGISTRATION.tool_profiles["couple_memory"].wire_versions
 
     assert _TOOL_WIRE_VERSION_BY_AGENT_VERSION["1.0.7"] == "1.1.0"
     # 历史版本的登记不得漂移。

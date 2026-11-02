@@ -28,6 +28,7 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.agents.registry import is_executable_agent
 from app.config.database_config import get_database_url
 from app.models import AgentDefinition
 from app.services.agent_package_service import AgentPackageService
@@ -63,6 +64,15 @@ def register(agent_id: str, version: str, *, dry_run: bool) -> int:
     """加载磁盘包并幂等 upsert 到 agent_definitions；dry-run 只打印不落库。"""
 
     package = AgentPackageService(PACKAGE_ROOT).load(agent_id, version)
+    # active 启用必须已有代码内受信工厂；共享 CLI 与 dry-run 也走同一门禁。
+    # 放在数据库访问前拒绝，非 active 包继续沿用既有加载/生命周期规则。
+    if package.status == "active" and not is_executable_agent(package.agent_id):
+        logger.error(
+            "active 注册被拒绝 code=AGENT_EXECUTOR_NOT_REGISTERED agent_id=%s version=%s",
+            package.agent_id,
+            package.version,
+        )
+        return 1
     definition_json = _build_definition_json(package)
     logger.info(
         "磁盘包加载成功 agent_id=%s version=%s digest=%s status=%s nodes=%s",

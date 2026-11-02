@@ -1,0 +1,5 @@
+{"case_id":"authorized_evidence","expected":"submitted_with_citations"}
+{"case_id":"no_evidence","expected":"submitted_no_evidence"}
+{"case_id":"unknown_source_ref","expected":"semantic_validation_failed"}
+{"case_id":"control_field","expected":"schema_validation_failed"}
+{"case_id":"answer_too_long","expected":"answer_validation_failed"}

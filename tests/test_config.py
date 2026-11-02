@@ -458,3 +458,62 @@ def test_generation_mode_validates_default_bgm_key_when_filled(
     kwargs["MEMOIR_DEFAULT_BGM_OBJECT_KEY"] = "other-app/default/memoirs.mp3"
     with pytest.raises(ValueError, match="MEMOIR_DEFAULT_BGM_OBJECT_KEY"):
         config.validate_memoir_audio_settings(_audio_settings(monkeypatch, **kwargs))
+
+
+def test_agent_model_node_routes_selects_only_requested_agent() -> None:
+    """通用部署映射按可信 Agent 身份隔离节点路由，Memoir 专用配置保持独立。"""
+    isolated = Settings(
+        _env_file=None,
+        AGENT_MODEL_NODE_ROUTES_JSON=(
+            '{"qa_agent":{"compose_answer":"qa-mock"},'
+            '"future_agent":{"other_node":"future-model"}}'
+        ),
+        MEMOIR_MODEL_NODE_ROUTES_JSON='{"extract_highlights":"memoir-model"}',
+    )
+    assert isolated.agent_model_node_routes("qa_agent") == {"compose_answer": "qa-mock"}
+    assert isolated.agent_model_node_routes("future_agent") == {"other_node": "future-model"}
+    assert isolated.memoir_model_node_routes == {"extract_highlights": "memoir-model"}
+
+
+def test_agent_model_node_routes_missing_agent_returns_empty_mapping() -> None:
+    """缺少 Agent 配置交给对应工厂明确失败，不把其他 Agent 的路由借给它。"""
+    isolated = Settings(
+        _env_file=None,
+        AGENT_MODEL_NODE_ROUTES_JSON='{"future_agent":{"compose":"future-model"}}',
+    )
+    assert isolated.agent_model_node_routes("qa_agent") == {}
+
+
+@pytest.mark.parametrize(
+    "raw_config",
+    [
+        "sentinel-config-value",
+        "[]",
+        "null",
+        '"sentinel-config-value"',
+        '{"qa_agent":[]}',
+        '{"qa_agent":{"compose_answer":123}}',
+        '{"qa_agent":{"compose_answer":null}}',
+        '{"qa_agent":{"compose_answer":""}}',
+        '{"qa_agent":{"compose_answer":"   "}}',
+        '{"qa_agent":{"compose_answer":{"sentinel-config-value":"route"}}}',
+        '{"qa_agent":{"compose_answer":"route"},"future_agent":[]}',
+    ],
+)
+def test_agent_model_node_routes_rejects_invalid_json_without_echoing_values(
+    raw_config: str,
+) -> None:
+    """外层 Agent 和内层节点都必须是对象；错误只暴露配置字段名。"""
+    isolated = Settings(_env_file=None, AGENT_MODEL_NODE_ROUTES_JSON=raw_config)
+    with pytest.raises(ValueError, match="^AGENT_MODEL_NODE_ROUTES_JSON_INVALID$") as exc_info:
+        isolated.agent_model_node_routes("qa_agent")
+    assert "sentinel-config-value" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__suppress_context__ is True
+
+
+def test_agent_model_node_routes_replaces_qa_specific_setting() -> None:
+    """新增 Agent 不再新增 Settings 字段，旧 QA 专用字段与属性一并删除。"""
+    assert "AGENT_MODEL_NODE_ROUTES_JSON" in Settings.model_fields
+    assert "QA_MODEL_NODE_ROUTES_JSON" not in Settings.model_fields
+    assert not hasattr(Settings, "qa_model_node_routes")

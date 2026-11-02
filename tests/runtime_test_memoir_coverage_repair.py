@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 from pytest import raises
 
-import app.worker as worker
+from app.agents.memoir_agent import bootstrap as memoir_bootstrap
 from app.agents.memoir_agent import model_gateway as memoir_model_gateway
 from app.agents.memoir_agent.runner import MemoirNodeRunner
 from app.runtime import harness_entry
@@ -342,7 +342,7 @@ def test_repair_node_registered_on_all_gateway_surfaces() -> None:
     # 1) 模型网关适配器 prompt 表：缺键时 call() 直接 route_not_allowed。
     assert "repair_coverage_gaps" in memoir_model_gateway._PROMPT_REFS
     # 2) Worker 精确门禁基准：键集合不一致会整体禁用模型网关（模板降级）。
-    assert "repair_coverage_gaps" in worker._MEMOIR_MODEL_NODES
+    assert "repair_coverage_gaps" in memoir_bootstrap._MEMOIR_MODEL_NODES
     # 3) harness_entry 默认路由：provider 模式下与 worker 基准同步列全。
     assert '"repair_coverage_gaps"' in inspect.getsource(harness_entry)
     # 4) ContextManager 节点 token cap：模型节点必须有同级 cap（512）。

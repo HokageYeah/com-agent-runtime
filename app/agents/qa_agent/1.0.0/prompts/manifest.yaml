@@ -1,0 +1,11 @@
+# QA 复用公共上下文脱敏与路由治理；元数据只由部署包提供。
+prompts:
+  - prompt_id: compose-answer
+    version: v1
+    file: compose-answer.v1.md
+    owner_agent: qa_agent
+    input_schema: qa_compose_answer_input
+    output_schema: qa_compose_answer_output
+    model_policy: strict
+    guardrail_policy: redacted_only
+    status: active

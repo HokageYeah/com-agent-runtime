@@ -1,0 +1,6 @@
+version: 1.0.0
+rules:
+  - reject_unknown_source_refs
+  - require_citation_or_no_evidence
+  - reject_control_fields
+  - enforce_answer_length

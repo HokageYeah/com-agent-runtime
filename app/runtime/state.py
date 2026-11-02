@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +22,21 @@ _SENSITIVE_TOOL_OUTPUT_KEYS = frozenset({
     "version", "contract_version", "package_digest", "callback_target", "idempotency_key",
     "secret", "token", "access_token", "api_key", "password",
 })
+
+
+def apply_safe_output(
+    model: BaseModel, target: str, output: object, allowed: Collection[str],
+) -> None:
+    """复用目标白名单、敏感键与模型校验；全部通过后才修改内存目标字段。"""
+    if target not in allowed:
+        logging.warning("拒绝工具输出写入 error_code=%s target=%s", "TOOL_OUTPUT_TARGET_FORBIDDEN", target)
+        raise ValueError("TOOL_OUTPUT_TARGET_FORBIDDEN")
+    if _contains_sensitive_tool_key(output):
+        logging.warning("拒绝工具敏感字段 error_code=%s target=%s", "TOOL_OUTPUT_SENSITIVE_FIELD", target)
+        raise ValueError("TOOL_OUTPUT_SENSITIVE_FIELD")
+    # 在独立候选模型上重新校验，类型或模型约束失败时原对象不发生部分更新。
+    validated = type(model).model_validate({**model.model_dump(), target: output})
+    setattr(model, target, getattr(validated, target))
 
 
 class AgentState(BaseModel):
@@ -56,15 +71,7 @@ class AgentState(BaseModel):
 
     def apply_tool_output(self, output_to: str, output: object) -> None:
         """将已校验工具结果写入白名单字段，阻断控制面与凭据回流。"""
-        if output_to not in SAFE_TOOL_OUTPUT_FIELDS:
-            logging.warning("拒绝工具输出写入 error_code=%s target=%s", "TOOL_OUTPUT_TARGET_FORBIDDEN", output_to)
-            raise ValueError("TOOL_OUTPUT_TARGET_FORBIDDEN")
-        if _contains_sensitive_tool_key(output):
-            logging.warning("拒绝工具敏感字段 error_code=%s target=%s", "TOOL_OUTPUT_SENSITIVE_FIELD", output_to)
-            raise ValueError("TOOL_OUTPUT_SENSITIVE_FIELD")
-        # 重新走 Pydantic 校验，避免绕过字段的既定类型约束。
-        validated = type(self).model_validate({**self.model_dump(), output_to: output})
-        setattr(self, output_to, getattr(validated, output_to))
+        apply_safe_output(self, output_to, output, SAFE_TOOL_OUTPUT_FIELDS)
 
 
 def _contains_sensitive_tool_key(value: object) -> bool:

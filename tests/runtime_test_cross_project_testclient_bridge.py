@@ -271,10 +271,11 @@ def _runtime_run(session: Session, package: AgentPackage, monkeypatch: Any, *, r
             del run, state
             return {"node_id": node["node_id"], "waiting_human": True}
     import app.worker as worker
+    from app.agents.memoir_agent import bootstrap as memoir_bootstrap
     monkeypatch.setattr(worker.settings, "RUNTIME_BUSINESS_CONNECTORS_JSON",
         '{"couple_diary_backend":{"enabled":true,"base_url":"https://business.example.test",'
         '"runtime_id":"agent-runtime","key_id":"dev","secret":"test-secret"}}', raising=False)
-    monkeypatch.setattr(worker, "MemoirNodeRunner", lambda *args: _Runner())
+    monkeypatch.setattr(memoir_bootstrap, "MemoirNodeRunner", lambda *args: _Runner())
     result = worker.configured_executor(session).resume(run.run_id, lease)
     assert result.status == "waiting_human"
     session.refresh(run)

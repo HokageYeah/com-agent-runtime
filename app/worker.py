@@ -22,18 +22,15 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.agents.memoir_agent.model_gateway import MemoirModelGatewayAdapter
-from app.agents.memoir_agent.runner import MemoirNodeRunner
+from app.agents.registry import get_executor_factory
 from app.core.authorization import AuthorizationError, AuthorizationService
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.logging_uru import setup_logging, shutdown_logging
 from app.db.sqlalchemy_db import database
 from app.dispatcher import Dispatcher
 from app.models import AgentDefinition, AgentRun
-from app.runtime.artifact import ArtifactStore
 from app.runtime.callback_gateway import CallbackGateway, CallbackTarget
 from app.runtime.checkpoint import CheckpointStore, FernetCheckpointCipher
-from app.runtime.executor import WorkflowExecutor
 from app.runtime.interfaces import AgentRunResult, LeaseContext, RunExecutor
 from app.runtime.model_gateway import (
     HttpProviderAdapter,
@@ -53,7 +50,6 @@ from app.schemas.audit import (
     AUTHORIZATION_REVOKED,
     AUTHORIZATION_VERSION_CHANGED,
     CALLBACK_TARGET_MISSING,
-    CONNECTOR_DISABLED,
     RuntimeAuditEvent,
 )
 from app.services.audit_service import AuditService
@@ -61,11 +57,9 @@ from app.services.callback_delivery_service import (
     CallbackDeliveryService,
     CallbackSender,
 )
-from app.services.evaluation_service import EvaluationService
 from app.services.lease_service import LeaseService
 from app.services.model_usage_service import ModelUsageService
 from app.services.run_queue_service import RunQueueService
-from app.services.tool_call_audit_service import ToolCallAuditService
 from app.services.traffic_event_service import SqlAlchemyTrafficEventRecorder
 
 
@@ -207,53 +201,31 @@ class BootstrapExecutor:
         return self.run(run_id, lease_context)
 
 
-# 模型网关装配的精确门禁基准：env 里 MEMOIR_MODEL_NODE_ROUTES_JSON 的键集合
-# 必须与这里完全一致，缺键即整体禁用模型网关走模板 fallback。
-# generate_scene_batch 是 M7 bounded_loop 的循环体模型节点；
-# repair_coverage_gaps 是 M7 循环后的覆盖修复模型节点，须一并登记。
-_MEMOIR_MODEL_NODES = frozenset(
-    {
-        "extract_highlights",
-        "plan_chapters",
-        "generate_scenes",
-        "generate_scene_batch",
-        "repair_coverage_gaps",
-    }
-)
-
-
-def configured_model_gateway(
+def build_model_gateway(
     session: Session,
+    runtime_settings: Settings,
     *,
     is_draining: Callable[[], bool] = lambda: False,
     dependencies: RuntimeDependencies | None = None,
-) -> MemoirModelGatewayAdapter | None:
-    """只从受信任 Settings 装配模型边界；任何缺项都禁用模型能力。"""
+) -> ModelGateway | None:
+    """只构建公共模型边界；Agent 节点路由与适配器由各自装配入口负责。"""
     try:
-        runtime_settings = (
-            dependencies.settings if dependencies is not None else settings
-        )
         routes = runtime_settings.model_routes
-        node_routes = runtime_settings.memoir_model_node_routes
     except ValueError:
-        logging.exception("Memoir Worker 模型配置无效，使用模板 fallback")
+        # 只记录受控配置状态，不输出配置异常可能携带的凭据或私有地址。
+        logging.warning("Worker 模型配置无效，禁用模型网关")
         return None
     if (
         Redis is None
         or not isinstance(runtime_settings.RUNTIME_REDIS_URL, str)
         or not runtime_settings.RUNTIME_REDIS_URL
-        or set(node_routes) != _MEMOIR_MODEL_NODES
-        or any(
-            route_id not in {route.route_id for route in routes}
-            for route_id in node_routes.values()
-        )
     ):
-        logging.warning("Memoir Worker 模型配置不完整，使用模板 fallback")
+        logging.warning("Worker 模型配置不完整，禁用模型网关")
         return None
     try:
         redis = Redis.from_url(runtime_settings.RUNTIME_REDIS_URL)
     except Exception:
-        logging.exception("Memoir Worker Redis 初始化失败，使用模板 fallback")
+        logging.warning("Worker Redis 初始化失败，禁用模型网关")
         return None
 
     class _WorkerDrainingGuard(ModelCallGuard):
@@ -278,7 +250,7 @@ def configured_model_gateway(
     traffic_recorder = SqlAlchemyTrafficEventRecorder(
         session, audit_service=AuditService(session=session),
     )
-    gateway = ModelGateway(
+    return ModelGateway(
         ModelRouteRegistry(routes),
         ProviderTrafficController(redis, recorder=traffic_recorder),
         ModelUsageService(session),
@@ -302,86 +274,87 @@ def configured_model_gateway(
         capability_evaluator=ModelCapabilityEvaluator(model_policies),
         traffic_event_recorder=traffic_recorder,
     )
-    return MemoirModelGatewayAdapter(session, gateway, node_routes)
 
 
-def configured_media_service(
-    runtime_settings: object, session: Session,
-) -> object | None:
-    """按部署配置装配 M6 媒体服务；总开关关闭或依赖缺失时返回 None。
-
-    返回 None 等价于媒体能力关闭：媒体节点按 CAPABILITY_DISABLED 跳过/降级，
-    旧版本行为零变化。装配失败只记受控日志，绝不把凭证或 URL 写进日志。
-    """
-    if not bool(getattr(runtime_settings, "MEMOIR_MEDIA_ENABLED", False)):
-        return None
-    try:
-        from app.services.memoir.memoir_media_service import (
-            MemoirMediaConfig,
-            MemoirMediaService,
-        )
-        from app.utils.aliyun.oss_client import AliyunOSSClient
-        from app.utils.volcano.cv_client import MockCVClient, VolcanoCVClient
-
-        provider_name = str(getattr(runtime_settings, "MEMOIR_MEDIA_PROVIDER", "mock"))
-        if provider_name == "volcano":
-            provider: object = VolcanoCVClient(
-                access_key=str(getattr(runtime_settings, "VOLCANO_CV_ACCESS_KEY", "")),
-                secret_key=str(getattr(runtime_settings, "VOLCANO_CV_SECRET_KEY", "")),
-                region=str(getattr(runtime_settings, "VOLCANO_CV_REGION", "cn-north-1")),
-                host=str(getattr(runtime_settings, "VOLCANO_CV_HOST", "visual.volcengineapi.com")),
-                timeout_seconds=float(getattr(runtime_settings, "MEMOIR_MEDIA_IMAGE_TIMEOUT_SECONDS", 25.0)),
-                max_retries=int(getattr(runtime_settings, "MEMOIR_MEDIA_IMAGE_MAX_RETRIES", 1)),
+def build_tool_gateway(
+    session: Session,
+    agent_run: AgentRun,
+    connector_config: dict[str, object],
+    lease_context: LeaseContext,
+    *,
+    is_draining: Callable[[], bool] = lambda: False,
+    dependencies: RuntimeDependencies | None = None,
+    runtime_settings: Settings,
+) -> ToolGateway:
+    """统一装配工具安全边界；Agent 工厂负责各自的配置完整性与回退语义。"""
+    connector = BusinessConnector(
+        base_url=cast(str, connector_config["base_url"]),
+        runtime_id=cast(str, connector_config["runtime_id"]),
+        key_id=cast(str, connector_config["key_id"]),
+        secret=cast(str, connector_config["secret"]),
+    )
+    # ToolGateway 每次发送前读取同一实时 draining 回调，不能在装配时冻结状态。
+    peer_transport = (
+        PeerTrackingHTTPTransport() if dependencies is None else None
+    )
+    return ToolGateway(
+        {agent_run.business_connector_id: connector},
+        dependencies.tool_client
+        if dependencies is not None
+        else httpx.Client(transport=peer_transport, trust_env=False),
+        is_draining=is_draining,
+        deadline_at=lambda: agent_run.run_deadline_at,
+        lease_expires_at=lambda: lease_context.lease_expires_at,
+        authorization_permitted=lambda checked_run_id: (
+            _authorization_rejection_reason(
+                session,
+                checked_run_id,
+                trusted_clients=runtime_settings.trusted_clients,
             )
-        else:
-            # mock provider：开发/测试同接口确定性输出，绝不触达计费 API。
-            provider = MockCVClient()
-        uploader = AliyunOSSClient(
-            str(getattr(runtime_settings, "ACCESS_KEY_ID", "")),
-            str(getattr(runtime_settings, "ACCESS_KEY_SECRET", "")),
-            str(getattr(runtime_settings, "BUCKET_NAME", "")),
-            str(getattr(runtime_settings, "REGION", "")),
-            str(getattr(runtime_settings, "ENDPOINT", "")),
-        )
-        config = MemoirMediaConfig.from_settings(runtime_settings)
+        ),
+        execution_permitted=lambda checked_run_id: _tool_execution_permitted(
+            session, checked_run_id, lease_context
+        ),
+        audit_rejection=lambda checked_run_id, code: AuditService(
+            session=session
+        ).append(
+            RuntimeAuditEvent(
+                audit_id=str(uuid4()), actor_type="system",
+                actor_id="tool_gateway", action="tool_gateway_rejected",
+                resource_type="agent_run", resource_id=checked_run_id,
+                reason_code=code, outcome="rejected",
+                occurred_at=datetime.now(UTC),
+                metadata_summary={"run_id": checked_run_id},
+            )
+        ),
+        peer_ip_provider=peer_transport.peer_ip
+        if peer_transport is not None
+        else None,
+        reset_peer_ip=peer_transport.reset_peer_ip
+        if peer_transport is not None
+        else None,
+        test_transport=(
+            dependencies.transport_verifier
+            if dependencies is not None
+            and isinstance(
+                dependencies.transport_verifier, LoopbackTestTransport
+            )
+            else None
+        ),
+        # 开发联调逃生门：connector 指向本机业务后端（127.0.0.1:8008）时
+        # 由运维配置显式放行；生产环境 config validator 强制为 False。
+        allow_private_endpoints=(
+            runtime_settings.RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS
+        ),
+    )
 
-        return MemoirMediaService(
-            provider, uploader, config,
-            session=session,
-        )
-    except Exception as exc:
-        # 装配失败按能力关闭处理；只记异常类名，不记正文（可能含配置值）。
-        logging.warning(
-            "MemoirAgent 媒体服务装配失败按能力关闭 code=%s",
-            type(exc).__name__,
-        )
-        return None
 
-
-def configured_audio_service(
-    runtime_settings: object, session: Session,
-) -> object | None:
-    """按部署配置装配 M8 音频服务；总开关关闭或依赖缺失时返回 None。
-
-    返回 None 等价于音频能力关闭：1.0.8 图的 enqueue_audio_tasks 节点按
-    CAPABILITY_DISABLED 跳过（发布 2.0.0 空音频文档），旧版本图不含该
-    节点，存量行为零变化。公共 Worker 消息/调度语义不变。
-    """
-    if not bool(getattr(runtime_settings, "MEMOIR_AUDIO_ENABLED", False)):
-        return None
-    try:
-        from app.services.memoir.memoir_audio_service import (
-            build_memoir_audio_service,
-        )
-
-        return build_memoir_audio_service(runtime_settings, session)
-    except Exception as exc:
-        # 装配失败按能力关闭处理；只记异常类名，不记可能含配置值的正文。
-        logging.warning(
-            "MemoirAgent 音频服务装配失败按能力关闭 code=%s",
-            type(exc).__name__,
-        )
-        return None
+def build_checkpoint_store(session: Session, runtime_settings: Settings) -> CheckpointStore:
+    """复用部署密钥与同一事务；加密和 fencing 仍由既有检查点仓储负责。"""
+    return CheckpointStore(
+        session,
+        FernetCheckpointCipher(runtime_settings.MEMORY_SNAPSHOT_FERNET_KEY.encode()),
+    )
 
 
 def configured_executor(
@@ -390,136 +363,25 @@ def configured_executor(
     is_draining: Callable[[], bool] = lambda: False,
     dependencies: RuntimeDependencies | None = None,
 ) -> RunExecutor:
-    """按 Worker 当前事务装配 Memoir 执行器，配置不完整时安全退回占位器。"""
+    """按可信注册表选择工厂；未知身份与 Memoir 配置缺失仍退回占位器。"""
 
     class _Executor:
         @staticmethod
-        def _memoir_executor(
-            run_id: str, lease_context: LeaseContext
-        ) -> WorkflowExecutor | None:
-            runtime_settings = (
-                dependencies.settings if dependencies is not None else settings
+        def _executor(run_id: str, lease_context: LeaseContext) -> RunExecutor | None:
+            # 只按权威 Run 的冻结身份查代码登记，不接受包或请求指定工厂。
+            agent_run = session.scalar(select(AgentRun).where(AgentRun.run_id == run_id))
+            factory = (
+                get_executor_factory(agent_run.agent_id) if agent_run is not None else None
             )
-            agent_run = session.scalar(
-                select(AgentRun).where(AgentRun.run_id == run_id)
-            )
-            # Run 的版本由创建时冻结；Worker 只按 Agent 身份选择执行器，绝不把
-            # 新版本或历史版本重写为默认版本。Package 可用性由 Executor 和发包守卫复核。
-            if agent_run is None or agent_run.agent_id != "memoir_agent":
+            if factory is None:
                 return None
-            config = runtime_settings.business_connectors.get(
-                agent_run.business_connector_id, {}
-            )
-            required = ("base_url", "runtime_id", "key_id", "secret")
-            if not bool(config.get("enabled")) or any(
-                not isinstance(config.get(key), str) for key in required
-            ):
-                logging.error("Memoir Worker connector 配置不完整 run_id=%s", run_id)
-                AuditService(session=session).append(
-                    RuntimeAuditEvent(
-                        audit_id=str(uuid4()), actor_type="system",
-                        actor_id="tool_gateway", action="tool_gateway_rejected",
-                        resource_type="agent_run", resource_id=run_id,
-                        reason_code=CONNECTOR_DISABLED, outcome="rejected",
-                        occurred_at=datetime.now(UTC), trace_id=agent_run.trace_id,
-                        metadata_summary={"run_id": run_id},
-                    )
-                )
-                return None
-            connector = BusinessConnector(
-                base_url=cast(str, config["base_url"]),
-                runtime_id=cast(str, config["runtime_id"]),
-                key_id=cast(str, config["key_id"]),
-                secret=cast(str, config["secret"]),
-            )
-            # ToolGateway 每次发送前读取同一实时 draining 回调，不能在装配时冻结状态。
-            peer_transport = (
-                PeerTrackingHTTPTransport() if dependencies is None else None
-            )
-            tool_gateway = ToolGateway(
-                {agent_run.business_connector_id: connector},
-                dependencies.tool_client
-                if dependencies is not None
-                else httpx.Client(transport=peer_transport, trust_env=False),
-                is_draining=is_draining,
-                deadline_at=lambda: agent_run.run_deadline_at,
-                lease_expires_at=lambda: lease_context.lease_expires_at,
-                authorization_permitted=lambda checked_run_id: (
-                    _authorization_rejection_reason(
-                        session,
-                        checked_run_id,
-                        trusted_clients=runtime_settings.trusted_clients,
-                    )
-                ),
-                execution_permitted=lambda checked_run_id: _tool_execution_permitted(
-                    session, checked_run_id, lease_context
-                ),
-                audit_rejection=lambda checked_run_id, code: AuditService(
-                    session=session
-                ).append(
-                    RuntimeAuditEvent(
-                        audit_id=str(uuid4()), actor_type="system",
-                        actor_id="tool_gateway", action="tool_gateway_rejected",
-                        resource_type="agent_run", resource_id=checked_run_id,
-                        reason_code=code, outcome="rejected",
-                        occurred_at=datetime.now(UTC),
-                        metadata_summary={"run_id": checked_run_id},
-                    )
-                ),
-                peer_ip_provider=peer_transport.peer_ip
-                if peer_transport is not None
-                else None,
-                reset_peer_ip=peer_transport.reset_peer_ip
-                if peer_transport is not None
-                else None,
-                test_transport=(
-                    dependencies.transport_verifier
-                    if dependencies is not None
-                    and isinstance(
-                        dependencies.transport_verifier, LoopbackTestTransport
-                    )
-                    else None
-                ),
-                # 开发联调逃生门：connector 指向本机业务后端（127.0.0.1:8008）时
-                # 由运维配置显式放行；生产环境 config validator 强制为 False。
-                allow_private_endpoints=(
-                    runtime_settings.RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS
-                ),
-            )
-            model_gateway = configured_model_gateway(
-                session, is_draining=is_draining, dependencies=dependencies
-            )
-            if model_gateway is not None:
-                model_gateway.bind_lease(lease_context)
-            return WorkflowExecutor(
-                session,
-                MemoirNodeRunner(
-                    tool_gateway,
-                    ToolCallAuditService(session),
-                    model_gateway,
-                    EvaluationService(session),
-                    # M6 媒体服务：总开关关闭/装配失败时为 None，媒体节点按
-                    # 能力关闭跳过，与 1.0.3 之前的行为完全一致。
-                    configured_media_service(runtime_settings, session),
-                    # M8 音频服务：总开关关闭/装配失败时为 None，1.0.8 图的
-                    # 音频节点按能力关闭跳过（发布 2.0.0 空音频文档）。
-                    configured_audio_service(runtime_settings, session),
-                ),
-                CheckpointStore(
-                    session,
-                    FernetCheckpointCipher(
-                        runtime_settings.MEMORY_SNAPSHOT_FERNET_KEY.encode()
-                    ),
-                ),
-                ArtifactStore(session),
-                authorization_version_resolver=lambda run: AuthorizationService(
-                    runtime_settings.trusted_clients
-                ).authorization_version(run.caller_id),
-                is_draining=is_draining,
+            return factory(
+                session, run_id, lease_context,
+                is_draining=is_draining, dependencies=dependencies,
             )
 
         def run(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
-            executor = self._memoir_executor(run_id, lease_context)
+            executor = self._executor(run_id, lease_context)
             return (
                 BootstrapExecutor().run(run_id, lease_context)
                 if executor is None
@@ -527,7 +389,7 @@ def configured_executor(
             )
 
         def resume(self, run_id: str, lease_context: LeaseContext) -> AgentRunResult:
-            executor = self._memoir_executor(run_id, lease_context)
+            executor = self._executor(run_id, lease_context)
             return (
                 BootstrapExecutor().resume(run_id, lease_context)
                 if executor is None

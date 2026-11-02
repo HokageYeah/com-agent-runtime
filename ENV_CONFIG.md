@@ -4,7 +4,7 @@
 
 ## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；R6–R8 已实现，未部署）
 
-以下配置已在 `app/core/config.py`（Settings 字段 + `validate_memoir_audio_settings` 成组校验）、三个 env 模板（根 `.env.example` 与 `docker/backend/{test,production}.env.example` 占位）与 `docker/backend/Dockerfile`（`USER runtime` 前 apt 安装 ffmpeg/ffprobe）落地，Worker 装配入口为 `app/worker.py::configured_audio_service`（默认关闭返回 None）。真实凭据、服务开通与部署注册由运维阶段执行。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
+以下配置已在 `app/core/config.py`（Settings 字段 + `validate_memoir_audio_settings` 成组校验）、三个 env 模板（根 `.env.example` 与 `docker/backend/{test,production}.env.example` 占位）与 `docker/backend/Dockerfile`（`USER runtime` 前 apt 安装 ffmpeg/ffprobe）落地，Memoir 装配入口为 `app/agents/memoir_agent/bootstrap.py::configured_audio_service`（默认关闭返回 None）。真实凭据、服务开通与部署注册由运维阶段执行。仅用于 `memoir_agent@1.0.8`，不改变其他 Agent 或旧包行为。任务见 [R6–R8 计划](头脑风暴/docs/AgentRuntime/backend/2026-09-07-Memoir语音与配乐开发计划.md)，技术边界见 [M8 设计](头脑风暴/docs/AgentRuntime/plans/2026-09-07-Memoir语音与配乐设计说明.md)。
 
 ### A. 凭据在哪里申请、填到哪里
 
@@ -70,7 +70,7 @@ API host、SSE path、音频 MP3/24000Hz/64000bit、音乐 API Version `2024-08-
 | `docker-compose.yml` | 复用实际 `x-runtime-env-file` → `env_file: *runtime-env-file`，其路径来自 `RUNTIME_ENV_FILE`；`prepare/register/api/launcher/worker` 均已有该链。不得把 Key 加进 build args 或用空 `environment` 值遮蔽 env_file。必要的非敏感配置沿 `x-runtime-environment`；补占位渲染/进程读取测试，不能照抄 Business 的 `CD_` 插值方式 |
 | `docker-compose.test.yml`、`docker-compose.production.yml` | 核对 override 没覆盖 env_file/工作目录/临时目录，保持网络、端口、项目名隔离；非必要不制造配置重复 |
 | `docker/backend/Dockerfile` | 在 `USER runtime` 前以系统包管理器安装 ffmpeg（含 ffprobe），清理 apt 索引；保留非 root 运行，依赖在镜像构建时安装，不能运行时联网安装；无秘密进入镜像层 |
-| `app/worker.py` | Memoir 专属音频服务注入，读取上表 Settings；公共 Worker 消息/调度语义不变 |
+| `app/agents/memoir_agent/bootstrap.py` | Memoir 专属音频服务注入，读取上表 Settings；公共 Worker 消息/调度语义不变 |
 | `tests/test_config.py`、`tests/test_docker_deployment_contract.py` | 条件配置、秘密脱敏、两环境前缀、env_file链及转码二进制合同回归 |
 
 部署时仍通过现有 `docker compose --env-file <部署插值文件>` 加载 `RUNTIME_ENV_FILE`，容器再从其指向的私有文件注入设置；两者即使采用同一文件，也不能把“Compose 插值”和“容器环境”混为一谈。仅更新 example 不会让已运行容器获得新值，需按现有部署流程重建含 ffmpeg 的镜像并重建相关容器；本轮不执行。
@@ -454,17 +454,56 @@ ENVIRONMENT=development poetry run python -c 'from app.core.config import settin
 
 `MODEL_ROUTES_JSON=[]`（默认）或配置不完整时，模型能力整体关闭：MemoirAgent 的五个模型节点（含 1.0.5 起 bounded_loop 循环体 generate_scene_batch 与覆盖修复 repair_coverage_gaps，当前 1.0.6 图沿用这两个节点）退回确定性模板降级，不请求任何外部 Provider。Redis 是模型限流的前置依赖，`RUNTIME_REDIS_URL` 缺失同样触发模板降级（fail-closed）。
 
-### 10.2 三个配置键
+### 10.2 模型配置键
 
 | 字段 | 作用 | 要求 |
 |---|---|---|
 | `MODEL_ROUTES_JSON` | 部署预注册的路由数组（route_id、provider、model、endpoint、限流、价格、capabilities、allowlist） | 只从部署配置读取；业务请求、Package 和 prompt 不能覆盖 provider/model/endpoint/价格 |
 | `MEMOIR_MODEL_NODE_ROUTES_JSON` | Memoir 五个模型节点（extract_highlights/plan_chapters/generate_scenes/generate_scene_batch/repair_coverage_gaps）到 route_id 的映射 | 键必须恰好覆盖这五个节点；值必须是已注册的 route_id |
+| `AGENT_MODEL_NODE_ROUTES_JSON` | 按 Agent 身份配置节点到 route_id 的嵌套映射：`{"<agent_id>":{"<node_id>":"<route_id>"}}` | 必须是严格 JSON 对象，内层必须是节点到非空路由字符串的对象；非法时明确报错且不回显配置值。默认 `{}`；QA 的 `qa_agent` 对象键必须恰为 `compose_answer`，值须是已注册且启用的 route_id；QA 无模板降级 |
 | `MODEL_PROVIDER_API_KEYS_JSON` | route_id 到 Provider API Key 的映射 | 只进入请求头 `Authorization: Bearer`；不写入 route JSON、日志、trace、响应或 Git |
+
+QA Agent 1.0.0 的可信身份为 `qa_agent` / `business_qa`。它只使用
+`qa_business_backend` connector，工具 wire 固定为 `1.1.0`。当前只接 mock
+业务服务，部署配置中的 connector 示例对象如下，需合并到既有
+`RUNTIME_BUSINESS_CONNECTORS_JSON`，保留其他 connector：
+
+QA 默认关闭：模板不启用该 connector，`AGENT_MODEL_NODE_ROUTES_JSON={}`；下例的
+`enabled=true` 仅用于显式启用 mock 联调，不代表已接入真实业务或完成部署。
+
+```json
+{"qa_business_backend":{"enabled":true,"base_url":"https://mock.example.test","runtime_id":"agent-runtime","key_id":"qa-test","secret":"replace_with_mock_secret"}}
+```
+
+`base_url` 是 mock 业务服务地址，`runtime_id` 是签名身份，`key_id` / `secret`
+是 mock 服务校验用的测试凭据；示例不包含真实配置。调用方仍须在部署受信配置中
+获准使用该 Agent、业务类型、connector 和 callback 目标。
+
+具体在 `RUNTIME_TRUSTED_CLIENTS_JSON` 对应调用方的 `agent_ids` 中加入 `qa_agent`、
+`business_types` 中加入 `business_qa`、`connector_ids` 中加入 `qa_business_backend`，
+并配置本次 Run 使用的 `data_domains` 与 `callback_target_ids`；callback 目标还须在
+`RUNTIME_CALLBACK_TARGETS_JSON` 中独立登记并启用。connector 的签名身份和测试凭据
+必须与 mock 接收端一致，`base_url` 只填服务 origin，不拼工具路径或 URL 凭据。
+
+```dotenv
+# qa-mock 必须先在 MODEL_ROUTES_JSON 注册；Redis 与模型 Provider 也需可用。
+AGENT_MODEL_NODE_ROUTES_JSON={"qa_agent":{"compose_answer":"qa-mock"}}
+```
+
+`qa-mock` 路由须显式启用，并满足租户、模型策略、结构化输出与数据驻留约束；
+若 mock Provider 要求 API Key，按 route_id 写入 `MODEL_PROVIDER_API_KEYS_JSON`。
+本地实际配置写入 `.env.<environment>.local`，Docker 使用本文 §1.1 的外置
+`RUNTIME_ENV_FILE`，不将真实地址或凭据写回模板。修改 connector、模型路由或凭据后
+重启 Worker；现有测试覆盖与验收边界见 [QA 验证记录](VERIFICATION.md#qa-agent-接入与公共-runtime-最小解耦2026-10-27)。
+
+QA 的 connector 缺失、禁用、字段不完整，节点路由少键/多键/未知 route，或公共
+模型网关无法装配时，Worker 返回 `failed + QA_AGENT_NOT_CONFIGURED`，经队列释放
+lease 并产生安全 callback。QA 没有模板 fallback；运行时模型调用失败也终止 Run，
+不会提交占位回答。问题、证据和回答正文仅在内存处理，不进入配置、日志或 callback。
 
 #### 10.2.1 五个模型节点分别是什么
 
-`MEMOIR_MODEL_NODE_ROUTES_JSON` 的五个键是 MemoirAgent 历代工作流图中全部模型节点的并集。Worker 门禁按**集合精确匹配**校验（见 `app/worker.py` 的 `_MEMOIR_MODEL_NODES`）：少一个键、多一个键或某个值不是已注册的 route_id，都会导致模型网关整体禁用——不报错、只在启动/建网关时打一条 warning（`Memoir Worker 模型配置不完整，使用模板 fallback`），然后所有模型节点退回模板降级。即使当前只运行 1.0.6 图（只用后两个节点，与 1.0.5 相同），也必须配满五键：这是有意设计，防止"部分节点走模型、部分节点走模板"产出不一致的回忆录。
+`MEMOIR_MODEL_NODE_ROUTES_JSON` 的五个键是 MemoirAgent 历代工作流图中全部模型节点的并集。Worker 门禁按**集合精确匹配**校验（见 `app/agents/memoir_agent/bootstrap.py` 的 `_MEMOIR_MODEL_NODES`）：少一个键、多一个键或某个值不是已注册的 route_id，都会导致模型网关整体禁用——不报错、只在启动/建网关时打一条 warning（`Memoir Worker 模型配置不完整，使用模板 fallback`），然后所有模型节点退回模板降级。即使当前只运行 1.0.6 图（只用后两个节点，与 1.0.5 相同），也必须配满五键：这是有意设计，防止"部分节点走模型、部分节点走模板"产出不一致的回忆录。
 
 | 节点键 | 引入版本 | 职责 |
 |---|---|---|

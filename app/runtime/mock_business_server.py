@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Event
-from typing import TypedDict
+from threading import Event, Lock
+from typing import TypedDict, cast
+from uuid import uuid4
 
+from app.contracts.tools import TOOL_ERROR_SPECS_V1_1
 from app.core.tool_security import verify_runtime_tool
 
 _CALLBACK_FIELDS = {
@@ -31,6 +34,12 @@ class _MockState(TypedDict):
     snapshot_reads: int
     publish_blocked: bool
     publish_started: bool
+    # QA 读取与成功提交的聚合次数，不含业务引用和正文。
+    qa_context_reads: int
+    qa_submissions: int
+    # harness 提交后阻塞开关与已到达提交点状态。
+    qa_submit_blocked: bool
+    qa_submit_started: bool
 
 
 def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
@@ -42,8 +51,16 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
         "snapshot_reads": 0,
         "publish_blocked": False,
         "publish_started": False,
+        "qa_context_reads": 0,
+        "qa_submissions": 0,
+        "qa_submit_blocked": False,
+        "qa_submit_started": False,
     }
     publish_release = Event()
+    qa_submit_release = Event()
+    # 只保存 scope 与正文的不可逆摘要；锁保证并发重发不会重复提交。
+    qa_answers: dict[str, str] = {}
+    qa_lock = Lock()
     # 仅保留不可逆内容摘要，供 query-after-commit fixture 返回；不写入 /state。
     published_digest: str | None = None
     runtimes: dict[str, dict[str, object]] = {
@@ -79,8 +96,24 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
                 publish_release.set()
                 self._json(202, {"status": "released"})
                 return
+            if self.path in {"/__harness__/block-next-submit", "/__harness__/release-submit"}:
+                if self.headers.get("X-Harness-Control") != identity_id:
+                    self._json(403, {"status": "rejected"})
+                    return
+                if self.path.endswith("block-next-submit"):
+                    state["qa_submit_blocked"] = True
+                    state["qa_submit_started"] = False
+                    qa_submit_release.clear()
+                    self._json(202, {"status": "armed"})
+                else:
+                    qa_submit_release.set()
+                    self._json(202, {"status": "released"})
+                return
             if self.path not in {
                 "/callbacks",
+                "/api/v1/internal/agent-tools/qa.get_question_context",
+                "/api/v1/internal/agent-tools/qa.submit_answer",
+                "/api/v1/internal/agent-tools/qa.get_answer_result",
                 "/api/v1/internal/agent-tools/memory.get_snapshot",
                 "/api/v1/internal/agent-tools/memory.publish_playback_document",
                 "/api/v1/internal/agent-tools/memory.get_publish_result",
@@ -119,6 +152,9 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
             if not isinstance(input_data, dict):
                 self._json(403, {"status": "rejected"})
                 return
+            if "/qa." in self.path:
+                self._qa_tool(payload, input_data)
+                return
             if self.path.endswith("memory.get_snapshot"):
                 state["snapshot_reads"] += 1
                 # 只返回最小 fixture；mock 不留存请求内的 archive/run/snapshot 标识。
@@ -156,6 +192,78 @@ def _handler(identity_id: str) -> type[BaseHTTPRequestHandler]:
             published_digest = digest
             self._json(200, {"output": {"revision": 1, "content_digest": digest}})
             return
+
+        def _qa_tool(self, payload: dict[str, object], input_data: dict[str, object]) -> None:
+            """模拟业务授权引用、逻辑幂等与提交后查询；正文只停留在当前栈。"""
+            context = payload.get("context")
+            names = ("conversation_id", "turn_id", "run_id")
+            if (
+                any(not isinstance(input_data.get(name), str) or not input_data[name] for name in names)
+                or not isinstance(context, dict)
+                or context.get("agent_id") != "qa_agent"
+                or context.get("business_type") != "business_qa"
+                or context.get("business_id") != input_data["turn_id"]
+                or context.get("run_id") != input_data["run_id"]
+                or self.headers.get("X-Agent-Tool-Contract-Version") != "1.1.0"
+            ):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            if self.path.endswith("qa.get_question_context"):
+                state["qa_context_reads"] += 1
+                # 运行时生成测试正文，不将问题和证据作为持久 fixture 或服务状态保存。
+                self._json(200, {"output": {
+                    "question": uuid4().hex.translate(str.maketrans("0123456789", "ghijklmnop")),
+                    "evidence": [{"source_ref": "qa-evidence-1", "text": uuid4().hex.translate(str.maketrans("0123456789", "ghijklmnop"))}],
+                }})
+                return
+            key = self.headers.get("Idempotency-Key", "")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            # 同一个 key 在不同会话/轮次/Run 下也不能读取其它业务提交结果。
+            scope = hashlib.sha256(json.dumps(
+                [input_data[name] for name in names] + [key], separators=(",", ":")
+            ).encode()).hexdigest()
+            if self.path.endswith("qa.get_answer_result"):
+                with qa_lock:
+                    submitted = scope in qa_answers
+                output = {"submitted": True, "revision": 1} if submitted else {"submitted": False}
+                self._json(200, {"output": output})
+                return
+            document = input_data.get("document")
+            if not isinstance(document, dict):
+                self._qa_error("BUSINESS_DATA_INVALID")
+                return
+            digest = hashlib.sha256(json.dumps(
+                document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            with qa_lock:
+                previous = qa_answers.get(scope)
+                if previous is not None and previous != digest:
+                    self._qa_error("IDEMPOTENCY_CONFLICT")
+                    return
+                if previous is None:
+                    qa_answers[scope] = digest
+                    state["qa_submissions"] += 1
+                blocked = state["qa_submit_blocked"]
+                if blocked:
+                    state["qa_submit_started"] = True
+            if blocked:
+                # 与 Memoir 的发布前阻塞不同：先持久化摘要，再阻塞响应；并发查询仍可见。
+                if not qa_submit_release.wait(timeout=5):
+                    self._qa_error("RUNTIME_SERVICE_UNAVAILABLE")
+                    return
+                state["qa_submit_blocked"] = False
+            self._json(200, {"output": {"submitted": True, "revision": 1}})
+
+        def _qa_error(self, code: str) -> None:
+            """直接复用冻结 v1.1 错误矩阵，不新增业务 wire 错误码。"""
+            spec = TOOL_ERROR_SPECS_V1_1[code]
+            self._json(cast(int, spec["http_status"]), {
+                "error_code": code, "error_type": spec["error_type"],
+                "retryable": spec["retryable"], "safe_message": spec["safe_message"],
+                "details_visible_to_model": False,
+            })
 
         def _json(self, status: int, payload: dict[str, object]) -> None:
             body = json.dumps(payload, separators=(",", ":")).encode()

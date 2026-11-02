@@ -114,6 +114,7 @@ def test_new_create_uses_loaded_1_0_1_and_executes_full_real_workflow(
 ) -> None:
     """新建 Run 固定 1.0.1，并经 Worker 的真实 adapter 选择执行完整 workflow。"""
     import app.worker as worker
+    from app.agents.memoir_agent import bootstrap as memoir_bootstrap
 
     package_100, package_101 = _loaded_packages()
     engine = create_engine("sqlite://")
@@ -167,7 +168,7 @@ def test_new_create_uses_loaded_1_0_1_and_executes_full_real_workflow(
         raising=False,
     )
     runner = _RecordingPackageRunner()
-    monkeypatch.setattr(worker, "MemoirNodeRunner", lambda *args: runner)
+    monkeypatch.setattr(memoir_bootstrap, "MemoirNodeRunner", lambda *args: runner)
     lease = _lease_for(run)
     session.commit()
 
@@ -250,6 +251,7 @@ def test_historical_1_0_0_run_resumes_real_checkpoint_with_configured_executor(
     外部模型/Tool I/O 的节点执行器。
     """
     import app.worker as worker
+    from app.agents.memoir_agent import bootstrap as memoir_bootstrap
 
     package_100, package_101 = _loaded_packages()
     engine = create_engine("sqlite://")
@@ -319,7 +321,7 @@ def test_historical_1_0_0_run_resumes_real_checkpoint_with_configured_executor(
         raising=False,
     )
     runner = _RecordingPackageRunner()
-    monkeypatch.setattr(worker, "MemoirNodeRunner", lambda *args: runner)
+    monkeypatch.setattr(memoir_bootstrap, "MemoirNodeRunner", lambda *args: runner)
 
     result = worker.configured_executor(session).resume(run.run_id, lease)
 

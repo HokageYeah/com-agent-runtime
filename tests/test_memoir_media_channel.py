@@ -24,6 +24,7 @@ import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
+from app.agents.memoir_agent.registration import REGISTRATION as MEMOIR_REGISTRATION
 from app.agents.memoir_agent.runner import (
     _MEDIA_SCENE_TYPES,
     _SCENE_TYPES,
@@ -32,7 +33,6 @@ from app.agents.memoir_agent.runner import (
 )
 from app.runtime.prompt_registry import PromptRegistry
 from app.runtime.state import AgentState
-from app.runtime.tool_gateway import _TOOL_WIRE_VERSION_BY_AGENT_VERSION
 from app.services.memoir.memoir_media_service import (
     MEDIA_IMAGE_HEIGHT,
     MEDIA_IMAGE_WIDTH,
@@ -49,6 +49,9 @@ from app.utils.volcano.cv_client import (
     VolcanoCVError,
     build_volcano_v4_authorization,
 )
+
+# 从 Memoir 自身登记读取版本表，公共网关不再保留业务专属别名。
+_TOOL_WIRE_VERSION_BY_AGENT_VERSION = MEMOIR_REGISTRATION.tool_profiles["couple_memory"].wire_versions
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n-fake-image-body"
 JPEG_BYTES = b"\xff\xd8\xff-e00"

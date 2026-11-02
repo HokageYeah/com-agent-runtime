@@ -437,6 +437,11 @@ def test_loopback_mock_projects_only_signed_safe_callback() -> None:
             "snapshot_reads": 0,
             "publish_blocked": False,
             "publish_started": False,
+            # QA 新增计数仍为零，不改变原 Memoir 发布与 callback 的聚合事实。
+            "qa_context_reads": 0,
+            "qa_submissions": 0,
+            "qa_submit_blocked": False,
+            "qa_submit_started": False,
         }
 
 

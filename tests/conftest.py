@@ -17,6 +17,7 @@ import pytest
 _TEST_ENV_STRIP_PREFIXES = (
     "ACCESS_KEY_ID",
     "ACCESS_KEY_SECRET",
+    "AGENT_",
     "BACKEND_CORS_ORIGINS",
     "BUCKET_NAME",
     "DB_",
@@ -67,6 +68,7 @@ _pydantic_settings_sources.DotEnvSettingsSource._read_env_files = _blocked_doten
 os.environ.update(
     {
         "RUNTIME_ID": "agent-runtime",
+        "AGENT_MODEL_NODE_ROUTES_JSON": "{}",
         "RUNTIME_TRUSTED_CLIENTS_JSON": (
             '{"couple-diary":{"tenant_id":"couple-diary",'
             '"keys":{"dev":"development-secret"}}}'

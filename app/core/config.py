@@ -283,6 +283,8 @@ class Settings(BaseSettings):
     MODEL_ROUTES_JSON: str = "[]"
     RUNTIME_REDIS_URL: str = ""
     MEMOIR_MODEL_NODE_ROUTES_JSON: str = "{}"
+    # 按 Agent 身份隔离节点到可信模型路由的部署映射；节点集合由各 Agent 工厂校验。
+    AGENT_MODEL_NODE_ROUTES_JSON: str = "{}"
     # Provider API Key 只经部署 env 注入（route_id -> key），不进 route JSON、日志或响应；
     # 用于 openai_compatible Provider 的 Authorization Bearer 头。
     MODEL_PROVIDER_API_KEYS_JSON: str = "{}"
@@ -576,6 +578,28 @@ class Settings(BaseSettings):
         ):
             raise ValueError("MEMOIR_MODEL_NODE_ROUTES_JSON 必须是字符串映射")
         return routes
+
+    def agent_model_node_routes(self, agent_id: str) -> dict[str, str]:
+        """按 Agent 取部署节点映射；先校验完整对象，错误只暴露字段名。"""
+        try:
+            routes = json.loads(self.AGENT_MODEL_NODE_ROUTES_JSON)
+        except json.JSONDecodeError:
+            raise ValueError("AGENT_MODEL_NODE_ROUTES_JSON_INVALID") from None
+        # 公共配置只校验嵌套字符串映射，不固化具体 Agent 的节点集合。
+        if not isinstance(routes, dict) or not all(
+            isinstance(registered_agent_id, str)
+            and isinstance(node_routes, dict)
+            and all(
+                isinstance(node_id, str)
+                and isinstance(route_id, str)
+                and route_id.strip()
+                for node_id, route_id in node_routes.items()
+            )
+            for registered_agent_id, node_routes in routes.items()
+        ):
+            raise ValueError("AGENT_MODEL_NODE_ROUTES_JSON_INVALID") from None
+        # 缺少键时由调用方执行自身配置缺失门禁，禁止复用其他 Agent 的配置。
+        return routes.get(agent_id, {})
 
     @property
     def model_provider_api_keys(self) -> dict[str, str]:
