@@ -44,11 +44,14 @@ def run_once() -> int:
             session, adapter
         ).reconcile_pending()
         session.commit()
-        logging.info(
+        total = delivered + repaired + orphaned + callback_repaired
+        # 开发 CLI 每 5 秒起一轮；全为 0 的空轮降为 DEBUG，有实际处理时保持 INFO。
+        logging.log(
+            logging.INFO if total else logging.DEBUG,
             "回忆录 Runtime launcher 完成 delivered=%s repaired=%s orphaned=%s callback_repaired=%s",
             delivered, repaired, orphaned, callback_repaired,
         )
-        return delivered + repaired + orphaned + callback_repaired
+        return total
     except Exception:
         session.rollback()
         # adapter/outbox 已记录标准码；此处不能输出上游 response 或业务正文。

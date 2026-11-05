@@ -18,6 +18,8 @@ THIRD_PARTY_WARNING_LOGGERS = (
     "httpcore.connection",
     "httpcore.http11",
     "httpcore.proxy",
+    # mysql.connector 每次建连都会以 INFO 打印认证插件加载信息，launcher 每轮新起进程时刷屏。
+    "mysql.connector",
 )
 
 LOG_FORMAT = (
@@ -176,8 +178,9 @@ def setup_logging() -> None:
 
     configure_third_party_loggers()
 
+    # 这里直接调用 loguru，占位符必须用 {}；%s 只在经 InterceptHandler 桥接的标准 logging 中生效。
     logger.info(
-        "日志系统初始化完成，level=%s，diagnose=%s，run_log=%s，error_log=%s",
+        "日志系统初始化完成，level={}，diagnose={}，run_log={}，error_log={}",
         log_level,
         enable_diagnose,
         run_log_path,

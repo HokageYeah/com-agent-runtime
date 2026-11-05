@@ -90,3 +90,34 @@ def test_success_preserves_stdlib_formatting(caplog) -> None:
         logging_uru.log_success("音频上传完成 count=%s", 2)
     assert caplog.records[-1].levelname == "SUCCESS"
     assert caplog.records[-1].getMessage() == "音频上传完成 count=2"
+
+
+def test_configure_third_party_loggers_silences_mysql_connector_info() -> None:
+    """mysql.connector 建连的认证插件 INFO 不应进入运行日志。"""
+    import logging
+
+    target = logging.getLogger("mysql.connector")
+    previous = target.level
+    try:
+        logging_uru.configure_third_party_loggers()
+        assert target.level == logging.WARNING
+    finally:
+        target.setLevel(previous)
+
+
+def test_setup_logging_init_message_uses_loguru_placeholders() -> None:
+    """初始化日志直接走 loguru，必须用 {} 占位才能渲染出实际参数。"""
+    with (
+        patch.object(logging_uru.logger, "remove"),
+        patch.object(logging_uru.logger, "add"),
+        patch.object(logging_uru.logger, "info") as mock_info,
+        patch.object(logging_uru, "ensure_log_directories"),
+        patch.object(logging_uru.logging, "basicConfig"),
+        patch.object(logging_uru, "configure_third_party_loggers"),
+    ):
+        logging_uru.setup_logging()
+
+    template, *args = mock_info.call_args.args
+    assert "%s" not in template
+    rendered = template.format(*args)
+    assert f"level={args[0]}" in rendered

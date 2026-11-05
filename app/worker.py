@@ -153,8 +153,12 @@ class WorkerLoop:
                 consumed += int(queue.consume(run_id))
             finally:
                 session.close()
-        logging.info(
-            "Worker 本轮完成 worker_id=%s claimed=%s", self._worker_id, consumed
+        # 空转轮次每秒一次，降为 DEBUG 避免刷屏；真正领取到 Run 时保持 INFO 便于排障。
+        logging.log(
+            logging.INFO if consumed else logging.DEBUG,
+            "Worker 本轮完成 worker_id=%s claimed=%s",
+            self._worker_id,
+            consumed,
         )
         return consumed
 
