@@ -96,6 +96,7 @@ class WorkerLoop:
         executor: RunExecutor | Callable[[Session], RunExecutor],
         *,
         worker_id: str,
+        lane: str = "default",
         is_draining: Callable[[], bool] = lambda: False,
         callback_gateway: CallbackSender | None = None,
         trusted_clients: dict[str, dict[str, object]] | None = None,
@@ -103,6 +104,8 @@ class WorkerLoop:
         self._session_factory = session_factory
         self._executor = executor
         self._worker_id = worker_id
+        self._lane = lane
+        self._agent_lanes = settings.agent_lanes
         self._is_draining = is_draining
         self._callback_gateway = callback_gateway
         self._trusted_clients = trusted_clients
@@ -126,6 +129,8 @@ class WorkerLoop:
                 owner=f"dispatcher:{self._worker_id}",
                 notify_run=run_ids.append,
                 callback_sender=callback_sender,
+                lane=self._lane,
+                agent_lanes=self._agent_lanes,
             ).dispatch_pending()
             LeaseService(dispatcher_session).reap_expired()
         finally:
@@ -509,9 +514,16 @@ def main() -> None:
         "--once", action="store_true", help="只处理一轮持久 outbox 后退出"
     )
     parser.add_argument("--worker-id", default="agent-runtime-worker")
+    parser.add_argument("--lane", default="default", help="执行通道；default 兜底全部 Agent")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
     args = parser.parse_args()
     setup_logging()
+    # 空通道可能是有意回滚隔离；保留 callback/lease 职责，不让容器反复重启。
+    if args.lane != "default" and args.lane not in settings.agent_lanes.values():
+        logging.warning(
+            "Worker 执行通道没有映射的智能体 code=LANE_UNMAPPED lane=%s worker_id=%s",
+            args.lane, args.worker_id,
+        )
     database.connect()
     try:
         session_factory = database.get_session_factory()
@@ -521,25 +533,31 @@ def main() -> None:
             session_factory,
             configured_executor,
             worker_id=args.worker_id,
+            lane=args.lane,
             is_draining=drain_controller.is_draining,
             callback_gateway=configured_callback_gateway(),
         )
         logging.info(
-            "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s",
+            "AgentRuntime Worker 启动 runtime_id=%s queue=%s once=%s lane=%s worker_id=%s",
             settings.runtime_id,
             "root-database-outbox",
             args.once,
+            args.lane,
+            args.worker_id,
         )
         if args.once:
             loop.run_once()
             return
         while True:
-            loop.run_once()
+            consumed = loop.run_once()
             # 信号处理器不会抛异常中断当前节点；RunQueue/Executor 已在安全边界
             # heartbeat、checkpoint 后停止后续模型/工具调用并释放 lease 给 reaper。
             if drain_controller.is_draining():
                 return
-            sleep(max(args.poll_seconds, 0.1))
+            # 每轮只领 1 条；有任务时固定休眠会让每条排队任务多等一个轮询间隔。
+            # 仅空闲时等待，已请求 draining 则在上面的安全边界直接退出。
+            if consumed == 0:
+                sleep(max(args.poll_seconds, 0.1))
     finally:
         database.close()
         shutdown_logging()

@@ -11,7 +11,7 @@ import httpx
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.models import RuntimeOutboxEvent
+from app.models import AgentRun, RuntimeOutboxEvent
 
 
 class Dispatcher:
@@ -25,10 +25,14 @@ class Dispatcher:
         notify_run: Callable[[str], None] | None = None,
         callback_sender: Callable[[RuntimeOutboxEvent], None] | None = None,
         lease_seconds: int = 30,
+        lane: str = "default",
+        agent_lanes: dict[str, str] | None = None,
     ) -> None:
         self._session = session
         self._owner = owner
         self._lease_seconds = lease_seconds
+        self._lane = lane
+        self._agent_lanes = dict(agent_lanes or {})
         self._notify_run = notify_run or self._log_run_notification
         self._handlers: dict[str, Callable[[RuntimeOutboxEvent], None]] = {
             "run_dispatch": self._deliver_run_dispatch
@@ -44,19 +48,36 @@ class Dispatcher:
     def dispatch_pending(self) -> int:
         """逐条条件 lease；callback 等未注册事件保持 pending 且 attempt 不变。"""
         now = datetime.now(UTC)
-        candidate_ids = self._session.scalars(
-            select(RuntimeOutboxEvent.outbox_id).where(
+        candidates_query = (
+            select(RuntimeOutboxEvent.outbox_id, RuntimeOutboxEvent.event_type).where(
                 RuntimeOutboxEvent.status == "pending",
                 RuntimeOutboxEvent.event_type.in_(tuple(self._handlers)),
                 (RuntimeOutboxEvent.next_attempt_at.is_(None))
                 | (RuntimeOutboxEvent.next_attempt_at <= now),
+            ).order_by(RuntimeOutboxEvent.id.asc())
+        )
+        if self._lane != "default":
+            # 只按权威 Run 身份筛选 run_dispatch；callback 等事件不分通道。
+            # default 不加筛选，专属 Worker 缺席时仍能兜底全部 Agent。
+            lane_runs = select(AgentRun.run_id).where(AgentRun.agent_id.in_(
+                [agent_id for agent_id, lane in self._agent_lanes.items() if lane == self._lane]
+            ))
+            candidates_query = candidates_query.where(
+                (RuntimeOutboxEvent.event_type != "run_dispatch")
+                | RuntimeOutboxEvent.aggregate_id.in_(lane_runs)
             )
-        ).all()
+        candidates = self._session.execute(candidates_query).all()
         delivered = 0
-        for outbox_id in candidate_ids:
+        run_claimed = False
+        for outbox_id, event_type in candidates:
+            # 每轮最多成功领取一个 Run（失败投递也占本轮名额），不预占长任务后的短任务。
+            if event_type == "run_dispatch" and run_claimed:
+                continue
             event = self._claim(outbox_id, now)
             if event is None:
                 continue
+            if event.event_type == "run_dispatch":
+                run_claimed = True
             handler = self._handlers.get(event.event_type)
             if handler is None:  # 防御性分支，确保以后扩展不会错误累计 attempt。
                 continue
@@ -111,10 +132,16 @@ class Dispatcher:
         run_id = event.payload_json.get("run_id", event.aggregate_id)
         if not isinstance(run_id, str) or not run_id:
             raise ValueError("run_dispatch 缺少 run_id")
+        agent_id = self._session.scalar(
+            select(AgentRun.agent_id).where(AgentRun.run_id == event.aggregate_id)
+        )
         logging.info(
-            "dispatcher 投递 run_dispatch outbox_id=%s run_id=%s",
+            "dispatcher 领取 run_dispatch outbox_id=%s run_id=%s agent_id=%s lane=%s worker_id=%s",
             event.outbox_id,
             run_id,
+            agent_id,
+            self._lane,
+            self._owner,
         )
         self._notify_run(run_id)
 

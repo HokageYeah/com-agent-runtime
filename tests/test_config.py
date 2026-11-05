@@ -1,10 +1,46 @@
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.core import config
 from app.core.config import Settings
 from tests.test_soothe_factory import soothe_run as soothe_run
+
+
+def test_agent_lanes_defaults_and_valid_mapping() -> None:
+    assert Settings(_env_file=None).agent_lanes == {}
+    current = Settings(
+        _env_file=None,
+        RUNTIME_AGENT_LANES_JSON='{"soothe_agent":"interactive","qa_agent":"default"}',
+    )
+    assert current.agent_lanes == {"soothe_agent": "interactive", "qa_agent": "default"}
+
+
+@pytest.mark.parametrize("raw", [
+    "{private-invalid-json", "[]", "null", '"private-string"',
+    '{"soothe_agent":7}', '{"soothe_agent":null}',
+    '{"soothe_agent":"Interactive"}', '{"soothe_agent":"a-b"}',
+    '{"soothe_agent":""}', '{"soothe_agent":"a' + "b" * 32 + '"}',
+    '{"soothe_agent":"interactive\\n"}', '{"unknown_private_agent":"interactive"}',
+    123, {"soothe_agent": "interactive"},
+])
+def test_agent_lanes_rejects_invalid_config_without_exposing_values(raw, caplog) -> None:
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError) as exc:
+        Settings(_env_file=None, RUNTIME_AGENT_LANES_JSON=raw)
+    rendered = str(exc.value)
+    assert "RUNTIME_AGENT_LANES_JSON_INVALID" in rendered
+    assert "input_value" not in rendered
+    assert "private" not in rendered + caplog.text
+    assert "RUNTIME_AGENT_LANES_JSON_INVALID" in caplog.text
+
+
+def test_agent_lanes_uses_existing_agent_registration(monkeypatch) -> None:
+    monkeypatch.setattr("app.agents.registry.is_executable_agent", lambda agent_id: agent_id == "future_agent")
+    assert Settings(
+        _env_file=None, RUNTIME_AGENT_LANES_JSON='{"future_agent":"heavy"}',
+    ).agent_lanes == {"future_agent": "heavy"}
 
 
 def test_normalize_environment_aliases() -> None:

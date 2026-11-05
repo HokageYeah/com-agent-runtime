@@ -564,6 +564,16 @@ def build_service_commands() -> tuple[tuple[str, ...], ...]:
             "--worker-id",
             "agent-runtime-worker",
         ),
+        # 独立进程只领交互通道，避免回忆录长节点阻塞页面等待中的请求。
+        (
+            sys.executable,
+            "-m",
+            "app.worker",
+            "--lane",
+            "interactive",
+            "--worker-id",
+            "agent-runtime-worker-interactive",
+        ),
         (
             sys.executable,
             "-m",
@@ -1318,7 +1328,7 @@ def _start(environment: str) -> None:
                 environment=normalized,
             ),
         )
-        api_command, launcher_command, worker_command, reconciler_command = build_service_commands()
+        api_command, launcher_command, worker_command, interactive_command, reconciler_command = build_service_commands()
         api = start_service_process(
             api_command,
             project_root=PROJECT_ROOT,
@@ -1336,6 +1346,13 @@ def _start(environment: str) -> None:
         processes.append(
             start_service_process(
                 worker_command,
+                project_root=PROJECT_ROOT,
+                environment=command_environment,
+            )
+        )
+        processes.append(
+            start_service_process(
+                interactive_command,
                 project_root=PROJECT_ROOT,
                 environment=command_environment,
             )

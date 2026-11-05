@@ -56,6 +56,12 @@ services:
     environment:
       DB_AUTO_CREATE: "false"
 
+  worker-interactive:
+    image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
+    pull_policy: ${RUNTIME_PULL_POLICY:-missing}
+    environment:
+      DB_AUTO_CREATE: "false"
+
   reconciler:
     image: ${RUNTIME_IMAGE:?set RUNTIME_IMAGE to a server-built tag or repository@sha256:<digest>}
     pull_policy: ${RUNTIME_PULL_POLICY:-missing}

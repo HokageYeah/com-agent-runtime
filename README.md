@@ -311,7 +311,7 @@ com-agent-runtime/
 
 - 镜像 tag 小写化后必须且只能包含 `test` 或 `production` 之一；两者同时出现或都未出现时拒绝部署。
 - 镜像 tag/digest 只标识代码产物和环境；AgentPackage 版本必须另行通过 `register --version` 明确指定，不能从 tag 推导。
-- API、Worker、Reconciler 是 production 默认的三个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动（四个长期 workload），production 通过 `legacy-launcher` profile 默认停用，应急时用 `--profile legacy-launcher` 显式开启。Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，长期 workload 只在两道门禁都成功后启动。
+- API、default Worker、interactive Worker、Reconciler 是 production 默认的四个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动（五个长期 workload），production 通过 `legacy-launcher` profile 默认停用，应急时用 `--profile legacy-launcher` 显式开启。Compose 依次执行一次性 `prepare` 迁移和 `register` Package 注册，长期 workload 只在两道门禁都成功后启动。
 - Docker 容器内 Runtime API 固定监听 `8002`；腾讯云宿主回环端口使用 test `18002`、production `18003`，情侣日记仍通过私有别名 `http://runtime-api:8002` 访问。
 - production 不在 Runtime Compose 内创建 MySQL/Redis；单 CVM 可通过共享私网复用 Couple Diary 实例，但固定独立库 `couple_diary_agent_runtime_prod`、最小权限账号和 Redis `/15`，并保持 `DB_AUTO_CREATE=false`；test 继续使用完全隔离的依赖和凭据。
 - production Compose 强制显式注入 `RUNTIME_IMAGE`（缺失即 fail-closed）：默认服务器本地构建 tag 模式（`RUNTIME_PULL_POLICY` 默认 `missing`），接镜像仓库后可切 `repository@sha256:<digest>` 加 `RUNTIME_PULL_POLICY: always`，可变兜底 tag 无法进入生产；Worker 设置 `stop_grace_period` 覆盖整个节点执行预算，保证 SIGTERM draining 语义不被强杀破坏。
@@ -502,12 +502,19 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
   -> 启动 API（run_app.py）
   -> 等待 /healthz 与 /api/v1/runtime/health/ready
   -> 启动 launcher loop（每 5 秒执行一次历史回忆录启动补偿）
-  -> 启动 Worker（默认每 1 秒轮询数据库 outbox）
+  -> 启动 default Worker（每轮最多领取一个 Run，默认每 1 秒轮询）
+  -> 启动 interactive Worker（--lane interactive，独立 worker-id）
   -> 启动 Reconciler（默认每 300 秒一轮）
   -> 前台监控所有子进程
 ```
 
 任一子进程异常退出时 supervisor 返回失败并回收其余进程。按 `Ctrl-C` 时 Worker 先进入 draining，API、launcher、Worker 和 Reconciler 最终由 supervisor 统一回收。supervisor 模式固定设置 `RELOAD=false`，避免 Uvicorn reloader 再生成不受控子进程。
+
+### 执行通道隔离
+
+在当前环境的私有 env 中设置 `RUNTIME_AGENT_LANES_JSON={"soothe_agent":"interactive"}`，重启后帮哄可由独立的 `worker-interactive` 领取，避免排在回忆录长任务后。本地 `start` 同样启动两个 Worker，原 worker-id 保持不变，交互进程为 `agent-runtime-worker-interactive`。
+
+默认配置 `{}` 表示全部归 default；default Worker 始终可领取所有通道，提供专属 Worker 缺席时的兜底。非 default Worker 没有映射时只告警并继续处理 callback、lease 回收。各 Worker 每轮按 outbox 自增主键升序最多领取一个 `run_dispatch`，callback、lease 与对账重放保持原行为。配置校验、扩容与回滚见 [执行通道隔离与扩容说明](头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-11-05-Runtime执行通道隔离与扩容说明.md)。
 
 ### 独立进程入口
 
@@ -516,7 +523,7 @@ production 禁止运行 `configure`。先由 DBA 或部署平台创建 `couple_d
 | 入口 | 用途 | 常用参数 |
 |---|---|---|
 | `poetry run python run_app.py` | 单独启动 API | 配置来自当前 `ENVIRONMENT` |
-| `poetry run python -m app.worker` | 常驻 Worker，处理 outbox、claim 和 workflow | `--worker-id`、`--poll-seconds`、`--once` |
+| `poetry run python -m app.worker` | 常驻 Worker，处理 outbox、claim 和 workflow | `--lane`（默认 default）、`--worker-id`、`--poll-seconds`、`--once` |
 | `poetry run python -m app.reconciler` | 常驻状态对账、lease 回收、purge 和补偿 | `--interval-seconds`、`--once` |
 | `poetry run python -m app.memory_runtime_launcher` | 执行一次历史回忆录启动 outbox 和 callback 补偿 | 没有 `--help`/参数；运行即连接数据库并执行一轮 |
 | `app.dispatcher.Dispatcher` | Worker 内部使用的 outbox 派发组件 | 不是独立 CLI，不要直接当进程启动 |

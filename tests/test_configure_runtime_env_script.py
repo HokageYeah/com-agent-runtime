@@ -81,6 +81,7 @@ def test_configure_runtime_env_creates_private_test_block(tmp_path: Path) -> Non
     assert "COMPOSE_PROJECT_NAME=com-agent-runtime-test" in content
     assert f"RUNTIME_ENV_FILE={output_file}" in content
     assert "RUNTIME_API_HOST_PORT=18002" in content
+    assert _last_value(content, "RUNTIME_AGENT_LANES_JSON") == '{"soothe_agent":"interactive"}'
     assert "DB_NAME=couple_diary_agent_runtime_test" in content
     assert "RUNTIME_REDIS_URL=redis://redis:6379/14" in content
     assert "MEMORY_RUNTIME_BASE_URL=http://runtime-api:8002" in content

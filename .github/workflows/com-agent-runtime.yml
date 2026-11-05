@@ -117,20 +117,22 @@ jobs:
           # production overlay 的镜像插值占位变量（本地 tag，不访问 registry）。
           RUNTIME_IMAGE: com-agent-runtime:ci-placeholder
         run: |
-          echo "校验 test 默认服务集合必须包含 api/launcher/worker/reconciler..."
+          echo "校验 test 默认服务集合必须包含 api/launcher/worker/worker-interactive/reconciler..."
           services="$(docker compose -f docker-compose.yml -f docker-compose.test.yml config --services)"
           printf '%s\n' "${services}" | grep -qx "api"
           printf '%s\n' "${services}" | grep -qx "launcher"
           printf '%s\n' "${services}" | grep -qx "worker"
+          printf '%s\n' "${services}" | grep -qx "worker-interactive"
           printf '%s\n' "${services}" | grep -qx "reconciler"
 
-          echo "校验 production 默认服务集合包含 api/worker/reconciler 且不得包含 launcher..."
+          echo "校验 production 默认服务集合包含 api/worker/worker-interactive/reconciler 且不得包含 launcher..."
           export ENVIRONMENT="production"
           export COMPOSE_PROJECT_NAME="com-agent-runtime-ci-production"
           export MEMOIR_INTEGRATION_NETWORK="memoir-integration-ci-production"
           services="$(docker compose -f docker-compose.yml -f docker-compose.production.yml config --services)"
           printf '%s\n' "${services}" | grep -qx "api"
           printf '%s\n' "${services}" | grep -qx "worker"
+          printf '%s\n' "${services}" | grep -qx "worker-interactive"
           printf '%s\n' "${services}" | grep -qx "reconciler"
           if printf '%s\n' "${services}" | grep -qx launcher; then
             echo "production 默认服务集合不应包含 launcher（launcher 应仅存在于 legacy-launcher profile）"
@@ -380,7 +382,7 @@ jobs:
               docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" rm --stop --force launcher
             fi
 
-            echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动 ${APP_ENV} 环境的长期 workload：production 三个 / test 四个）..."
+            echo "开始更新容器（up 先执行 prepare 迁移与 register 注册门禁，再启动 ${APP_ENV} 环境的长期 workload：production 四个 / test 五个）..."
             if ! docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" up -d --no-build; then
               echo "Runtime 启动门禁失败，输出 prepare/register 状态与最近日志："
               # 只输出固定诊断和应用日志；Runtime doctor 不回显数据库密码或 DSN。
@@ -410,9 +412,10 @@ jobs:
             smoke_url /api/v1/runtime/health/ready
 
             running_services="$(docker compose ${COMPOSE_FILES} --env-file "${ENV_FILE}" ps --status running --services)"
-            # api/worker/reconciler 是两环境公共长期 workload，无条件要求 running。
+            # api/worker/worker-interactive/reconciler 是两环境公共四个长期 workload，无条件要求 running。
             printf '%s\n' "${running_services}" | grep -qx "api"
             printf '%s\n' "${running_services}" | grep -qx "worker"
+            printf '%s\n' "${running_services}" | grep -qx "worker-interactive"
             printf '%s\n' "${running_services}" | grep -qx "reconciler"
             # launcher 按环境分化：test 保留历史链路必须 running；
             # production 默认停用，出现即视为部署异常（set -e 下 if 条件内的 grep 不会误触发退出）。
@@ -423,9 +426,9 @@ jobs:
               exit 1
             fi
             if [ "${APP_ENV}" = "production" ]; then
-              echo "Runtime production 三个长期 workload 与四个 API 探针全部通过"
+              echo "Runtime production 四个长期 workload 与四个 API 探针全部通过"
             else
-              echo "Runtime test 四个长期 workload 与四个 API 探针全部通过"
+              echo "Runtime test 五个长期 workload 与四个 API 探针全部通过"
             fi
 
             echo "部署完成，当前容器状态："

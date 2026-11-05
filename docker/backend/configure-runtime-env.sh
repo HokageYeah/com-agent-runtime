@@ -374,6 +374,8 @@ ${mysql_root_line}
 RUNTIME_REDIS_URL=${runtime_redis_url}
 
 RUNTIME_ID=${runtime_id}
+# 帮哄走交互通道，回忆录等未映射 Agent 归 default；default Worker 仍兜底全部通道。
+RUNTIME_AGENT_LANES_JSON={"soothe_agent":"interactive"}
 RUNTIME_AUDIT_SINK_CONFIGURED=true
 RUNTIME_EXTERNAL_EXPORTER_ENABLED=false
 RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=${tool_allow_private_endpoints}

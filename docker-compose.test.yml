@@ -6,7 +6,7 @@ x-test-infra-dependencies: &test-infra-dependencies
     condition: service_healthy
 
 x-test-long-dependencies: &test-long-dependencies
-  # 四个长期 workload 的依赖 = 基础设施健康 + Package 注册门禁。
+  # 五个长期 workload 的依赖 = 基础设施健康 + Package 注册门禁。
   <<: *test-infra-dependencies
   register:
     condition: service_completed_successfully
@@ -76,6 +76,13 @@ services:
       RUNTIME_REDIS_URL: redis://redis:6379/14
 
   worker:
+    depends_on: *test-long-dependencies
+    environment:
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      RUNTIME_REDIS_URL: redis://redis:6379/14
+
+  worker-interactive:
     depends_on: *test-long-dependencies
     environment:
       DB_HOST: mysql

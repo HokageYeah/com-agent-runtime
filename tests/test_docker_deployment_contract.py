@@ -24,7 +24,7 @@ def test_runtime_compose_gates_long_lived_workloads_on_package_registration() ->
     assert services["register"]["depends_on"]["prepare"] == {
         "condition": "service_completed_successfully"
     }
-    for service_name in ("api", "launcher", "worker", "reconciler"):
+    for service_name in ("api", "launcher", "worker", "worker-interactive", "reconciler"):
         assert services[service_name]["depends_on"]["register"] == {
             "condition": "service_completed_successfully"
         }
@@ -53,7 +53,7 @@ def test_runtime_compose_rotates_container_logs() -> None:
         "driver": "json-file",
         "options": {"max-size": "20m", "max-file": "5", "compress": "true"},
     }
-    for service_name in ("prepare", "register", "api", "launcher", "worker", "reconciler"):
+    for service_name in ("prepare", "register", "api", "launcher", "worker", "worker-interactive", "reconciler"):
         assert services[service_name]["logging"] == expected_logging
 
 
@@ -98,13 +98,36 @@ def test_runtime_deploy_workflow_serializes_and_verifies_complete_runtime() -> N
     assert '--env-file "${ENV_FILE}" up -d --no-build' in workflow
     assert 'ps -a prepare register' in workflow
     assert 'logs --tail=200 prepare register' in workflow
-    # api/worker/reconciler 是两环境公共长期 workload，workflow 无条件要求 running。
-    for service_name in ("api", "worker", "reconciler"):
-        assert f'grep -qx "{service_name}"' in workflow
+    # 发布后的实际 running 检查必须覆盖两个 Worker，不能被前面的 config 校验替代。
+    running_checks = workflow.split('running_services="', 1)[1]
+    for service_name in ("api", "worker", "worker-interactive", "reconciler"):
+        assert f'printf \'%s\\n\' "${{running_services}}" | grep -qx "{service_name}"' in running_checks
+    assert "production 四个 / test 五个" in workflow
+    assert "Runtime production 四个长期 workload 与四个 API 探针全部通过" in running_checks
+    assert "Runtime test 五个长期 workload 与四个 API 探针全部通过" in running_checks
     # launcher 运行断言按环境分化：test 分支要求 running，production 出现即报错。
     assert '[ "${APP_ENV}" = "test" ]; then' in workflow
     assert 'grep -qx "launcher"' in workflow
     assert "production 不应运行 legacy launcher" in workflow
+
+
+def test_interactive_worker_matches_worker_deployment_and_lane_command() -> None:
+    services = _compose("docker-compose.yml")["services"]
+    worker, interactive = services["worker"], services["worker-interactive"]
+    for field in ("image", "build", "env_file", "environment", "depends_on", "restart",
+                  "volumes", "networks", "security_opt", "cap_drop", "init", "labels", "logging"):
+        assert interactive[field] == worker[field]
+    assert interactive["command"] == [
+        "python", "-m", "app.worker", "--lane", "interactive", "--worker-id",
+        "${RUNTIME_INTERACTIVE_WORKER_ID:-agent-runtime-worker-interactive}",
+    ]
+    assert interactive["stop_grace_period"] == "2m"
+    for overlay in ("docker-compose.test.yml", "docker-compose.production.yml"):
+        overrides = _compose(overlay)["services"]
+        assert overrides["worker-interactive"] == overrides["worker"]
+    workflow = _workflow()
+    service_checks = workflow.split("- name: Assert Compose service sets", 1)[1].split("- name:", 1)[0]
+    assert service_checks.count('grep -qx "worker-interactive"') == 2
 
 
 def test_runtime_server_env_templates_freeze_distinct_test_and_production_identity() -> None:
@@ -130,6 +153,7 @@ def test_runtime_server_env_templates_freeze_distinct_test_and_production_identi
         in production_template
     )
     for template in (test_template, production_template):
+        assert 'RUNTIME_AGENT_LANES_JSON={"soothe_agent":"interactive"}' in template
         assert "MEMOIR_MEDIA_PROVIDER=" in template
         assert "BUCKET_NAME=" in template
         assert "ENDPOINT=" in template

@@ -127,6 +127,25 @@ services:
       - default
       - memoir-integration
 
+  worker-interactive:
+    <<: [*runtime-image, *runtime-hardening]
+    env_file: *runtime-env-file
+    environment: *runtime-environment
+    depends_on:
+      register:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.worker", "--lane", "interactive", "--worker-id", "${RUNTIME_INTERACTIVE_WORKER_ID:-agent-runtime-worker-interactive}"]
+    restart: unless-stopped
+    # soothe_agent/1.0.0/agent.yaml 的 max_run_seconds=90；模型调用受 Run 剩余
+    # 预算约束（ModelCallContext.from_authoritative），工具固定 timeout<=10s。
+    # 以整个 Run 预算覆盖最长节点，再留 30s 给返回、checkpoint 与 draining 收尾。
+    stop_grace_period: 2m
+    volumes:
+      - runtime_logs:/app/logs
+    networks:
+      - default
+      - memoir-integration
+
   reconciler:
     <<: [*runtime-image, *runtime-hardening]
     env_file: *runtime-env-file

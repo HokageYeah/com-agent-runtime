@@ -354,7 +354,7 @@ def test_production_doctor_rejects_unsafe_runtime_flags(tmp_path: Path) -> None:
     assert "USER_AUTH_JWT_SECRET:SECRET_TOO_SHORT" in rendered
 
 
-def test_build_service_commands_starts_launcher_api_worker_and_reconciler() -> None:
+def test_build_service_commands_starts_launcher_api_two_workers_and_reconciler() -> None:
     assert build_service_commands() == (
         (sys.executable, "run_app.py"),
         (
@@ -369,6 +369,15 @@ def test_build_service_commands_starts_launcher_api_worker_and_reconciler() -> N
             "app.worker",
             "--worker-id",
             "agent-runtime-worker",
+        ),
+        (
+            sys.executable,
+            "-m",
+            "app.worker",
+            "--lane",
+            "interactive",
+            "--worker-id",
+            "agent-runtime-worker-interactive",
         ),
         (
             sys.executable,
@@ -858,7 +867,7 @@ def test_start_cleans_previous_processes_before_spawning_services(
         "start-supervisor",
         "development",
     )
-    commands = (("api",), ("launcher",), ("worker",), ("reconciler",))
+    commands = (("api",), ("launcher",), ("worker",), ("worker-interactive",), ("reconciler",))
 
     class _ExitedProcess:
         def poll(self) -> int:
@@ -934,6 +943,10 @@ def test_start_cleans_previous_processes_before_spawning_services(
     )
     assert cleanup_index < first_start_index
     assert events.index("lock") < events.index("prepare")
+    assert [("start", command) for command in commands] == [
+        event for event in events if isinstance(event, tuple) and event[0] == "start"
+    ]
+    assert "terminate" in events
 
 
 def test_terminate_process_fails_closed_when_term_is_forbidden() -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -256,6 +258,8 @@ class Settings(BaseSettings):
 
     # Runtime 调用方与连接器配置。仅服务端读取，绝不写入普通接口响应或日志。
     RUNTIME_ID: str = "agent-runtime"
+    # 部署侧 Agent 执行通道映射；未配置的身份归 default，default Worker 始终兜底。
+    RUNTIME_AGENT_LANES_JSON: str = "{}"
     RUNTIME_TRUSTED_CLIENTS_JSON: str = (
         '{"couple-diary":{"tenant_id":"couple-diary",'
         '"keys":{"dev":"development-secret"}}}'
@@ -386,7 +390,41 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
+        # 启动校验异常只展示字段与受控错误码，禁止 Pydantic 附带原始配置值。
+        hide_input_in_errors=True,
     )
+
+    @field_validator("RUNTIME_AGENT_LANES_JSON", mode="before")
+    @classmethod
+    def validate_agent_lanes_json(cls, value: object) -> str:
+        """启动即校验通道配置，防止拼错身份后静默退化为串行队列。"""
+        cls._parse_agent_lanes(value)
+        return str(value)
+
+    @staticmethod
+    def _parse_agent_lanes(value: object) -> dict[str, str]:
+        """复用可信包注册身份；日志与异常均不回显 JSON、身份或通道原值。"""
+        from app.agents.registry import is_executable_agent
+
+        try:
+            lanes = json.loads(value) if isinstance(value, str) else None
+        except json.JSONDecodeError:
+            lanes = None
+        if not isinstance(lanes, dict) or not all(
+            isinstance(agent_id, str)
+            and isinstance(lane, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", lane)
+            and is_executable_agent(agent_id)
+            for agent_id, lane in lanes.items()
+        ):
+            logging.error("执行通道配置校验失败 code=RUNTIME_AGENT_LANES_JSON_INVALID")
+            raise ValueError("RUNTIME_AGENT_LANES_JSON_INVALID") from None
+        return lanes
+
+    @property
+    def agent_lanes(self) -> dict[str, str]:
+        """返回已校验的 Agent → lane 部署映射，供 Worker 和 Dispatcher 复用。"""
+        return self._parse_agent_lanes(self.RUNTIME_AGENT_LANES_JSON)
 
     @field_validator("RUNTIME_TOOL_CONNECTOR_ALLOW_PRIVATE_ENDPOINTS")
     @classmethod

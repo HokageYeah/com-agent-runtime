@@ -1,5 +1,20 @@
 # AgentRuntime 敏感与条件环境配置
 
+## 执行通道（lane，2026-11-05）
+
+`RUNTIME_AGENT_LANES_JSON` 是部署侧 `agent_id → lane` 字符串映射，默认 `{}`。本地填入当前环境的私有 `.env.<environment>.local`；服务器填入 `RUNTIME_ENV_FILE` 指向的私有文件，两个 Worker 共享同一份配置，变更后重启进程。
+
+```dotenv
+# 页面等待的帮哄走 interactive；回忆录等未映射 Agent 自动归 default。
+RUNTIME_AGENT_LANES_JSON={"soothe_agent":"interactive"}
+```
+
+启动时拒绝非法 JSON、非对象、非字符串键值、未知 Agent 身份，以及不匹配 `^[a-z][a-z0-9_]{0,31}$` 的通道名。Agent 身份复用现有可信包注册表，错误与日志只暴露 `RUNTIME_AGENT_LANES_JSON_INVALID`，不回显原值。
+
+Worker 的 `--lane` 默认 `default`：可领取全部通道作为兜底；其他通道只领取显式映射的 Agent。无映射时输出 `WARNING code=LANE_UNMAPPED` 并继续运行。每轮按 outbox 自增主键升序最多领取一个 Run，callback 投递、lease 回收和对账重放不分通道。本地 `start` 与 Compose 都启动 default 和 interactive 两个 Worker。
+
+Compose 原 `RUNTIME_WORKER_ID` 保持不变；新增 `RUNTIME_INTERACTIVE_WORKER_ID` 默认 `agent-runtime-worker-interactive`。每个进程必须使用唯一 worker-id，扩容时新增服务并换 ID，不使用共用 ID 的 `--scale`。首次上线先补服务器私有 env，再用 `docker stats` 确认内存余量。设回 `{}` 并重启可关闭隔离；细节见 [执行通道隔离与扩容说明](头脑风暴/docs/AgentRuntime/云服务器性能优化/2026-11-05-Runtime执行通道隔离与扩容说明.md)。
+
 > **2026-09-14 S1–S4 收尾（本轮自动化）：** 默认配乐已实施。锁序/隔离以 Business [冻结 §11.1](/Users/yuye/YeahWork/Python项目/couple-diary-doc/头脑风暴/docs/superpowers/回忆录/plans/2026-09-11-M8默认配乐契约冻结.md) 为准；不为局部音频改公共库全局隔离。未部署，人工门禁未执行。下方原 M8 的音乐必填条件仅用于生成模式；新增变量与文件落点见本文末尾。
 
 ## M8：回忆录语音与配乐配置（2026-09-07 设计，2026-09-08 收口；R6–R8 已实现，未部署）
@@ -103,7 +118,7 @@ Docker 发布合同见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)。
 
 - production 不在 Runtime Compose 中部署 MySQL/Redis sidecar；单 CVM 可通过共享私网复用 Couple Diary 实例，但 `DB_NAME` 固定为 `couple_diary_agent_runtime_prod`、账号只授权该 schema、Redis 固定使用 `/15`且 `DB_AUTO_CREATE=false`。上量后替换为 AgentRuntime 专用腾讯云私网实例。
 - test 必须连接与 development、production 完全隔离的数据库和 Redis；本地默认 Redis DB 为 `/14`，临时依赖和随机凭据在验收结束后删除。
-- API、Worker、Reconciler 是 production 默认的三个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动，production 挂 `legacy-launcher` profile 默认停用（应急时显式开启）。`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。
+- API、default Worker、interactive Worker、Reconciler 是 production 默认的四个长期 workload；`launcher` 是 legacy 业务兼容入口，Docker test 默认仍启动，production 挂 `legacy-launcher` profile 默认停用（应急时显式开启）。`prepare`/Alembic 只运行一次，不放进每个长期容器的启动脚本。
 - Docker 直接注入 JSON 配置时必须注入已经展开的值，不能假设 Compose 会展开 JSON 字符串内的 `${...}`。
 - 生产日志、trace、callback、audit、Artifact、Checkpoint 和探针响应不得包含 secret、DSN、私有 URL、prompt、业务正文、模型原文或工具 payload。
 
