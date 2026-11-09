@@ -43,17 +43,17 @@ printf 'environment=%s\n' "$ENVIRONMENT"
 | 镜像 tag/digest | 选择可运行的代码和依赖，并确定 test/production | 镜像仓库与发布系统 | `production-<git-sha>` / `sha256:<digest>` |
 | AgentPackage version | 选择数据库中注册的 Agent 工作流包 | `app/agents/<agent_id>/<version>/` 与 `register` 参数 | `<package-version>` |
 
-镜像 tag 不得被解析成 Package 版本。Package 必须在启动 Worker 前显式预检并注册：
+镜像 tag 不得被解析成 Package 版本。Package 必须在启动 Worker 前显式预检并注册。需要注册的包统一列在 [`app/agents/deploy_packages.yaml`](../../app/agents/deploy_packages.yaml)（当前：`memoir_agent@1.0.7`、`memoir_agent@1.0.8`、`soothe_agent@1.0.0`），`--all` 先整份预检（不连库，任一包不合法即整体退出、不写任何行），再逐条幂等注册；`--include` 追加 `AGENT_PACKAGE_VERSION` 对应的回忆录版本，与清单重复时去重：
 
 ```bash
 ./agent-runtime.sh register "$ENVIRONMENT" \
-  --agent-id memoir_agent \
-  --version "$AGENT_PACKAGE_VERSION" \
+  --all --include "memoir_agent@$AGENT_PACKAGE_VERSION" \
   --dry-run
 ./agent-runtime.sh register "$ENVIRONMENT" \
-  --agent-id memoir_agent \
-  --version "$AGENT_PACKAGE_VERSION"
+  --all --include "memoir_agent@$AGENT_PACKAGE_VERSION"
 ```
+
+单包注册（`--agent-id X --version Y`）仍可用于临时补注册或排障。业务端新增 Agent 或升级固定版本时，同步修改 `deploy_packages.yaml`，不需要改 Compose。
 
 同一 digest 可承载不同环境的发布记录，但实际部署仍须使用含有唯一环境标记的 tag，并把 tag、digest、Package version 和迁移 head 一起记录。磁盘中存在 Package 不等于目标数据库已经注册。
 
@@ -103,7 +103,7 @@ docker build --pull \
 
 `prepare` 只允许当前环境的固定 Runtime 专库，并执行 `alembic upgrade head` 与单 head 检查。生产发布后保持数据库在 head，不执行自动 downgrade。Package 注册是独立的幂等步骤，顺序为 `doctor -> prepare -> register -> 启动长期 workload`（test 为五个，production 默认为四个）。
 
-仓库 Compose 已把该顺序固化为硬门禁：`prepare` 先迁移，`register` 再对明确的 `AGENT_PACKAGE_VERSION` 执行 dry-run 和幂等注册，长期 workload 只依赖 `register: service_completed_successfully`。迁移、Package 校验或注册任一失败，`up` 都不会启动任何长期 workload。production 的 `launcher` 挂 `legacy-launcher` profile，普通 `up` 不会创建它，只有显式 `--profile legacy-launcher` 才启动。
+仓库 Compose 已把该顺序固化为硬门禁：`prepare` 先迁移，`register` 再对部署清单 `deploy_packages.yaml` 加上明确的 `AGENT_PACKAGE_VERSION` 整体执行 dry-run 和幂等注册，长期 workload 只依赖 `register: service_completed_successfully`。迁移、Package 校验或注册任一失败，`up` 都不会启动任何长期 workload。production 的 `launcher` 挂 `legacy-launcher` profile，普通 `up` 不会创建它，只有显式 `--profile legacy-launcher` 才启动。
 
 ## 4. 依赖隔离
 

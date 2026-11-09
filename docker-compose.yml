@@ -59,11 +59,14 @@ services:
     command:
       - sh
       - -c
+      # 注册 app/agents/deploy_packages.yaml 列出的全部包（回忆录 1.0.7/1.0.8、帮哄 1.0.0 等），
+      # 并追加 AGENT_PACKAGE_VERSION 对应的 memoir_agent 版本，保留“改 env 切回忆录版本”的做法。
+      # 先整份 dry-run（任一包不合法即失败、不写库），再幂等注册；失败时长期 workload 不会启动。
       - >-
         python -m app.scripts.agent_runtime_cli register "${ENVIRONMENT:?set ENVIRONMENT}"
-        --agent-id memoir_agent --version "${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}" --dry-run &&
+        --all --include "memoir_agent@${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}" --dry-run &&
         python -m app.scripts.agent_runtime_cli register "${ENVIRONMENT:?set ENVIRONMENT}"
-        --agent-id memoir_agent --version "${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}"
+        --all --include "memoir_agent@${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}"
     restart: "no"
 
   api:

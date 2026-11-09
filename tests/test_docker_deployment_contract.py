@@ -30,6 +30,16 @@ def test_runtime_compose_gates_long_lived_workloads_on_package_registration() ->
         }
 
 
+def test_runtime_compose_registers_deploy_manifest_plus_package_version() -> None:
+    """register 服务注册整份部署清单，并保留 AGENT_PACKAGE_VERSION 作为回忆录追加项。"""
+
+    command = " ".join(_compose("docker-compose.yml")["services"]["register"]["command"])
+    assert command.count("register \"${ENVIRONMENT:?set ENVIRONMENT}\" --all") == 2
+    assert command.count('--include "memoir_agent@${AGENT_PACKAGE_VERSION:?set AGENT_PACKAGE_VERSION}"') == 2
+    # 先整份 dry-run，再正式注册；dry-run 失败时 && 阻止写库。
+    assert command.index("--dry-run &&") < command.rindex("--all")
+
+
 def test_runtime_compose_requires_environment_isolation_and_private_integration_network() -> None:
     """test/production 不共用 Compose project，业务仓只走私有网络别名。"""
 

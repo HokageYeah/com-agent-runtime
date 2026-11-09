@@ -746,7 +746,13 @@ def _prepare(environment: str) -> dict[str, str]:
 
 
 def _register(
-    environment: str, agent_id: str, version: str, *, dry_run: bool
+    environment: str,
+    agent_id: str,
+    version: str | None,
+    *,
+    dry_run: bool,
+    register_all: bool = False,
+    includes: Sequence[str] = (),
 ) -> None:
     """注册部署目录内的 AgentPackage 进指定环境的 agent_definitions 表。
 
@@ -756,17 +762,14 @@ def _register(
     """
 
     command_environment = _doctor(environment)
-    command = (
-        "poetry",
-        "run",
-        "python",
-        "-m",
-        "app.scripts.register_agent_package",
-        "--agent-id",
-        agent_id,
-        "--version",
-        version,
-    )
+    base = ("poetry", "run", "python", "-m", "app.scripts.register_agent_package")
+    if register_all:
+        # 部署清单模式：清单全部条目 + --include 追加项（Compose 传 AGENT_PACKAGE_VERSION）。
+        command = (*base, "--all")
+        for ref in includes:
+            command = (*command, "--include", ref)
+    else:
+        command = (*base, "--agent-id", agent_id, "--version", str(version))
     if dry_run:
         command = (*command, "--dry-run")
     try:
@@ -774,10 +777,12 @@ def _register(
     except subprocess.CalledProcessError as exc:
         print("[ERROR] agent package registration failed")
         raise SystemExit(exc.returncode or 1) from None
-    print(
-        f"[OK] agent package register agent_id={agent_id} version={version} "
-        f"environment={environment}"
+    target = (
+        f"manifest includes={','.join(includes) or '-'}"
+        if register_all
+        else f"agent_id={agent_id} version={version}"
     )
+    print(f"[OK] agent package register {target} environment={environment}")
 
 
 @dataclass(frozen=True)
@@ -1436,10 +1441,22 @@ def build_parser() -> argparse.ArgumentParser:
         "environment", choices=("development", "test", "production")
     )
     register.add_argument("--agent-id", default="memoir_agent", help="default memoir_agent")
-    register.add_argument(
+    # 单包 --version 与清单 --all 二选一且必选：不允许什么都不带而落到默认版本。
+    target = register.add_mutually_exclusive_group(required=True)
+    target.add_argument(
         "--version",
-        required=True,
         help="package version to register (e.g. 1.0.2); must be explicit",
+    )
+    target.add_argument(
+        "--all",
+        action="store_true",
+        help="register every package in app/agents/deploy_packages.yaml",
+    )
+    register.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="extra agent_id@x.y.z registered together with --all (repeatable)",
     )
     register.add_argument(
         "--dry-run", action="store_true", help="load and print without writing"
@@ -1467,8 +1484,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "prepare":
         _prepare(args.environment)
     elif args.command == "register":
+        if args.include and not args.all:
+            print("[ERROR] --include 只能与 --all 一起使用")
+            raise SystemExit(2)
         _register(
-            args.environment, args.agent_id, args.version, dry_run=args.dry_run
+            args.environment,
+            args.agent_id,
+            args.version,
+            dry_run=args.dry_run,
+            register_all=args.all,
+            includes=args.include,
         )
     elif args.command == "start":
         _start(args.environment)

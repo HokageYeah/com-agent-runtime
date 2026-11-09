@@ -436,6 +436,30 @@ def test_register_requires_an_explicit_package_version() -> None:
         build_parser().parse_args(("register", "development"))
 
 
+
+def test_register_all_mode_takes_includes_and_excludes_single_version() -> None:
+    """部署清单模式：--all 可带多个 --include；--all 与 --version 互斥。"""
+
+    args = build_parser().parse_args(
+        (
+            "register",
+            "production",
+            "--all",
+            "--include",
+            "memoir_agent@1.0.8",
+            "--include",
+            "soothe_agent@1.0.0",
+            "--dry-run",
+        )
+    )
+    assert args.all is True and args.version is None and args.dry_run is True
+    assert args.include == ["memoir_agent@1.0.8", "soothe_agent@1.0.0"]
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ("register", "production", "--all", "--version", "1.0.8")
+        )
+
+
 def test_launcher_loop_consumes_new_outbox_events_on_each_cycle(tmp_path: Path) -> None:
     commands: list[tuple[str, ...]] = []
     sleeps: list[float] = []

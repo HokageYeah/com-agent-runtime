@@ -1,0 +1,20 @@
+# 每次部署都必须注册进 agent_definitions 的 AgentPackage 清单（agent_id@version）。
+#
+# 消费方：`agent-runtime.sh register <env> --all`（Compose 的 register 一次性服务），
+# 由 app.scripts.register_agent_package 先预检整份清单、全部通过后再逐条幂等注册。
+# Compose 另把 AGENT_PACKAGE_VERSION 作为 --include memoir_agent@<版本> 追加进来，
+# 保留“改 env 回滚回忆录版本”的既有做法；与本清单重复的条目会去重。
+#
+# 维护规则：
+# - 业务端会创建 Run 的每个 agent_id@version 都要列在这里，换新环境也能一次注册齐；
+# - 新增 Agent / 升级业务端固定版本时同步本文件，并跑 tests/test_register_agent_package.py；
+# - 只列代码内受信可执行（app/agents/registry.py）且 status=active 的包；
+# - qa_agent 是新增 Agent 的参考实现，业务端没有调用，故不在部署清单中。
+packages:
+  # 回忆录：业务端 MEMOIR_AGENT_VERSION 默认新建 Run 使用（memory_runtime_adapter_service）
+  - memoir_agent@1.0.7
+  # 回忆录有声版：业务端 MEMORY_AUDIO_NEW_ARCHIVES_ENABLED 打开后新 Archive 使用；
+  # 开关打开时业务联通检查要求 1.0.7 与 1.0.8 同时已注册
+  - memoir_agent@1.0.8
+  # AI 帮哄：业务端 soothe_runtime_service 固定 agent_version=1.0.0
+  - soothe_agent@1.0.0

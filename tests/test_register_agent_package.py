@@ -134,3 +134,61 @@ def test_soothe_registration_dry_run_keeps_isolated_database_empty(tmp_path: Pat
             assert list(session.scalars(select(AgentDefinition))) == []
     finally:
         engine.dispose()
+
+
+def test_deploy_manifest_lists_every_business_package_and_all_pass_precheck() -> None:
+    """部署清单覆盖业务端会建 Run 的包，且每个都是可加载、受信可执行的 active 包。"""
+    refs = registration.load_deploy_manifest()
+    assert ("memoir_agent", "1.0.7") in refs
+    assert ("memoir_agent", "1.0.8") in refs
+    assert ("soothe_agent", "1.0.0") in refs
+    assert len(refs) == len(set(refs))
+    for agent_id, version in refs:
+        assert registration._precheck(agent_id, version), f"{agent_id}@{version}"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_register_all_registers_manifest_plus_include_once(
+    tmp_path: Path, monkeypatch, dry_run: bool
+) -> None:
+    url = f"sqlite:///{tmp_path / 'all-registration.db'}"
+    engine = create_engine(url)
+    AgentDefinition.__table__.create(engine)
+    monkeypatch.setattr(registration, "get_database_url", lambda: url)
+    try:
+        # include 与清单重复（1.0.8）时去重；再跑一次保持幂等。
+        for _ in range(2):
+            assert registration.register_all(["memoir_agent@1.0.8"], dry_run=dry_run) == 0
+        with Session(engine) as session:
+            rows = {(d.agent_id, d.version) for d in session.scalars(select(AgentDefinition))}
+        expected = set(registration.load_deploy_manifest())
+        assert rows == (set() if dry_run else expected)
+    finally:
+        engine.dispose()
+
+
+def test_register_all_precheck_failure_writes_nothing(tmp_path: Path, monkeypatch) -> None:
+    """任一包预检失败（这里是不存在的版本）时整体退出，清单里合法的包也不写入。"""
+    url = f"sqlite:///{tmp_path / 'all-precheck.db'}"
+    engine = create_engine(url)
+    AgentDefinition.__table__.create(engine)
+    monkeypatch.setattr(registration, "get_database_url", lambda: url)
+    try:
+        assert registration.register_all(["memoir_agent@9.9.9"], dry_run=False) == 1
+        with Session(engine) as session:
+            assert list(session.scalars(select(AgentDefinition))) == []
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("ref", ["memoir_agent", "memoir_agent@latest", "../x@1.0.0", "a@1.0"])
+def test_package_ref_must_be_agent_at_semver(ref: str) -> None:
+    with pytest.raises(ValueError, match="AGENT_PACKAGE_REF_INVALID"):
+        registration.parse_package_ref(ref)
+
+
+def test_empty_manifest_is_rejected(tmp_path: Path) -> None:
+    manifest = tmp_path / "deploy_packages.yaml"
+    manifest.write_text("packages: []\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="AGENT_DEPLOY_MANIFEST_INVALID"):
+        registration.load_deploy_manifest(manifest)

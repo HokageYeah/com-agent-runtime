@@ -283,10 +283,12 @@ MODEL_PROVIDER_API_KEYS_JSON={"memoir-private-v1":"<由 secret manager 注入的
 
 预期：doctor 不回显任何值，迁移成功且 Alembic 仅有一个 head。单机前台验收可使用 `./agent-runtime.sh start production`；容器或 Kubernetes 部署应把 API、Worker、Reconciler 分为独立 workload 并使用同一权威数据库与配置版本，Docker production 默认不启动 legacy launcher（应急启用方式见 [Docker 部署契约](docker/backend/DOCKER_DEPLOY.md)）。
 
-AgentPackage 不会由应用运行时自动选版本：手工部署时须显式执行下列命令；Docker Compose 部署则由 `register` 一次性服务对 `AGENT_PACKAGE_VERSION` 执行同样的 dry-run + 幂等注册，失败时不启动长期 workload：
+AgentPackage 不会由应用运行时自动选版本：手工部署时须显式执行下列命令；Docker Compose 部署则由 `register` 一次性服务对部署清单 [`app/agents/deploy_packages.yaml`](app/agents/deploy_packages.yaml)（加上 `AGENT_PACKAGE_VERSION` 对应的回忆录版本）执行同样的整份 dry-run + 幂等注册，任一包预检失败即不写库、不启动长期 workload：
 
 ```bash
-./agent-runtime.sh register production --agent-id memoir_agent --version <部署包版本>
+./agent-runtime.sh register production --all --include memoir_agent@<部署包版本> --dry-run
+./agent-runtime.sh register production --all --include memoir_agent@<部署包版本>
+# 单包补注册或排障仍可用：
 ./agent-runtime.sh register production --agent-id memoir_agent --version <部署包版本> --dry-run
 ```
 
